@@ -101,12 +101,36 @@ const TABLE_SQL = [
     alert_above DECIMAL(32,12) NULL,
     alert_below DECIMAL(32,12) NULL,
     alert_enabled TINYINT(1) NOT NULL DEFAULT 1,
+    current_price DECIMAL(32,12) NULL,
+    current_price_time DATETIME(3) NULL,
     last_alert_at DATETIME(3) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uk_watch_symbol (symbol),
     KEY idx_watch_enabled (alert_enabled, updated_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS hot_ma_signal_alert (
+    symbol VARCHAR(32) NOT NULL,
+    interval_code ENUM('15m','1h','4h','1d') NOT NULL,
+    alert_level ENUM('LEVEL1','LEVEL2') NOT NULL,
+    signal_time DATETIME(3) NOT NULL,
+    sent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (symbol, interval_code),
+    KEY idx_hot_ma_sent_at (sent_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS multi_cycle_history (
+    symbol VARCHAR(32) NOT NULL,
+    base_asset VARCHAR(32) NOT NULL,
+    category_label VARCHAR(80) NULL,
+    first_triggered_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    last_triggered_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    multi_match_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    intervals VARCHAR(64) NOT NULL,
+    best_alert_level ENUM('LEVEL1','LEVEL2') NOT NULL DEFAULT 'LEVEL2',
+    PRIMARY KEY (symbol),
+    KEY idx_multi_history_last (last_triggered_at),
+    KEY idx_multi_history_count (multi_match_count, last_triggered_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 ];
 
@@ -140,6 +164,7 @@ export async function ensureDatabase() {
   }
   await ensureTokenListPolicyColumn();
   await ensureTokenListActiveColumn();
+  await ensureWatchlistRealtimeColumns();
   await deactivateExcludedTokens();
 }
 
@@ -153,6 +178,17 @@ async function ensureTokenListActiveColumn() {
   const [columns] = await pool.query("SHOW COLUMNS FROM token_list LIKE 'is_active'");
   if (columns.length > 0) return;
   await pool.query("ALTER TABLE token_list ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER is_alpha");
+}
+
+async function ensureWatchlistRealtimeColumns() {
+  const [priceColumns] = await pool.query("SHOW COLUMNS FROM watchlist LIKE 'current_price'");
+  if (priceColumns.length === 0) {
+    await pool.query("ALTER TABLE watchlist ADD COLUMN current_price DECIMAL(32,12) NULL AFTER alert_enabled");
+  }
+  const [timeColumns] = await pool.query("SHOW COLUMNS FROM watchlist LIKE 'current_price_time'");
+  if (timeColumns.length === 0) {
+    await pool.query("ALTER TABLE watchlist ADD COLUMN current_price_time DATETIME(3) NULL AFTER current_price");
+  }
 }
 
 const EXCLUDED_BASE_ASSETS = [
@@ -690,6 +726,10 @@ function quotedList(values) {
   return values.map((item) => `'${item}'`).join(",");
 }
 
+function hotRankActiveSeconds() {
+  return Math.max(60, Math.floor(config.hotRank.activeMs / 1000));
+}
+
 export async function getSignalsPage({ categories, levels, intervals, page = 1, pageSize = 20 }) {
   const safeCategories = normalizeList(categories, SIGNAL_CATEGORIES);
   const safeLevels = normalizeList(levels, SIGNAL_LEVELS);
@@ -722,6 +762,9 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
           GROUP BY s2.symbol
         ) mp ON mp.symbol=s.symbol`
       : "LEFT JOIN (SELECT NULL AS symbol, 0 AS multiMatchCount, 3 AS multiBestLevelRank, 0 AS multiBestWeight, NULL AS multiLatestUpdatedAt) mp ON mp.symbol=s.symbol";
+  const hotJoinSql = `LEFT JOIN hot_rank_seen h
+    ON (h.symbol=s.symbol OR h.base_asset=t.base_asset)
+   AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)`;
 
   const whereSql = `s.category_type IN (${quotedList(safeCategories)})
     AND s.alert_level IN (${quotedList(safeLevels)})
@@ -733,7 +776,10 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
      ${multiJoinSql}
+     ${hotJoinSql}
      WHERE ${whereSql}`
+    ,
+    { multiRequired, hotRankActiveSeconds: hotRankActiveSeconds() }
   );
 
   const [rows] = await getPool().query(
@@ -742,12 +788,16 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
       s.current_price AS currentPrice, s.proximity_pct AS proximityPct, s.signal_weight AS signalWeight,
       s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt,
       COALESCE(mp.multiMatchCount, 0) AS multiMatchCount,
-      :multiRequired AS multiMatchRequired
+      :multiRequired AS multiMatchRequired,
+      IF(h.symbol IS NULL, 0, 1) AS hotRankHit,
+      h.last_seen_rank AS hotRank
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
      ${multiJoinSql}
+     ${hotJoinSql}
      WHERE ${whereSql}
      ORDER BY
+      IF(h.symbol IS NOT NULL AND s.alert_level IN ('LEVEL1','LEVEL2'), 0, 1),
       IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiBestLevelRank, 3), CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 WHEN 'NONE' THEN 2 ELSE 3 END),
       IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, 0, 1),
       IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiMatchCount, 0), 0) DESC,
@@ -759,7 +809,7 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
       s.signal_weight DESC,
       s.updated_at DESC
      LIMIT :pageSize OFFSET :offset`,
-    { pageSize: safePageSize, offset, multiRequired }
+    { pageSize: safePageSize, offset, multiRequired, hotRankActiveSeconds: hotRankActiveSeconds() }
   );
 
   return {
@@ -768,6 +818,239 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
     page: safePage,
     pageSize: safePageSize
   };
+}
+
+export async function getMultiCycleSignalsPage({ categories, levels, intervals, page = 1, pageSize = 4 }) {
+  const safeCategories = normalizeList(categories, SIGNAL_CATEGORIES);
+  const safeLevels = normalizeList(levels, SIGNAL_LEVELS).filter((level) => ["LEVEL1", "LEVEL2"].includes(level));
+  const safeIntervals = normalizeList(intervals, SIGNAL_INTERVALS);
+  const safePageSize = Math.max(1, Math.min(10, Number(pageSize) || 4));
+  const safePage = Math.max(1, Number(page) || 1);
+  const offset = (safePage - 1) * safePageSize;
+  const multiRequired = safeIntervals.length > 1 && safeLevels.length > 0 ? Math.min(3, safeIntervals.length) : 0;
+
+  if (safeCategories.length === 0 || safeLevels.length === 0 || safeIntervals.length === 0 || multiRequired < 2) {
+    return { groups: [], total: 0, page: safePage, pageSize: safePageSize, multiMatchRequired: multiRequired };
+  }
+
+  const groupWhereSql = `s.category_type IN (${quotedList(safeCategories)})
+    AND s.alert_level IN (${quotedList(safeLevels)})
+    AND s.interval_code IN (${quotedList(safeIntervals)})
+    AND t.is_active=1`;
+
+  const groupSql = `
+    SELECT
+      s.symbol,
+      COUNT(DISTINCT s.interval_code) AS multiMatchCount,
+      MIN(CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 ELSE 3 END) AS bestLevelRank,
+      MAX(s.signal_weight) AS bestWeight,
+      MAX(s.updated_at) AS latestUpdatedAt
+    FROM signal_result s
+    JOIN token_list t ON t.id=s.token_id
+    WHERE ${groupWhereSql}
+    GROUP BY s.symbol
+    HAVING COUNT(DISTINCT s.interval_code) >= :multiRequired`;
+
+  const [countRows] = await getPool().query(`SELECT COUNT(*) AS total FROM (${groupSql}) m`, { multiRequired });
+  const [symbolRows] = await getPool().query(
+    `${groupSql}
+     ORDER BY bestLevelRank, multiMatchCount DESC, bestWeight DESC, latestUpdatedAt DESC, symbol
+     LIMIT :pageSize OFFSET :offset`,
+    { multiRequired, pageSize: safePageSize, offset }
+  );
+
+  const symbols = symbolRows.map((row) => String(row.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "")).filter(Boolean);
+  if (!symbols.length) {
+    return {
+      groups: [],
+      total: Number(countRows[0]?.total ?? 0),
+      page: safePage,
+      pageSize: safePageSize,
+      multiMatchRequired: multiRequired
+    };
+  }
+
+  const [rows] = await getPool().query(
+    `SELECT s.symbol, s.category_type AS categoryType, t.category_label AS categoryLabel,
+      s.interval_code AS intervalCode, s.alert_level AS alertLevel, s.ma100, s.ma200,
+      s.current_price AS currentPrice, s.proximity_pct AS proximityPct, s.signal_weight AS signalWeight,
+      s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt
+     FROM signal_result s
+     JOIN token_list t ON t.id=s.token_id
+     WHERE s.symbol IN (${quotedList(symbols)})
+       AND ${groupWhereSql}
+     ORDER BY
+      CASE s.interval_code WHEN '15m' THEN 0 WHEN '1h' THEN 1 WHEN '4h' THEN 2 WHEN '1d' THEN 3 ELSE 4 END,
+      CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 ELSE 3 END,
+      s.signal_weight DESC`
+  );
+
+  const rowsBySymbol = new Map();
+  for (const row of rows) {
+    if (!rowsBySymbol.has(row.symbol)) rowsBySymbol.set(row.symbol, []);
+    rowsBySymbol.get(row.symbol).push(row);
+  }
+
+  return {
+    groups: symbolRows.map((row) => ({
+      symbol: row.symbol,
+      multiMatchCount: Number(row.multiMatchCount ?? 0),
+      multiMatchRequired: multiRequired,
+      rows: rowsBySymbol.get(row.symbol) ?? []
+    })),
+    total: Number(countRows[0]?.total ?? 0),
+    page: safePage,
+    pageSize: safePageSize,
+    multiMatchRequired: multiRequired
+  };
+}
+
+export async function getHotMaSignalsPage({ categories = "A,B", levels = "LEVEL1,LEVEL2", intervals = "15m,1h,4h,1d", page = 1, pageSize = 6 } = {}) {
+  const safeCategories = normalizeList(categories, SIGNAL_CATEGORIES);
+  const safeLevels = normalizeList(levels, SIGNAL_LEVELS).filter((level) => ["LEVEL1", "LEVEL2"].includes(level));
+  const safeIntervals = normalizeList(intervals, SIGNAL_INTERVALS);
+  const safePageSize = Math.max(1, Math.min(20, Number(pageSize) || 6));
+  const safePage = Math.max(1, Number(page) || 1);
+  const offset = (safePage - 1) * safePageSize;
+
+  if (safeCategories.length === 0 || safeLevels.length === 0 || safeIntervals.length === 0) {
+    return { signals: [], total: 0, page: safePage, pageSize: safePageSize };
+  }
+
+  const whereSql = `s.category_type IN (${quotedList(safeCategories)})
+    AND s.alert_level IN (${quotedList(safeLevels)})
+    AND s.interval_code IN (${quotedList(safeIntervals)})
+    AND t.is_active=1
+    AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)`;
+
+  const params = {
+    hotRankActiveSeconds: hotRankActiveSeconds(),
+    pageSize: safePageSize,
+    offset
+  };
+  const [countRows] = await getPool().query(
+    `SELECT COUNT(*) AS total
+     FROM signal_result s
+     JOIN token_list t ON t.id=s.token_id
+     JOIN hot_rank_seen h ON h.symbol=s.symbol OR h.base_asset=t.base_asset
+     WHERE ${whereSql}`,
+    params
+  );
+  const [rows] = await getPool().query(
+    `SELECT s.symbol, s.category_type AS categoryType, t.category_label AS categoryLabel,
+      s.interval_code AS intervalCode, s.alert_level AS alertLevel, s.ma100, s.ma200,
+      s.current_price AS currentPrice, s.proximity_pct AS proximityPct, s.signal_weight AS signalWeight,
+      s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt,
+      h.last_seen_rank AS hotRank, h.last_seen_at AS hotRankLastSeenAt
+     FROM signal_result s
+     JOIN token_list t ON t.id=s.token_id
+     JOIN hot_rank_seen h ON h.symbol=s.symbol OR h.base_asset=t.base_asset
+     WHERE ${whereSql}
+     ORDER BY
+      CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 ELSE 2 END,
+      h.last_seen_rank ASC,
+      s.signal_weight DESC,
+      s.updated_at DESC
+     LIMIT :pageSize OFFSET :offset`,
+    params
+  );
+  return {
+    signals: rows,
+    total: Number(countRows[0]?.total ?? 0),
+    page: safePage,
+    pageSize: safePageSize
+  };
+}
+
+export async function isActiveHotRankSymbol(symbol) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  if (!safeSymbol) return false;
+  const baseAsset = baseAssetFromSymbol(safeSymbol);
+  const [rows] = await getPool().query(
+    `SELECT 1 AS ok
+     FROM hot_rank_seen
+     WHERE (symbol=:symbol OR base_asset=:baseAsset)
+       AND last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)
+     LIMIT 1`,
+    { symbol: safeSymbol, baseAsset, hotRankActiveSeconds: hotRankActiveSeconds() }
+  );
+  return rows.length > 0;
+}
+
+export async function selectHotMaSignalAlert(symbol, intervalCode) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  if (!safeSymbol) return null;
+  const [rows] = await getPool().query(
+    `SELECT symbol, interval_code AS intervalCode, alert_level AS alertLevel, signal_time AS signalTime, sent_at AS sentAt
+     FROM hot_ma_signal_alert
+     WHERE symbol=:symbol AND interval_code=:intervalCode
+     LIMIT 1`,
+    { symbol: safeSymbol, intervalCode }
+  );
+  return rows[0] ?? null;
+}
+
+export async function markHotMaSignalAlertSent(symbol, intervalCode, signal) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  if (!safeSymbol || !["LEVEL1", "LEVEL2"].includes(signal?.alertLevel)) return;
+  const signalTime = Number(signal.signalTime ?? Date.now());
+  await getPool().query(
+    `INSERT INTO hot_ma_signal_alert (symbol, interval_code, alert_level, signal_time, sent_at)
+     VALUES (:symbol, :intervalCode, :alertLevel, FROM_UNIXTIME(:signalTime / 1000), NOW(3))
+     ON DUPLICATE KEY UPDATE
+      alert_level=VALUES(alert_level),
+      signal_time=VALUES(signal_time),
+      sent_at=NOW(3)`,
+    { symbol: safeSymbol, intervalCode, alertLevel: signal.alertLevel, signalTime }
+  );
+}
+
+export async function recordMultiCycleHistory(token, signals, required = 2) {
+  const hits = (signals ?? [])
+    .filter(({ signal }) => ["LEVEL1", "LEVEL2"].includes(signal.alertLevel))
+    .sort((a, b) => SIGNAL_INTERVALS_ORDER.indexOf(a.intervalCode) - SIGNAL_INTERVALS_ORDER.indexOf(b.intervalCode));
+  if (hits.length < required) return false;
+  const bestAlertLevel = hits.some(({ signal }) => signal.alertLevel === "LEVEL1") ? "LEVEL1" : "LEVEL2";
+  const intervals = hits.map(({ intervalCode }) => intervalCode).join(",");
+  await getPool().query(
+    `INSERT INTO multi_cycle_history
+      (symbol, base_asset, category_label, multi_match_count, intervals, best_alert_level)
+     VALUES (:symbol, :baseAsset, :categoryLabel, :multiMatchCount, :intervals, :bestAlertLevel)
+     ON DUPLICATE KEY UPDATE
+      category_label=VALUES(category_label),
+      last_triggered_at=NOW(3),
+      multi_match_count=VALUES(multi_match_count),
+      intervals=VALUES(intervals),
+      best_alert_level=VALUES(best_alert_level)`,
+    {
+      symbol: sanitizeDbSymbol(token.symbol),
+      baseAsset: baseAssetFromSymbol(token.symbol),
+      categoryLabel: String(token.category_label ?? token.categoryLabel ?? "").slice(0, 80),
+      multiMatchCount: hits.length,
+      intervals,
+      bestAlertLevel
+    }
+  );
+  return true;
+}
+
+const SIGNAL_INTERVALS_ORDER = ["15m", "1h", "4h", "1d"];
+
+export async function listMultiCycleHistory({ limit = 50 } = {}) {
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+  const [rows] = await getPool().query(
+    `SELECT symbol, base_asset AS baseAsset, category_label AS categoryLabel,
+      first_triggered_at AS firstTriggeredAt, last_triggered_at AS lastTriggeredAt,
+      multi_match_count AS multiMatchCount, intervals, best_alert_level AS bestAlertLevel
+     FROM multi_cycle_history
+     ORDER BY last_triggered_at DESC, multi_match_count DESC, symbol
+     LIMIT :limit`,
+    { limit: safeLimit }
+  );
+  return rows.map((row) => ({
+    ...row,
+    multiMatchCount: Number(row.multiMatchCount ?? 0)
+  }));
 }
 
 function rollingAverage(rows, index, size) {
@@ -875,22 +1158,24 @@ export async function listWatchlist() {
     `SELECT w.id, w.symbol, w.base_asset AS baseAsset, w.note,
       w.alert_above AS alertAbove, w.alert_below AS alertBelow,
       w.alert_enabled AS alertEnabled, w.last_alert_at AS lastAlertAt,
+      w.current_price AS realtimePrice, UNIX_TIMESTAMP(w.current_price_time) * 1000 AS realtimePriceTime,
       w.created_at AS createdAt, w.updated_at AS updatedAt,
       t.category_label AS categoryLabel,
-      COALESCE(
-        (SELECT k.interval_code FROM kline_cache k WHERE k.symbol=w.symbol AND k.interval_code='15m' ORDER BY k.open_time DESC LIMIT 1),
-        (SELECT k.interval_code FROM kline_cache k WHERE k.symbol=w.symbol ORDER BY k.open_time DESC LIMIT 1)
-      ) AS latestInterval,
-      COALESCE(
-        (SELECT k.close_price FROM kline_cache k WHERE k.symbol=w.symbol AND k.interval_code='15m' ORDER BY k.open_time DESC LIMIT 1),
-        (SELECT k.close_price FROM kline_cache k WHERE k.symbol=w.symbol ORDER BY k.open_time DESC LIMIT 1)
-      ) AS currentPrice,
-      COALESCE(
-        (SELECT k.close_time FROM kline_cache k WHERE k.symbol=w.symbol AND k.interval_code='15m' ORDER BY k.open_time DESC LIMIT 1),
-        (SELECT k.close_time FROM kline_cache k WHERE k.symbol=w.symbol ORDER BY k.open_time DESC LIMIT 1)
-      ) AS currentCloseTime
+      latest.latestInterval,
+      COALESCE(w.current_price, latest.currentPrice) AS currentPrice,
+      COALESCE(UNIX_TIMESTAMP(w.current_price_time) * 1000, latest.currentCloseTime) AS currentCloseTime
      FROM watchlist w
      LEFT JOIN token_list t ON t.symbol=w.symbol
+     LEFT JOIN (
+      SELECT
+        k.symbol,
+        SUBSTRING_INDEX(GROUP_CONCAT(k.interval_code ORDER BY (k.interval_code='15m') DESC, k.open_time DESC), ',', 1) AS latestInterval,
+        SUBSTRING_INDEX(GROUP_CONCAT(k.close_price ORDER BY (k.interval_code='15m') DESC, k.open_time DESC), ',', 1) AS currentPrice,
+        SUBSTRING_INDEX(GROUP_CONCAT(k.close_time ORDER BY (k.interval_code='15m') DESC, k.open_time DESC), ',', 1) AS currentCloseTime
+      FROM kline_cache k
+      JOIN watchlist ww ON ww.symbol=k.symbol
+      GROUP BY k.symbol
+     ) latest ON latest.symbol=w.symbol
      ORDER BY w.updated_at DESC`
   );
   return rows.map((row) => ({
@@ -898,6 +1183,9 @@ export async function listWatchlist() {
     alertEnabled: Boolean(row.alertEnabled),
     alertAbove: row.alertAbove === null || row.alertAbove === undefined ? null : Number(row.alertAbove),
     alertBelow: row.alertBelow === null || row.alertBelow === undefined ? null : Number(row.alertBelow),
+    realtimePrice: row.realtimePrice === null || row.realtimePrice === undefined ? null : Number(row.realtimePrice),
+    realtimePriceTime:
+      row.realtimePriceTime === null || row.realtimePriceTime === undefined ? null : Number(row.realtimePriceTime),
     currentPrice: row.currentPrice === null || row.currentPrice === undefined ? null : Number(row.currentPrice),
     currentCloseTime:
       row.currentCloseTime === null || row.currentCloseTime === undefined ? null : Number(row.currentCloseTime)
@@ -947,6 +1235,21 @@ export async function deleteWatchlistItem(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return 0;
   const [result] = await getPool().query("DELETE FROM watchlist WHERE symbol=:symbol", { symbol: safeSymbol });
+  return result.affectedRows ?? 0;
+}
+
+export async function updateWatchlistRealtimePrice(symbol, price, eventTime = Date.now()) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  const safePrice = Number(price);
+  const safeEventTime = Number(eventTime);
+  if (!safeSymbol || !Number.isFinite(safePrice)) return 0;
+  const priceTime = new Date(Number.isFinite(safeEventTime) ? safeEventTime : Date.now());
+  const [result] = await getPool().query(
+    `UPDATE watchlist
+     SET current_price=:price, current_price_time=:priceTime, updated_at=updated_at
+     WHERE symbol=:symbol`,
+    { symbol: safeSymbol, price: safePrice, priceTime }
+  );
   return result.affectedRows ?? 0;
 }
 

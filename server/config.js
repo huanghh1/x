@@ -98,7 +98,14 @@ export const config = {
     tokens: twitterTokenPool,
     heatEnabled: boolEnv("TWITTER_HEAT_ENABLED", Boolean(process.env.OPENNEWS_TOKENS || process.env.TWITTER_TOKENS || process.env.TWITTER_TOKEN || process.env.OPENNEWS_TOKEN)),
     tokenCooldownMs: numberEnv("TWITTER_TOKEN_COOLDOWN_MS", 10 * 60 * 1000),
+    heatCacheMs: numberEnv("TWITTER_HEAT_CACHE_MS", 30 * 60 * 1000),
+    failureCacheMs: numberEnv("TWITTER_HEAT_FAILURE_CACHE_MS", 2 * 60 * 1000),
+    maxFreshPerRank: numberEnv("TWITTER_HEAT_MAX_FRESH_PER_RANK", 8),
+    concurrentRequests: numberEnv("TWITTER_HEAT_CONCURRENT_REQUESTS", 2),
     timeoutMs: numberEnv("TWITTER_REQUEST_TIMEOUT_MS", 12000)
+  },
+  hotRank: {
+    activeMs: numberEnv("HOT_RANK_ACTIVE_MS", Math.max(30 * 60 * 1000, numberEnv("BINANCE_HOT_RANK_CACHE_MS", 5 * 60 * 1000) * 3))
   },
   telegram: {
     enabled: boolEnv("TELEGRAM_ALERTS_ENABLED", false),

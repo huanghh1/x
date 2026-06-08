@@ -6,7 +6,10 @@ import {
   countActiveTokens,
   deleteWatchlistItem,
   ensureDatabase,
+  findKlineGap,
   getKlines,
+  getHotMaSignalsPage,
+  listMultiCycleHistory,
   getOverview,
   getSignals,
   getSignalsPage,
@@ -22,13 +25,19 @@ import {
   upsertSignal,
   upsertWatchlistItem
 } from "./db.js";
-import { fetchRecentKlines } from "./binance.js";
+import { fetchKlinesPaged, fetchRecentKlines } from "./binance.js";
 import { getCrawlerState, initializeTokenUniverse, startCrawler, stopCrawler } from "./crawler.js";
 import { getHotRank } from "./hotRank.js";
 import { calculateSignal, INTERVALS } from "./ma.js";
 import { getMaintenanceRuntimeState, startMaintenanceScheduler } from "./maintenance.js";
 import { sendHotRankTelegram, sendWatchlistTelegram, telegramState } from "./telegram.js";
 import { getTelegramBotState, startTelegramBot } from "./telegramBot.js";
+import {
+  getWatchlistRealtimeState,
+  refreshWatchlistRealtime,
+  startWatchlistRealtime,
+  watchRealtimeEvents
+} from "./watchRealtime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +54,7 @@ app.get("/api/health", async (_request, response) => {
       database: "connected",
       crawler: getCrawlerState(),
       maintenance: getMaintenanceRuntimeState(),
+      watchRealtime: getWatchlistRealtimeState(),
       telegram: { ...telegramState(), bot: getTelegramBotState() },
       now: new Date().toISOString()
     });
@@ -84,6 +94,7 @@ app.get("/api/overview", async (_request, response) => {
     ok: true,
     overview: await getOverview(),
     crawler: getCrawlerState(),
+    watchRealtime: getWatchlistRealtimeState(),
     telegram: { ...telegramState(), bot: getTelegramBotState() },
     database: "connected"
   });
@@ -104,6 +115,21 @@ app.get("/api/signals", async (request, response) => {
 
   const category = request.query.category === "B" ? "B" : "A";
   response.json({ ok: true, category, signals: await getSignals(category) });
+});
+
+app.get("/api/hot-ma-signals", async (request, response) => {
+  const result = await getHotMaSignalsPage({
+    categories: request.query.categories ?? "A,B",
+    levels: request.query.levels ?? "LEVEL1,LEVEL2",
+    intervals: request.query.intervals ?? "15m,1h,4h,1d",
+    page: request.query.page,
+    pageSize: request.query.pageSize
+  });
+  response.json({ ok: true, ...result });
+});
+
+app.get("/api/multi-history", async (request, response) => {
+  response.json({ ok: true, items: await listMultiCycleHistory({ limit: request.query.limit }) });
 });
 
 app.get("/api/klines", async (request, response) => {
@@ -149,13 +175,43 @@ app.get("/api/hot-rank", async (request, response) => {
 });
 
 app.get("/api/watchlist", async (_request, response) => {
-  await refreshWatchlistMarketData();
   response.json({ ok: true, items: await listWatchlist() });
+});
+
+app.get("/api/watchlist/events", async (request, response) => {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  response.write(`event: ready\ndata: ${JSON.stringify(getWatchlistRealtimeState())}\n\n`);
+
+  const send = (payload) => {
+    response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+  const heartbeat = setInterval(() => {
+    response.write(`event: ping\ndata: ${Date.now()}\n\n`);
+  }, 25_000);
+
+  watchRealtimeEvents.on("price", send);
+  watchRealtimeEvents.on("kline", send);
+  request.on("close", () => {
+    clearInterval(heartbeat);
+    watchRealtimeEvents.off("price", send);
+    watchRealtimeEvents.off("kline", send);
+  });
 });
 
 app.post("/api/watchlist", async (request, response) => {
   try {
     const items = await upsertWatchlistItem(request.body ?? {});
+    refreshWatchlistMarketData({ force: true, full: true }).catch((error) => {
+      console.error("watchlist post-refresh failed", error);
+    });
+    refreshWatchlistRealtime().catch((error) => {
+      console.error("watchlist realtime refresh failed", error);
+    });
     response.json({ ok: true, items });
   } catch (error) {
     response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -163,7 +219,11 @@ app.post("/api/watchlist", async (request, response) => {
 });
 
 app.delete("/api/watchlist/:symbol", async (request, response) => {
-  response.json({ ok: true, deleted: await deleteWatchlistItem(request.params.symbol) });
+  const deleted = await deleteWatchlistItem(request.params.symbol);
+  refreshWatchlistRealtime().catch((error) => {
+    console.error("watchlist realtime refresh failed", error);
+  });
+  response.json({ ok: true, deleted });
 });
 
 function sanitizeSymbol(value) {
@@ -304,24 +364,84 @@ app.use((_request, response) => {
 await ensureDatabase();
 await startMaintenanceScheduler();
 startTelegramBot();
+startWatchlistRealtime({ alertSender: sendWatchlistTelegram }).catch((error) => {
+  console.error("watchlist realtime start failed", error);
+});
 
 let watchlistRefreshing = false;
-async function refreshWatchlistMarketData() {
+let lastWatchlistFastRefreshAt = 0;
+let lastWatchlistFullRefreshAt = 0;
+
+function intervalMs(intervalCode) {
+  return {
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000
+  }[intervalCode];
+}
+
+async function repairWatchlistKlineGaps(token, intervals) {
+  const repaired = [];
+  for (const intervalCode of intervals) {
+    const ms = intervalMs(intervalCode);
+    if (!ms) continue;
+
+    for (let pass = 0; pass < 3; pass += 1) {
+      const gap = await findKlineGap(token.symbol, intervalCode, ms, 0, Date.now());
+      if (!gap) break;
+
+      let fetchedRows = 0;
+      await fetchKlinesPaged({
+        symbol: token.symbol,
+        intervalCode,
+        startTime: gap.startTime,
+        endTime: gap.endTime,
+        onPage: async (page) => {
+          fetchedRows += page.length;
+          await upsertKlinePage(token, intervalCode, page);
+        },
+        shouldContinue: () => true
+      });
+
+      repaired.push({
+        intervalCode,
+        fetchedRows,
+        startTime: gap.startTime,
+        endTime: gap.endTime
+      });
+      if (fetchedRows === 0) break;
+    }
+  }
+
+  if (repaired.length > 0) {
+    console.log("watchlist kline gaps repaired", token.symbol, repaired);
+  }
+}
+
+async function refreshWatchlistMarketData({ force = false, full = false } = {}) {
   if (watchlistRefreshing) return;
+  const now = Date.now();
+  if (!force && now - lastWatchlistFastRefreshAt < 15_000) return;
   watchlistRefreshing = true;
   try {
     const tokens = await listWatchlistTokens();
+    const shouldFullRefresh = full || now - lastWatchlistFullRefreshAt >= 60_000;
+    const intervals = shouldFullRefresh ? INTERVALS : ["15m"];
     for (const token of tokens) {
-      for (const intervalCode of INTERVALS) {
-        const klines = await fetchRecentKlines({ symbol: token.symbol, intervalCode, limit: 3 });
+      for (const intervalCode of intervals) {
+        const klines = await fetchRecentKlines({ symbol: token.symbol, intervalCode, limit: 2 });
         if (klines.length > 0) await upsertKlinePage(token, intervalCode, klines);
       }
+      if (shouldFullRefresh) await repairWatchlistKlineGaps(token, intervals);
       await refreshTokenFetchState(token.id);
-      for (const intervalCode of INTERVALS) {
+      for (const intervalCode of intervals) {
         const closes = await selectClosePrices(token.symbol, intervalCode);
         await upsertSignal(token, calculateSignal({ intervalCode, closes }));
       }
     }
+    lastWatchlistFastRefreshAt = Date.now();
+    if (shouldFullRefresh) lastWatchlistFullRefreshAt = lastWatchlistFastRefreshAt;
   } catch (error) {
     console.error("watchlist market refresh failed", error);
   } finally {

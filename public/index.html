@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>币安 MA100/MA200 二级均线监控</title>
-    <link rel="stylesheet" href="/styles.css?v=20260608-5" />
+    <title>币安二级信号监控台</title>
+    <link rel="stylesheet" href="/styles.css?v=20260608-8" />
   </head>
   <body>
     <div class="shell">
       <header class="site-header">
         <nav class="nav">
-          <a class="brand" href="#signalsPage">ma.monitor<span>.</span></a>
+          <a class="brand" href="#signalsPage">signal.monitor<span>.</span></a>
           <div class="nav-actions">
             <a class="nav-tab active" href="#signalsPage" data-nav-page="signals">均线信号</a>
             <a class="nav-tab" href="#heatPage" data-nav-page="heat">热度排行</a>
@@ -21,8 +21,8 @@
 
         <section id="top" class="hero">
           <p class="eyebrow">◇ 公开研究，不构成投资建议</p>
-          <h1>币安二级均线捕捉器</h1>
-          <p class="lead">MA100/MA200、15m/1h/4h/1d 和信号状态集中观察。只记录可核验数据，不替任何人下判断。</p>
+          <h1>币安二级信号监控台</h1>
+          <p class="lead">均线信号、热度排行、关注池和多周期状态集中观察。只记录可核验数据，不替任何人下判断。</p>
         </section>
 
         <div class="pool-switch" aria-label="signal pool navigation">
@@ -39,7 +39,7 @@
           </nav>
         </div>
 
-        <div class="notice">公开测试提醒：这里只做 Binance 公开 K 线与均线位置观察，不构成投资建议。数据可能延迟、缺失或误判，请自行复核。</div>
+        <div class="notice">公开测试提醒：这里只做 Binance 公开数据、热度与信号状态观察，不构成投资建议。数据可能延迟、缺失或误判，请自行复核。</div>
       </header>
 
       <main>
@@ -144,6 +144,18 @@
                   <button id="nextPageBtn" class="ghost-button" type="button">下一页</button>
                 </div>
               </div>
+
+              <section class="multi-history-panel" aria-labelledby="multiHistoryTitle">
+                <div class="section-head compact">
+                  <div>
+                    <h3 id="multiHistoryTitle">多周期历史记录</h3>
+                    <p>记录曾经出现过多个周期触发的代币，单个代币只保留一条历史。</p>
+                  </div>
+                </div>
+                <div class="multi-history-list" id="multiHistoryRows">
+                  <div class="heat-empty">等待刷新</div>
+                </div>
+              </section>
             </section>
         </section>
 
@@ -174,6 +186,6 @@
         <span>缓存说明：点击交易对可展开本地数据库 K 线、MA100/MA200 与基础画线工具。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260608-5" type="module"></script>
+    <script src="/app.js?v=20260608-8" type="module"></script>
   </body>
 </html>

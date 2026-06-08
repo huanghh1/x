@@ -36,12 +36,35 @@ function signalLinks(token) {
   const searchTerm = tokenSearchTerm(token);
   const twitterQuery = `$${searchTerm}`;
   const encodedSearch = encodeURIComponent(twitterQuery);
+  const encodedSquareSearch = encodeURIComponent(searchTerm);
 
   return {
     searchTerm,
     twitterQuery,
     twitter: `https://mobile.twitter.com/search?q=${encodedSearch}&src=typed_query&f=live`,
-    binanceSquare: `https://www.binance.com/en/square/search?keyword=${encodedSearch}`
+    binanceSquare: `https://www.binance.com/en/square/search?keyword=${encodedSquareSearch}`
+  };
+}
+
+function signalActionButtons() {
+  return [
+    { text: "热度+均线信号", callback_data: "hotma:1" },
+    { text: "均线信号", callback_data: "signals" },
+    { text: "热度排行", callback_data: "heat" }
+  ];
+}
+
+function signalReplyMarkup(token) {
+  const links = signalLinks(token);
+  return {
+    inline_keyboard: [
+      [
+        { text: "复制代币", copy_text: { text: token.symbol } },
+        { text: "推特", url: links.twitter },
+        { text: "币安广场", url: links.binanceSquare }
+      ],
+      signalActionButtons()
+    ]
   };
 }
 
@@ -94,14 +117,33 @@ export async function sendSignalTelegram(token, signal, context = {}) {
     "提示：仅公开数据观察，不构成投资建议。"
   ].filter(Boolean).join("\n");
 
-  const result = await postTelegram(text, {
-    inline_keyboard: [
-      [
-        { text: "推特", url: links.twitter },
-        { text: "币安广场", url: links.binanceSquare }
-      ]
-    ]
-  });
+  const result = await postTelegram(text, signalReplyMarkup(token));
+  return { skipped: false, result };
+}
+
+export async function sendHotMaSignalTelegram(token, signal, context = {}) {
+  if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
+  if (!config.telegram.botToken || !config.telegram.chatId) return { skipped: true, reason: "Telegram missing config" };
+  if (!["LEVEL1", "LEVEL2"].includes(signal.alertLevel)) return { skipped: true, reason: "Not an MA alert" };
+
+  const links = signalLinks(token);
+  const multiCycleCount = Number(context.multiCycleCount ?? 0);
+  const multiCycleIntervals = Array.isArray(context.multiCycleIntervals) ? context.multiCycleIntervals : [];
+  const text = [
+    `<b>🔥🔥🔥 [最高等级 · 热度+均线${signal.alertLevel === "LEVEL1" ? "一级警报" : "二级预警"}]</b>`,
+    `交易对：<b>${escapeHtml(token.symbol)}</b> · ${escapeHtml(token.category_label)}`,
+    `热度确认：该代币当前在综合热度排行内`,
+    multiCycleCount >= 2 ? `多周期：<b>${multiCycleCount} 个周期触发</b>（${escapeHtml(multiCycleIntervals.join(" / "))}）` : null,
+    `周期：${escapeHtml(signal.intervalCode)}`,
+    `现价：${escapeHtml(signal.currentPrice)}`,
+    `MA100：${escapeHtml(signal.ma100)} / MA200：${escapeHtml(signal.ma200)}`,
+    `状态：${escapeHtml(signal.signalStatus)}`,
+    `说明：${escapeHtml(signal.note)}`,
+    `推特搜索：${escapeHtml(links.twitterQuery)}`,
+    "提示：热度+均线共振优先级高于普通均线和多周期列表，不构成投资建议。"
+  ].filter(Boolean).join("\n");
+
+  const result = await postTelegram(text, signalReplyMarkup(token));
   return { skipped: false, result };
 }
 
@@ -113,7 +155,7 @@ export async function sendHotRankTelegram(tokens) {
 
   const lines = [
     "<b>🔥 [热度排行新上榜]</b>",
-    "来源：币安广场热度 + 推特热度预留融合",
+    "来源：币安广场热度 + 推特热度融合",
     ...fresh.map((token) => {
       const links = signalLinks(token);
       return `#${escapeHtml(token.rank ?? "--")} <b>${escapeHtml(token.symbol)}</b> · ${escapeHtml(token.chainLabel ?? "--")} · 搜索 ${escapeHtml(links.twitterQuery)}`;
@@ -122,22 +164,13 @@ export async function sendHotRankTelegram(tokens) {
   ];
 
   const first = fresh[0];
-  const links = signalLinks(first);
-  const result = await postTelegram(lines.join("\n"), {
-    inline_keyboard: [
-      [
-        { text: "推特", url: links.twitter },
-        { text: "币安广场", url: links.binanceSquare }
-      ]
-    ]
-  });
+  const result = await postTelegram(lines.join("\n"), signalReplyMarkup(first));
   return { skipped: false, result };
 }
 
 export async function sendWatchlistTelegram(item, reason) {
   if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
   if (!config.telegram.botToken || !config.telegram.chatId) return { skipped: true, reason: "Telegram missing config" };
-  const links = signalLinks(item);
   const text = [
     "<b>🎯 [关注池价格警报]</b>",
     `交易对：<b>${escapeHtml(item.symbol)}</b>`,
@@ -147,14 +180,7 @@ export async function sendWatchlistTelegram(item, reason) {
     "提示：这是关注池自定义价格提醒，不是全市场均线信号。"
   ].filter(Boolean).join("\n");
 
-  const result = await postTelegram(text, {
-    inline_keyboard: [
-      [
-        { text: "推特", url: links.twitter },
-        { text: "币安广场", url: links.binanceSquare }
-      ]
-    ]
-  });
+  const result = await postTelegram(text, signalReplyMarkup(item));
   return { skipped: false, result };
 }
 

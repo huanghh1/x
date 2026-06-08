@@ -19,6 +19,7 @@ const state = {
   expandedKey: null,
   chartCache: new Map(),
   chartState: new Map(),
+  multiHistory: [],
   currentView: "signals",
   watchlist: [],
   watchLoaded: false,
@@ -31,8 +32,16 @@ const state = {
   hotRank: [],
   hotRankSource: "",
   hotRankFetchedAt: null,
+  hotRankPartial: false,
+  hotRankStale: false,
+  hotRankErrors: [],
   hotRankLoading: false,
   hotRankError: "",
+  watchRealtimeSocket: null,
+  watchRealtimeSource: null,
+  watchRealtimeSignature: "",
+  watchRealtimeReconnectTimer: null,
+  watchlistRenderSignature: "",
   bootstrapped: false,
   previewMode: new URLSearchParams(window.location.search).get("preview") === "true"
 };
@@ -104,7 +113,7 @@ function twitterSearchUrl(symbol) {
 }
 
 function binanceSquareSearchUrl(symbol) {
-  return `https://www.binance.com/en/square/search?keyword=${encodeURIComponent(`$${baseAsset(symbol)}`)}`;
+  return `https://www.binance.com/en/square/search?keyword=${encodeURIComponent(baseAsset(symbol))}`;
 }
 
 function searchButtons(symbol) {
@@ -187,6 +196,20 @@ function sentimentLabel(value) {
   return value || "未知";
 }
 
+function twitterStatusLabel(token) {
+  if (!token.twitterStatus) return "推特未启用";
+  if (token.twitterStatus === "ok") return `推特 ${formatNumber(token.twitterHeat, 0)}`;
+  if (token.twitterStatus === "not_configured") return "推特未配置";
+  if (token.twitterStatus === "token_pool_cooling_down") return "推特冷却中";
+  if (token.twitterStatus.includes("insufficient quota")) return "推特额度不足";
+  if (token.twitterStatus.startsWith("token_pool_failed")) return "推特请求失败";
+  if (token.twitterStatus === "pending_refresh") return "推特待刷新";
+  if (token.twitterStatus === "stale_cache") return `推特缓存 ${formatNumber(token.twitterHeat, 0)}`;
+  if (token.twitterStatus === "failed") return "推特请求失败";
+  if (token.twitterStatus === "empty_symbol") return "推特无关键词";
+  return `推特${token.twitterStatus}`;
+}
+
 function renderHotRank() {
   const target = $("#hotRankRows");
   const status = $("#hotRankStatus");
@@ -203,9 +226,17 @@ function renderHotRank() {
     return;
   }
 
-  status.textContent = state.hotRankFetchedAt
-    ? `来源：${state.hotRankSource || "Binance Web3 Social Hype"} · 更新时间 ${formatTime(state.hotRankFetchedAt)}`
-    : state.hotRankError || "等待刷新";
+  if (state.hotRankFetchedAt) {
+    const flags = [];
+    if (state.hotRankStale) flags.push("使用上次缓存");
+    else if (state.hotRankPartial) flags.push("部分链失败");
+    if (state.hotRankErrors.length) flags.push(`错误 ${state.hotRankErrors.length} 条`);
+    status.textContent = `来源：${state.hotRankSource || "Binance Web3 Social Hype"} · 更新时间 ${formatTime(state.hotRankFetchedAt)}${flags.length ? ` · ${flags.join(" · ")}` : ""}`;
+    status.title = state.hotRankErrors.join("\n");
+  } else {
+    status.textContent = state.hotRankError || "等待刷新";
+    status.title = state.hotRankError || "";
+  }
 
   if (!state.hotRank.length) {
     target.innerHTML = '<div class="heat-empty">暂无热度数据。</div>';
@@ -217,9 +248,7 @@ function renderHotRank() {
       const change = Number(token.priceChange);
       const changeClass = Number.isFinite(change) && change < 0 ? "down" : "up";
       const symbol = escapeHtml(token.symbol);
-      const twitterMeta = token.twitterStatus === "ok"
-        ? `推特 ${formatNumber(token.twitterHeat, 0)}`
-        : "推特待配置";
+      const twitterMeta = twitterStatusLabel(token);
       const logo = token.logo
         ? `<img src="${escapeHtml(token.logo)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'), { className: 'heat-token-mark', textContent: '${symbol.slice(0, 2)}' }))" />`
         : `<span class="heat-token-mark">${symbol.slice(0, 2)}</span>`;
@@ -254,10 +283,16 @@ async function loadHotRank({ silent = false } = {}) {
     state.hotRank = payload.tokens ?? [];
     state.hotRankSource = payload.source ?? "";
     state.hotRankFetchedAt = payload.fetchedAt ?? new Date().toISOString();
+    state.hotRankPartial = Boolean(payload.partial);
+    state.hotRankStale = Boolean(payload.stale);
+    state.hotRankErrors = Array.isArray(payload.errors) ? payload.errors : [];
   } catch (error) {
     state.hotRank = [];
     state.hotRankSource = "";
     state.hotRankFetchedAt = null;
+    state.hotRankPartial = false;
+    state.hotRankStale = false;
+    state.hotRankErrors = [];
     state.hotRankError = `热度数据读取失败：${error instanceof Error ? error.message : String(error)}`;
   } finally {
     state.hotRankLoading = false;
@@ -300,15 +335,17 @@ function renderSignals() {
       const multiRequired = Number(row.multiMatchRequired ?? 0);
       const multiCount = Number(row.multiMatchCount ?? 0);
       const multiQualified = multiRequired > 1 && multiCount >= multiRequired;
+      const hotRankHit = Boolean(Number(row.hotRankHit ?? 0));
       const watched = isWatchedSymbol(row.symbol);
       const signalRow = `
-        <tr class="signal-row ${expanded ? "is-expanded" : ""} ${multiQualified ? "is-multi-hit" : ""}" data-key="${escapeHtml(key)}">
+        <tr class="signal-row ${expanded ? "is-expanded" : ""} ${multiQualified ? "is-multi-hit" : ""} ${hotRankHit ? "is-hot-ma-hit" : ""}" data-key="${escapeHtml(key)}">
           <td>
             <div class="symbol-cell">
               <button class="symbol-button" type="button" data-key="${escapeHtml(key)}" title="查看K线">${escapeHtml(row.symbol)}</button>
               <button class="copy-symbol" type="button" data-symbol="${escapeHtml(row.symbol)}" title="复制交易对">复制</button>
               <button class="copy-symbol watch-add ${watched ? "is-added" : ""}" type="button" data-watch-symbol="${escapeHtml(row.symbol)}" title="${watched ? `${escapeHtml(row.symbol)} 已在关注池` : `加入关注池：${escapeHtml(row.symbol)}`}" aria-pressed="${watched ? "true" : "false"}" ${watched ? "disabled" : ""}>${watched ? "已关注" : "加关注"}</button>
               ${searchButtons(row.symbol)}
+              ${hotRankHit ? `<span class="hot-ma-badge">热度+均线 #${escapeHtml(row.hotRank ?? "--")}</span>` : ""}
               ${multiQualified ? `<span class="multi-badge">多周期 ${multiCount}/${multiRequired}</span>` : ""}
             </div>
           </td>
@@ -339,6 +376,42 @@ function renderSignals() {
     const expandedRow = rows.find((row) => rowKey(row) === state.expandedKey);
     if (expandedRow) loadAndRenderChart(expandedRow);
   }
+}
+
+function renderMultiHistory() {
+  const target = $("#multiHistoryRows");
+  if (!target) return;
+  if (!state.multiHistory.length) {
+    target.innerHTML = '<div class="heat-empty">暂无多周期历史记录。</div>';
+    return;
+  }
+  target.innerHTML = state.multiHistory
+    .map((item) => `
+      <article class="multi-history-row">
+        <div>
+          <strong>${escapeHtml(item.symbol)}</strong>
+          <span>${escapeHtml(item.categoryLabel || item.baseAsset || "--")}</span>
+        </div>
+        <div><span>周期数</span><b>${escapeHtml(item.multiMatchCount)}</b></div>
+        <div><span>周期</span><b>${escapeHtml(item.intervals || "--")}</b></div>
+        <div><span>最高等级</span><b>${escapeHtml(LABELS.level[item.bestAlertLevel] || item.bestAlertLevel || "--")}</b></div>
+        <div><span>首次触发</span><b>${formatTime(item.firstTriggeredAt)}</b></div>
+        <div><span>最近触发</span><b>${formatTime(item.lastTriggeredAt)}</b></div>
+        <div class="heat-links">${searchButtons(item.symbol)}</div>
+      </article>
+    `)
+    .join("");
+}
+
+async function loadMultiHistory() {
+  try {
+    const payload = await api("/api/multi-history?limit=80");
+    state.multiHistory = payload.items ?? [];
+  } catch (error) {
+    console.warn("multi history failed", error);
+    state.multiHistory = [];
+  }
+  renderMultiHistory();
 }
 
 async function copyText(text) {
@@ -451,7 +524,7 @@ function renderWatchlist() {
           <div class="chart-tools">
             ${ALL_INTERVALS.map((interval) => `<button class="${state.watchInterval === interval ? "active" : ""}" type="button" data-watch-interval="${interval}">${interval}</button>`).join("")}
           </div>
-          <span>最新更新时间：${formatTime(item.currentCloseTime)}</span>
+          <span data-watch-updated="${safeSymbol}">最新更新时间：${formatTime(item.currentCloseTime)}</span>
         </div>
         <div class="chart-shell" id="${chartElementId(`${item.symbol}|${state.watchInterval}`)}">
           <div class="chart-loading">正在读取 ${safeSymbol} ${escapeHtml(state.watchInterval)} K线...</div>
@@ -466,7 +539,7 @@ function renderWatchlist() {
             <span>${escapeHtml(item.categoryLabel || item.baseAsset || "--")}</span>
           </button>
         </div>
-        <div><span>现价</span><div class="mono">${formatNumber(item.currentPrice)}</div></div>
+        <div><span>现价</span><div class="mono" data-watch-price="${safeSymbol}">${formatNumber(item.currentPrice)}</div></div>
         <div><span>最新周期</span><div class="mono">${escapeHtml(item.latestInterval || "--")}</div></div>
         <div><span>高于提醒</span><div class="mono">${formatNumber(item.alertAbove)}</div></div>
         <div><span>低于提醒</span><div class="mono">${formatNumber(item.alertBelow)}</div></div>
@@ -519,33 +592,85 @@ function renderWatchlist() {
 
   const expandedItem = state.watchlist.find((item) => item.symbol === state.watchExpandedSymbol);
   if (expandedItem) {
-    loadAndRenderChart({ symbol: expandedItem.symbol, intervalCode: state.watchInterval }, { force: true });
+    loadAndRenderChart({ symbol: expandedItem.symbol, intervalCode: state.watchInterval }, { live: true });
+  }
+  updateWatchRealtime();
+}
+
+function watchlistRenderSignature(items) {
+  return (items ?? [])
+    .map((item) =>
+      [
+        item.symbol,
+        item.note ?? "",
+        item.alertAbove ?? "",
+        item.alertBelow ?? "",
+        item.alertEnabled ? "1" : "0",
+        item.categoryLabel ?? "",
+        item.latestInterval ?? ""
+      ].join(":")
+    )
+    .join("|");
+}
+
+function mergeWatchlistItems(items) {
+  const existingBySymbol = new Map(state.watchlist.map((item) => [item.symbol, item]));
+  return (items ?? []).map((item) => {
+    const existing = existingBySymbol.get(item.symbol);
+    if (!existing) return item;
+    const existingTime = Number(existing.currentCloseTime ?? existing.realtimePriceTime ?? 0);
+    const nextTime = Number(item.currentCloseTime ?? item.realtimePriceTime ?? 0);
+    if (existingTime > nextTime) {
+      return {
+        ...item,
+        currentPrice: existing.currentPrice,
+        currentCloseTime: existing.currentCloseTime,
+        realtimePrice: existing.realtimePrice ?? item.realtimePrice,
+        realtimePriceTime: existing.realtimePriceTime ?? item.realtimePriceTime
+      };
+    }
+    return item;
+  });
+}
+
+function updateWatchlistDomFromState() {
+  for (const item of state.watchlist) {
+    updateWatchPriceDom(item.symbol, item.currentPrice, item.currentCloseTime);
   }
 }
 
 async function loadWatchlist({ silent = false } = {}) {
   if (state.watchLoadPromise) {
     const items = await state.watchLoadPromise;
-    if (!silent || state.currentView === "watch") renderWatchlist();
+    if (!silent) renderWatchlist();
+    else updateWatchlistDomFromState();
     return items;
   }
   state.watchLoading = true;
   if (!silent) renderWatchlist();
   state.watchLoadPromise = (async () => {
+    let shouldRender = false;
     try {
       state.watchError = "";
       const payload = await api("/api/watchlist");
-      state.watchlist = payload.items ?? [];
+      const nextItems = mergeWatchlistItems(payload.items ?? []);
+      const nextSignature = watchlistRenderSignature(nextItems);
+      shouldRender = !silent || !state.watchLoaded || nextSignature !== state.watchlistRenderSignature;
+      state.watchlist = nextItems;
+      state.watchlistRenderSignature = nextSignature;
       state.watchLoaded = true;
     } catch (error) {
       state.watchlist = [];
       state.watchLoaded = false;
       state.watchError = `关注池读取失败：${error instanceof Error ? error.message : String(error)}`;
+      shouldRender = !silent || state.currentView !== "watch";
     } finally {
       state.watchLoading = false;
       state.watchLoadPromise = null;
-      if (!silent || state.currentView === "watch") renderWatchlist();
+      if (shouldRender) renderWatchlist();
+      else updateWatchlistDomFromState();
       updateSignalWatchButtons();
+      updateWatchRealtime();
     }
     return state.watchlist;
   })();
@@ -559,9 +684,180 @@ async function addWatchItem({ symbol, note = "", alertAbove = "", alertBelow = "
     body: JSON.stringify({ symbol, note, alertAbove, alertBelow, alertEnabled })
   });
   state.watchlist = payload.items ?? [];
+  state.watchlistRenderSignature = watchlistRenderSignature(state.watchlist);
   state.watchLoaded = true;
   renderWatchlist();
   updateSignalWatchButtons();
+  updateWatchRealtime();
+}
+
+function closeWatchRealtime() {
+  if (state.watchRealtimeReconnectTimer) {
+    clearTimeout(state.watchRealtimeReconnectTimer);
+    state.watchRealtimeReconnectTimer = null;
+  }
+  if (state.watchRealtimeSocket) {
+    state.watchRealtimeSocket.onclose = null;
+    state.watchRealtimeSocket.close();
+  }
+  if (state.watchRealtimeSource) {
+    state.watchRealtimeSource.close();
+  }
+  state.watchRealtimeSocket = null;
+  state.watchRealtimeSource = null;
+  state.watchRealtimeSignature = "";
+}
+
+function watchRealtimeStreams() {
+  if (state.currentView !== "watch" || !state.watchlist.length) return [];
+  const streams = new Set();
+  for (const item of state.watchlist) {
+    const symbol = String(item.symbol ?? "").toLowerCase();
+    if (symbol) streams.add(`${symbol}@ticker`);
+  }
+  if (state.watchExpandedSymbol) {
+    streams.add(`${state.watchExpandedSymbol.toLowerCase()}@kline_${state.watchInterval}`);
+  }
+  return Array.from(streams);
+}
+
+function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const item = state.watchlist.find((entry) => entry.symbol === safeSymbol);
+  if (item) {
+    item.currentPrice = price;
+    item.currentCloseTime = eventTime;
+  }
+  for (const element of document.querySelectorAll(`[data-watch-price="${CSS.escape(safeSymbol)}"]`)) {
+    element.textContent = formatNumber(price);
+  }
+  for (const element of document.querySelectorAll(`[data-watch-updated="${CSS.escape(safeSymbol)}"]`)) {
+    element.textContent = `最新更新时间：${formatTime(eventTime)}`;
+  }
+}
+
+function averageRecent(values, size) {
+  if (values.length < size) return null;
+  const slice = values.slice(-size);
+  return slice.reduce((sum, value) => sum + value, 0) / size;
+}
+
+function updateChartKline(symbol, interval, kline) {
+  const key = `${symbol}|${interval}`;
+  const payload = state.chartCache.get(key);
+  if (!payload?.klines?.length) return;
+  const next = {
+    openTime: Number(kline.t),
+    closeTime: Number(kline.T),
+    open: Number(kline.o),
+    high: Number(kline.h),
+    low: Number(kline.l),
+    close: Number(kline.c),
+    volume: Number(kline.v)
+  };
+  if (!Number.isFinite(next.openTime) || !Number.isFinite(next.close)) return;
+  const klines = payload.klines;
+  const last = klines.at(-1);
+  if (last && last.openTime === next.openTime) {
+    Object.assign(last, next);
+  } else if (!last || next.openTime > last.openTime) {
+    klines.push(next);
+    if (klines.length > 6000) klines.shift();
+    const settings = state.chartState.get(key);
+    if (settings) {
+      settings.start = chartMaxStart(klines.length, settings.visible);
+    }
+  } else {
+    return;
+  }
+  const closes = klines.map((item) => item.close).filter(Number.isFinite);
+  const target = klines.at(-1);
+  target.ma100 = averageRecent(closes, 100);
+  target.ma200 = averageRecent(closes, 200);
+  drawChartForKey(key);
+}
+
+function handleWatchRealtimeMessage(payload) {
+  if (payload?.type === "price") {
+    const symbol = String(payload.symbol ?? "").toUpperCase();
+    const price = Number(payload.price);
+    if (symbol && Number.isFinite(price)) updateWatchPriceDom(symbol, price, Number(payload.eventTime ?? Date.now()));
+    return;
+  }
+  if (payload?.type === "kline" && payload.kline) {
+    const symbol = String(payload.symbol ?? "").toUpperCase();
+    const interval = String(payload.interval ?? payload.kline.i ?? "");
+    updateWatchPriceDom(symbol, Number(payload.kline.c), Number(payload.eventTime ?? Date.now()));
+    updateChartKline(symbol, interval, payload.kline);
+    return;
+  }
+  const stream = String(payload?.stream ?? "");
+  const data = payload?.data ?? payload;
+  if (stream.endsWith("@ticker") || data?.e === "24hrTicker") {
+    const symbol = String(data.s ?? "").toUpperCase();
+    const price = Number(data.c);
+    if (symbol && Number.isFinite(price)) updateWatchPriceDom(symbol, price, Number(data.E ?? Date.now()));
+    return;
+  }
+  if (data?.e === "kline" && data.k) {
+    const symbol = String(data.s ?? "").toUpperCase();
+    const interval = String(data.k.i ?? "");
+    updateWatchPriceDom(symbol, Number(data.k.c), Number(data.E ?? Date.now()));
+    updateChartKline(symbol, interval, data.k);
+  }
+}
+
+function updateWatchRealtime() {
+  if (state.currentView !== "watch" || !state.watchlist.length) {
+    closeWatchRealtime();
+    return;
+  }
+  const streams = watchRealtimeStreams();
+  const signature = `local:${state.watchlist.map((item) => item.symbol).join("/")}:${state.watchExpandedSymbol ?? ""}:${state.watchInterval}`;
+  if (state.watchRealtimeSocket && state.watchRealtimeSignature === signature) return;
+  if (state.watchRealtimeSource && state.watchRealtimeSignature === signature) return;
+  closeWatchRealtime();
+  state.watchRealtimeSignature = signature;
+  if ("EventSource" in window) {
+    const source = new EventSource("/api/watchlist/events");
+    state.watchRealtimeSource = source;
+    source.onmessage = (event) => {
+      try {
+        handleWatchRealtimeMessage(JSON.parse(event.data));
+      } catch (error) {
+        console.warn("watch realtime event failed", error);
+      }
+    };
+    source.onerror = () => {
+      if (state.currentView !== "watch") return;
+      source.close();
+      state.watchRealtimeSource = null;
+      state.watchRealtimeReconnectTimer = setTimeout(updateWatchRealtime, 3000);
+    };
+    return;
+  }
+  if (!streams.length) return;
+  const fallbackSignature = streams.join("/");
+  const url = `wss://fstream.binance.com/market/stream?streams=${fallbackSignature}`;
+  const socket = new WebSocket(url);
+  state.watchRealtimeSocket = socket;
+  socket.onmessage = (event) => {
+    try {
+      handleWatchRealtimeMessage(JSON.parse(event.data));
+    } catch (error) {
+      console.warn("watch realtime message failed", error);
+    }
+  };
+  socket.onclose = () => {
+    if (state.currentView !== "watch") return;
+    state.watchRealtimeReconnectTimer = setTimeout(() => {
+      state.watchRealtimeSocket = null;
+      updateWatchRealtime();
+    }, 3000);
+  };
+  socket.onerror = () => {
+    socket.close();
+  };
 }
 
 function pageFromHash() {
@@ -585,6 +881,7 @@ function setPage(page) {
   });
   if (page === "heat") loadHotRank({ silent: true });
   if (page === "watch") loadWatchlist();
+  else closeWatchRealtime();
 }
 
 function toggleRow(key) {
@@ -620,9 +917,11 @@ async function refreshAll({ keepPage = true } = {}) {
   try {
     const overview = await api("/api/overview");
     renderOverview(overview);
+    if (state.currentView !== "signals") return;
     if (!keepPage) state.page = 1;
     await loadSignalsPage();
     renderSignals();
+    loadMultiHistory();
   } catch (error) {
     const dbState = $("#dbState");
     if (dbState) {
@@ -679,10 +978,22 @@ function chartDefaults(dataLength) {
     visible: Math.max(1, dataLength),
     start: 0,
     hoverIndex: null,
+    hoverXRatio: null,
+    hoverYRatio: null,
     dragging: false,
     dragStartX: 0,
     dragStartStart: 0
   };
+}
+
+function chartRightSpaceSlots(visible) {
+  if (visible <= 1) return 0;
+  return clamp(Math.round(visible * 0.45), 1, visible - 1);
+}
+
+function chartMaxStart(length, visible) {
+  const rightSpace = chartRightSpaceSlots(visible);
+  return Math.max(0, length + rightSpace - visible);
 }
 
 async function loadAndRenderChart(row, { force = false } = {}) {
@@ -764,8 +1075,8 @@ function bindChartTools(shell, key) {
     const length = payload.klines.length;
     const minVisible = Math.min(length, 30);
     const rect = canvas.getBoundingClientRect();
-    const plotLeft = 54;
-    const plotRight = Math.max(plotLeft + 10, rect.width - 18);
+    const plotLeft = 18;
+    const plotRight = Math.max(plotLeft + 10, rect.width - 64);
     const ratio = clamp((event.clientX - rect.left - plotLeft) / (plotRight - plotLeft), 0, 1);
     const anchorIndex = settings.start + Math.floor(settings.visible * ratio);
     const nextVisible = clamp(
@@ -774,8 +1085,10 @@ function bindChartTools(shell, key) {
       length
     );
     settings.visible = nextVisible;
-    settings.start = clamp(anchorIndex - Math.floor(nextVisible * ratio), 0, Math.max(0, length - nextVisible));
+    settings.start = clamp(anchorIndex - Math.floor(nextVisible * ratio), 0, chartMaxStart(length, nextVisible));
     settings.hoverIndex = null;
+    settings.hoverXRatio = null;
+    settings.hoverYRatio = null;
     drawChartForKey(key);
   }, { passive: false });
 
@@ -804,8 +1117,30 @@ function bindChartTools(shell, key) {
     const settings = state.chartState.get(key);
     const payload = state.chartCache.get(key);
     if (!settings || !payload) return;
+
+    if (settings.dragging) {
+      const rect = canvas.getBoundingClientRect();
+      const plotWidth = Math.max(1, rect.width - 72);
+      const slot = plotWidth / Math.max(1, settings.visible);
+      const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
+      settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(payload.klines.length, settings.visible));
+      settings.hoverIndex = null;
+      settings.hoverXRatio = null;
+      settings.hoverYRatio = null;
+      drawChartForKey(key);
+      return;
+    }
+
     const point = chartPointFromEvent(canvas, key, event);
-    if (!point) return;
+    if (!point) {
+      if (settings.crosshair && settings.hoverIndex !== null) {
+        settings.hoverIndex = null;
+        settings.hoverXRatio = null;
+        settings.hoverYRatio = null;
+        drawChartForKey(key);
+      }
+      return;
+    }
 
     if (settings.draftDrawing) {
       settings.draftDrawing.end = point;
@@ -813,20 +1148,11 @@ function bindChartTools(shell, key) {
       return;
     }
 
-    if (settings.dragging) {
-      const rect = canvas.getBoundingClientRect();
-      const plotWidth = Math.max(1, rect.width - 72);
-      const slot = plotWidth / Math.max(1, settings.visible);
-      const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
-      settings.start = clamp(settings.dragStartStart - movedSlots, 0, Math.max(0, payload.klines.length - settings.visible));
-      settings.hoverIndex = null;
-      drawChartForKey(key);
-      return;
-    }
-
     if (settings.crosshair) {
-      if (settings.hoverIndex === point.index) return;
+      if (settings.hoverIndex === point.index && settings.hoverXRatio === point.xRatio && settings.hoverYRatio === point.yRatio) return;
       settings.hoverIndex = point.index;
+      settings.hoverXRatio = point.xRatio;
+      settings.hoverYRatio = point.yRatio;
       drawChartForKey(key);
     }
   });
@@ -837,6 +1163,8 @@ function bindChartTools(shell, key) {
     if (!settings) return;
     finishChartPointer(key);
     settings.hoverIndex = null;
+    settings.hoverXRatio = null;
+    settings.hoverYRatio = null;
     drawChartForKey(key);
   });
 }
@@ -856,21 +1184,26 @@ function chartPointFromEvent(canvas, key, event) {
   const payload = state.chartCache.get(key);
   if (!settings || !payload) return null;
   const rect = canvas.getBoundingClientRect();
-  const plotLeft = 54;
-  const plotRight = Math.max(plotLeft + 10, rect.width - 18);
+  const plotLeft = 18;
+  const plotRight = Math.max(plotLeft + 10, rect.width - 64);
   const ratio = clamp((event.clientX - rect.left - plotLeft) / (plotRight - plotLeft), 0, 1);
-  const index = clamp(settings.start + Math.floor(settings.visible * ratio), 0, payload.klines.length - 1);
+  const slotIndex = Math.min(settings.visible - 1, Math.floor(settings.visible * ratio));
+  const index = clamp(settings.start + slotIndex, 0, Math.max(0, payload.klines.length - 1));
+  const plotTop = 18;
+  const volumeHeight = settings.volume ? 64 : 0;
+  const plotBottom = rect.height - 30 - volumeHeight;
   return {
     index,
-    yRatio: clamp((event.clientY - rect.top) / rect.height, 0, 1)
+    xRatio: ratio,
+    yRatio: clamp((event.clientY - rect.top - plotTop) / Math.max(1, plotBottom - plotTop), 0, 1)
   };
 }
 
 function visibleKlines(payload, settings) {
   const length = payload.klines.length;
   settings.visible = clamp(settings.visible, 1, Math.max(1, length));
-  settings.start = clamp(settings.start, 0, Math.max(0, length - settings.visible));
-  return payload.klines.slice(settings.start, settings.start + settings.visible);
+  settings.start = clamp(settings.start, 0, chartMaxStart(length, settings.visible));
+  return payload.klines.slice(settings.start, Math.min(length, settings.start + settings.visible));
 }
 
 function chartCanvasWidth(canvas) {
@@ -905,13 +1238,14 @@ function drawLine(ctx, points, color, width = 1.5) {
 function drawUserDrawings(ctx, settings, plotLeft, plotRight, plotTop, plotBottom, slot, cssHeight) {
   const drawings = [...settings.drawings, settings.draftDrawing].filter(Boolean);
   if (!drawings.length) return;
+  const plotHeight = Math.max(1, plotBottom - plotTop);
   ctx.save();
   ctx.strokeStyle = "#1f7aff";
   ctx.lineWidth = 1.6;
   ctx.setLineDash([6, 4]);
   for (const drawing of drawings) {
     if (drawing.type === "hline") {
-      const y = drawing.yRatio * cssHeight;
+      const y = plotTop + drawing.yRatio * plotHeight;
       if (y < plotTop || y > plotBottom) continue;
       ctx.beginPath();
       ctx.moveTo(plotLeft, y);
@@ -923,8 +1257,8 @@ function drawUserDrawings(ctx, settings, plotLeft, plotRight, plotTop, plotBotto
     const endLocal = drawing.end.index - settings.start;
     if ((startLocal < 0 && endLocal < 0) || (startLocal > settings.visible && endLocal > settings.visible)) continue;
     ctx.beginPath();
-    ctx.moveTo(plotLeft + slot * startLocal + slot / 2, drawing.start.yRatio * cssHeight);
-    ctx.lineTo(plotLeft + slot * endLocal + slot / 2, drawing.end.yRatio * cssHeight);
+    ctx.moveTo(plotLeft + slot * startLocal + slot / 2, plotTop + drawing.start.yRatio * plotHeight);
+    ctx.lineTo(plotLeft + slot * endLocal + slot / 2, plotTop + drawing.end.yRatio * plotHeight);
     ctx.stroke();
   }
   ctx.restore();
@@ -955,8 +1289,8 @@ function drawChartForKey(key) {
   ctx.fillRect(0, 0, parentWidth, cssHeight);
 
   const data = visibleKlines(payload, settings);
-  const plotLeft = 54;
-  const plotRight = parentWidth - 18;
+  const plotLeft = 18;
+  const plotRight = parentWidth - 64;
   const plotTop = 18;
   const volumeHeight = settings.volume ? 64 : 0;
   const plotBottom = cssHeight - 30 - volumeHeight;
@@ -973,7 +1307,7 @@ function drawChartForKey(key) {
   const priceMin = minPrice - pad;
   const priceMax = maxPrice + pad;
   const y = (price) => plotTop + ((priceMax - price) / (priceMax - priceMin)) * height;
-  const slot = width / Math.max(1, data.length);
+  const slot = width / Math.max(1, settings.visible);
   const candleWidth = Math.max(1, Math.min(10, slot * 0.62));
 
   ctx.strokeStyle = "#f0e8ee";
@@ -987,7 +1321,7 @@ function drawChartForKey(key) {
     ctx.lineTo(plotRight, gy);
     ctx.stroke();
     const label = priceMax - ((priceMax - priceMin) / 4) * i;
-    ctx.fillText(formatNumber(label, 4), 6, gy + 4);
+    ctx.fillText(formatNumber(label, 4), plotRight + 8, gy + 4);
   }
 
   const maxVolume = Math.max(...data.map((item) => item.volume), 1);
@@ -1035,17 +1369,23 @@ function drawChartForKey(key) {
   const hoverLocal = settings.hoverIndex === null ? null : settings.hoverIndex - settings.start;
   if (settings.crosshair && hoverLocal !== null && hoverLocal >= 0 && hoverLocal < data.length) {
     const item = data[hoverLocal];
-    const x = plotLeft + slot * hoverLocal + slot / 2;
-    const closeY = y(item.close);
+    const x = plotLeft + clamp(Number(settings.hoverXRatio ?? 0), 0, 1) * (plotRight - plotLeft);
+    const hoverY = plotTop + clamp(Number(settings.hoverYRatio ?? 0), 0, 1) * (plotBottom - plotTop);
+    const hoverPrice = priceMax - ((hoverY - plotTop) / Math.max(1, plotBottom - plotTop)) * (priceMax - priceMin);
     ctx.strokeStyle = "rgba(33, 23, 33, 0.35)";
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(x, plotTop);
     ctx.lineTo(x, plotBottom);
-    ctx.moveTo(plotLeft, closeY);
-    ctx.lineTo(plotRight, closeY);
+    ctx.moveTo(plotLeft, hoverY);
+    ctx.lineTo(plotRight, hoverY);
     ctx.stroke();
     ctx.setLineDash([]);
+    const priceLabel = formatNumber(hoverPrice, 4);
+    ctx.fillStyle = "#211721";
+    ctx.fillRect(plotRight + 4, hoverY - 11, parentWidth - plotRight - 8, 22);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(priceLabel, plotRight + 8, hoverY + 4);
     const tooltip = `${new Date(item.openTime).toLocaleString("zh-CN", { hour12: false })}  O ${formatNumber(item.open, 4)}  H ${formatNumber(item.high, 4)}  L ${formatNumber(item.low, 4)}  C ${formatNumber(item.close, 4)}`;
     ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
     ctx.strokeStyle = "#eee8ec";
@@ -1062,20 +1402,13 @@ function drawChartForKey(key) {
   ctx.fillStyle = "#7d5dfc";
   ctx.fillText("MA200", plotLeft + 62, cssHeight - 8);
   ctx.fillStyle = "#9b8f98";
-  ctx.fillText(`范围 ${settings.start + 1}-${settings.start + data.length}/${payload.klines.length}`, plotLeft + 128, cssHeight - 8);
+  const trailingSpace = Math.max(0, settings.start + settings.visible - payload.klines.length);
+  const rangeLabel = `范围 ${settings.start + 1}-${settings.start + data.length}/${payload.klines.length}${trailingSpace ? ` +${trailingSpace}空白` : ""}`;
+  ctx.fillText(rangeLabel, plotLeft + 128, cssHeight - 8);
 }
 
 for (const input of document.querySelectorAll(".filter-menu input[type='checkbox']")) {
   input.addEventListener("change", () => setFilter(input.dataset.filter, input.dataset.value, input.checked));
-}
-
-for (const menu of document.querySelectorAll(".filter-menu")) {
-  menu.addEventListener("toggle", () => {
-    if (!menu.open) return;
-    for (const other of document.querySelectorAll(".filter-menu")) {
-      if (other !== menu) other.open = false;
-    }
-  });
 }
 
 for (const button of document.querySelectorAll(".page-size .page-size-btn")) {
@@ -1138,5 +1471,5 @@ loadWatchlist();
 setInterval(() => loadHotRank({ silent: true }), 5 * 60 * 1000);
 setInterval(() => {
   if (state.currentView === "watch") loadWatchlist({ silent: true });
-}, 30 * 1000);
+}, 60 * 1000);
 setInterval(() => refreshAll({ keepPage: true }), 5000);

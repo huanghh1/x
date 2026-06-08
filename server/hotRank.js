@@ -17,6 +17,13 @@ let hotRankCache = new Map();
 let lastHotRankPayload = null;
 let twitterTokenCursor = 0;
 const twitterTokenCooldownUntil = new Map();
+const twitterHeatCache = new Map();
+
+function limitAndRerankTokens(tokens, limit) {
+  return (tokens ?? [])
+    .slice(0, limit)
+    .map((token, index) => ({ ...token, rank: index + 1 }));
+}
 
 function numberValue(value, fallback = 0) {
   const number = Number(value);
@@ -95,6 +102,27 @@ function coolDownTwitterToken(token) {
   twitterTokenCooldownUntil.set(token, Date.now() + config.twitter.tokenCooldownMs);
 }
 
+function twitterCacheKey(symbol) {
+  return String(symbol ?? "").toUpperCase().replace(/USDT$/, "");
+}
+
+function getCachedTwitterHeat(symbol, { allowFailure = true } = {}) {
+  const key = twitterCacheKey(symbol);
+  const cached = twitterHeatCache.get(key);
+  if (!cached) return null;
+  const maxAge = cached.result.status === "ok" ? config.twitter.heatCacheMs : config.twitter.failureCacheMs;
+  if (!allowFailure && cached.result.status !== "ok") return null;
+  if (Date.now() - cached.fetchedAt > maxAge) return null;
+  return { ...cached.result, cached: true };
+}
+
+function setCachedTwitterHeat(symbol, result) {
+  const key = twitterCacheKey(symbol);
+  if (!key) return result;
+  twitterHeatCache.set(key, { fetchedAt: Date.now(), result });
+  return result;
+}
+
 function twitterRows(json) {
   const candidates = [
     json?.data,
@@ -150,6 +178,8 @@ async function fetchTwitterHeatWithToken(symbol, token) {
 }
 
 async function fetchTwitterHeat(symbol) {
+  const cached = getCachedTwitterHeat(symbol);
+  if (cached) return cached;
   if (!config.twitter.heatEnabled || !twitterTokens().length) {
     return { heat: 0, status: "not_configured" };
   }
@@ -162,16 +192,39 @@ async function fetchTwitterHeat(symbol) {
     const token = nextTwitterToken();
     if (!token) break;
     try {
-      return await fetchTwitterHeatWithToken(symbol, token);
+      return setCachedTwitterHeat(symbol, await fetchTwitterHeatWithToken(symbol, token));
     } catch (error) {
-      coolDownTwitterToken(token);
+      const status = Number(error?.status ?? 0);
+      if ([401, 403, 408, 429, 500, 502, 503, 504].includes(status) || !status) {
+        coolDownTwitterToken(token);
+      }
       failures.push(error instanceof Error ? error.message : String(error));
     }
   }
-  return {
+  const stale = getCachedTwitterHeat(symbol, { allowFailure: false });
+  if (stale) return { ...stale, status: "stale_cache" };
+  return setCachedTwitterHeat(symbol, {
     heat: 0,
     status: failures.length ? `token_pool_failed:${failures.at(-1)}` : "token_pool_cooling_down"
-  };
+  });
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await mapper(items[index], index) };
+      } catch (error) {
+        results[index] = { status: "rejected", reason: error };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function fetchHotRankChain(chainId, { targetLanguage, socialLanguage, timeRange }) {
@@ -226,6 +279,7 @@ export async function getHotRank({ chain = "all", limit = 30, targetLanguage = "
     if (lastHotRankPayload) {
       return {
         ...lastHotRankPayload,
+        tokens: limitAndRerankTokens(lastHotRankPayload.tokens, safeLimit),
         fetchedAt: new Date().toISOString(),
         partial: true,
         stale: true,
@@ -246,7 +300,18 @@ export async function getHotRank({ chain = "all", limit = 30, targetLanguage = "
     };
   }
 
-  const twitterResults = await Promise.allSettled(binanceTokens.map((token) => fetchTwitterHeat(token.symbol)));
+  let freshBudget = Math.max(0, config.twitter.maxFreshPerRank);
+  const twitterResults = await mapWithConcurrency(
+    binanceTokens,
+    config.twitter.concurrentRequests,
+    (token) => {
+      const cached = getCachedTwitterHeat(token.symbol);
+      if (cached) return cached;
+      if (freshBudget <= 0) return { heat: 0, status: "pending_refresh" };
+      freshBudget -= 1;
+      return fetchTwitterHeat(token.symbol);
+    }
+  );
   const maxBinanceHeat = Math.max(...binanceTokens.map((token) => token.heat), 1);
   const maxTwitterHeat = Math.max(
     ...twitterResults.map((result) => (result.status === "fulfilled" ? result.value.heat : 0)),
@@ -267,6 +332,7 @@ export async function getHotRank({ chain = "all", limit = 30, targetLanguage = "
       };
     })
     .sort((a, b) => b.heat - a.heat)
+    .slice(0, safeLimit)
     .map((token, index) => ({ ...token, rank: index + 1 }));
 
   const payload = {

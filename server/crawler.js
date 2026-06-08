@@ -5,19 +5,23 @@ import {
   countActiveTokens,
   findKlineGap,
   insertKlinePage,
+  isActiveHotRankSymbol,
+  markHotMaSignalAlertSent,
   klineStats,
   markSignalTelegramSent,
   markTokenFetching,
   markTokenPartial,
+  recordMultiCycleHistory,
   refreshTokenFetchState,
   resetInterruptedFetchingTokens,
   selectClosePrices,
+  selectHotMaSignalAlert,
   selectPreviousSignal,
   upsertSignal,
   upsertTokens
 } from "./db.js";
 import { calculateSignal, INTERVALS } from "./ma.js";
-import { sendSignalTelegram } from "./telegram.js";
+import { sendHotMaSignalTelegram, sendSignalTelegram } from "./telegram.js";
 
 const crawlerState = {
   running: false,
@@ -118,8 +122,26 @@ async function recomputeAndNotifyToken(token) {
     multiCycleCount: multiCycleSignals.length,
     multiCycleIntervals: multiCycleSignals.map(({ intervalCode }) => intervalCode)
   };
+  await recordMultiCycleHistory(token, computedSignals, 2);
 
   for (const { intervalCode, previous, signal } of computedSignals) {
+    const hotRankHit = ["LEVEL1", "LEVEL2"].includes(signal.alertLevel) && (await isActiveHotRankSymbol(token.symbol));
+    if (hotRankHit) {
+      const previousHotAlert = await selectHotMaSignalAlert(token.symbol, intervalCode);
+      const previousSignalTime = previousHotAlert?.signalTime ? new Date(previousHotAlert.signalTime).getTime() : 0;
+      const signalTime = Number(signal.signalTime ?? 0);
+      const shouldSendHotMa =
+        !previousHotAlert ||
+        previousHotAlert.alertLevel !== signal.alertLevel ||
+        Math.abs(previousSignalTime - signalTime) > 1;
+      if (shouldSendHotMa) {
+        const result = await sendHotMaSignalTelegram(token, signal, telegramContext);
+        if (!result.skipped) {
+          await markHotMaSignalAlertSent(token.symbol, intervalCode, signal);
+          continue;
+        }
+      }
+    }
     const shouldNotify =
       signal.alertLevel === "LEVEL1" &&
       (!previous || previous.alert_level !== signal.alertLevel || !previous.telegram_sent_at);
