@@ -17,6 +17,45 @@
   --color-danger: #f04467;
   --color-success: #24c28a;
   --color-shadow: rgba(69, 39, 55, 0.1);
+  --chart-bg: #080d13;
+  --chart-panel: #101821;
+  --chart-grid: rgba(142, 154, 171, 0.16);
+  --chart-grid-strong: rgba(142, 154, 171, 0.3);
+  --chart-axis: #263443;
+  --chart-text: #e9f0f7;
+  --chart-muted: #8d99a8;
+  --chart-up: #16c784;
+  --chart-down: #f6465d;
+  --chart-ma100: #f5b041;
+  --chart-ma200: #35a7ff;
+  --chart-crosshair: rgba(233, 240, 247, 0.46);
+  --chart-tooltip-bg: rgba(12, 18, 26, 0.95);
+  --chart-tooltip-line: rgba(233, 240, 247, 0.14);
+  --chart-shell-top: #f7fbff;
+  --chart-shell-bottom: #ffffff;
+  --chart-control-border: #d8e2eb;
+  --chart-control-text: #526170;
+  --chart-control-hover-border: #7fb3d8;
+  --chart-control-hover-text: #174866;
+  --chart-control-hover-bg: #eef7fc;
+  --chart-control-primary: #17202a;
+  --chart-frame: #17202a;
+  --chart-frame-shadow: rgba(23, 32, 42, 0.12);
+  --chart-chip-border: #dfe7ee;
+  --chart-chip-text: #526170;
+  --chart-chip-bg: #f8fbfd;
+  --chart-chip-up-text: #0f7f58;
+  --chart-chip-up-border: #bdebdc;
+  --chart-chip-up-bg: #effbf6;
+  --chart-chip-down-text: #bd1f3a;
+  --chart-chip-down-border: #ffcbd4;
+  --chart-chip-down-bg: #fff1f4;
+  --chart-chip-ma100-text: #906113;
+  --chart-chip-ma100-border: #ffe0a8;
+  --chart-chip-ma100-bg: #fff8e8;
+  --chart-chip-ma200-text: #0d628e;
+  --chart-chip-ma200-border: #bfe5fb;
+  --chart-chip-ma200-bg: #eef8fe;
   --font-main: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-display: Georgia, "Times New Roman", "Songti SC", serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -908,9 +947,9 @@ tbody tr:hover {
 
 .chart-shell {
   width: min(100%, calc(100vw - 40px));
-  padding: var(--space-5);
+  padding: var(--space-4);
   border-top: 1px solid var(--color-line);
-  background: linear-gradient(180deg, var(--color-paper-soft), #fff);
+  background: linear-gradient(180deg, var(--chart-shell-top) 0%, var(--chart-shell-bottom) 100%);
 }
 
 .chart-loading {
@@ -925,12 +964,12 @@ tbody tr:hover {
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: var(--space-4);
   align-items: start;
   margin-bottom: var(--space-3);
 }
 
-.chart-toolbar > div:first-child {
+.chart-title-block {
   flex: 1 1 260px;
   min-width: 0;
 }
@@ -942,6 +981,7 @@ tbody tr:hover {
 
 .chart-toolbar strong {
   font-size: 17px;
+  line-height: 1.25;
 }
 
 .chart-toolbar span,
@@ -951,26 +991,28 @@ tbody tr:hover {
 }
 
 .chart-tools {
-  flex: 1 1 360px;
+  flex: 1 1 420px;
   min-width: 0;
-  max-width: 620px;
+  max-width: 720px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   align-content: flex-start;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 7px;
 }
 
 .chart-tools button,
 .chart-tools a {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-  padding: 0 10px;
-  color: var(--color-muted);
+  justify-content: center;
+  min-width: 54px;
+  min-height: 30px;
+  border: 1px solid var(--chart-control-border);
+  border-radius: 8px;
+  padding: 0 9px;
+  color: var(--chart-control-text);
   background: var(--color-paper);
   cursor: pointer;
   font-size: 12px;
@@ -982,31 +1024,71 @@ tbody tr:hover {
 .chart-tools button.active,
 .chart-tools button:hover,
 .chart-tools a:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
+  border-color: var(--chart-control-hover-border);
+  color: var(--chart-control-hover-text);
+  background: var(--chart-control-hover-bg);
 }
 
 .chart-tools a {
   color: var(--color-paper);
-  border-color: var(--color-accent);
-  background: var(--color-accent);
+  border-color: var(--chart-control-primary);
+  background: var(--chart-control-primary);
 }
 
 .chart-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-4);
+  gap: var(--space-2);
   margin-bottom: var(--space-3);
+}
+
+.chart-meta-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid var(--chart-chip-border);
+  border-radius: 8px;
+  padding: 0 var(--space-2);
+  color: var(--chart-chip-text);
+  background: var(--chart-chip-bg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.chart-meta-chip.is-up {
+  color: var(--chart-chip-up-text);
+  border-color: var(--chart-chip-up-border);
+  background: var(--chart-chip-up-bg);
+}
+
+.chart-meta-chip.is-down {
+  color: var(--chart-chip-down-text);
+  border-color: var(--chart-chip-down-border);
+  background: var(--chart-chip-down-bg);
+}
+
+.chart-meta-chip.ma100 {
+  color: var(--chart-chip-ma100-text);
+  border-color: var(--chart-chip-ma100-border);
+  background: var(--chart-chip-ma100-bg);
+}
+
+.chart-meta-chip.ma200 {
+  color: var(--chart-chip-ma200-text);
+  border-color: var(--chart-chip-ma200-border);
+  background: var(--chart-chip-ma200-bg);
 }
 
 .kline-canvas {
   display: block;
   width: 100%;
   min-height: 430px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-small);
-  background: var(--color-paper);
+  border: 1px solid var(--chart-frame);
+  border-radius: 8px;
+  background: var(--chart-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 14px 36px var(--chart-frame-shadow);
   cursor: crosshair;
   touch-action: none;
 }
@@ -1397,7 +1479,7 @@ body[data-page="watch"] .watch-section[data-page-section="watch"] {
     justify-content: flex-start;
   }
 
-  .chart-toolbar > div:first-child {
+  .chart-title-block {
     flex: 0 1 auto;
   }
 

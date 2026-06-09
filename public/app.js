@@ -80,10 +80,40 @@ function formatCompactUsd(value) {
   return `$${number.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 2 })}`;
 }
 
+function formatCompactNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return number.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 2 });
+}
+
 function formatPercent(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", { maximumFractionDigits: 2 })}%`;
+}
+
+function cssVar(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function chartPalette() {
+  return {
+    bg: cssVar("--chart-bg", "#0b1017"),
+    panel: cssVar("--chart-panel", "#111923"),
+    grid: cssVar("--chart-grid", "rgba(148, 163, 184, 0.16)"),
+    gridStrong: cssVar("--chart-grid-strong", "rgba(148, 163, 184, 0.28)"),
+    text: cssVar("--chart-text", "#e7eef7"),
+    muted: cssVar("--chart-muted", "#8d99a8"),
+    axis: cssVar("--chart-axis", "#2d3947"),
+    up: cssVar("--chart-up", "#16c784"),
+    down: cssVar("--chart-down", "#f6465d"),
+    ma100: cssVar("--chart-ma100", "#f5b041"),
+    ma200: cssVar("--chart-ma200", "#35a7ff"),
+    crosshair: cssVar("--chart-crosshair", "rgba(231, 238, 247, 0.42)"),
+    tooltipBg: cssVar("--chart-tooltip-bg", "rgba(15, 23, 32, 0.94)"),
+    tooltipLine: cssVar("--chart-tooltip-line", "rgba(231, 238, 247, 0.14)")
+  };
 }
 
 function formatTime(value) {
@@ -996,6 +1026,24 @@ function chartMaxStart(length, visible) {
   return Math.max(0, length + rightSpace - visible);
 }
 
+function chartLayout(width, height, settings) {
+  const volumeHeight = settings.volume ? Math.max(56, Math.min(78, Math.round(height * 0.17))) : 0;
+  const plotLeft = width < 520 ? 48 : 62;
+  const plotRight = Math.max(plotLeft + 80, width - (width < 520 ? 58 : 76));
+  const plotTop = 24;
+  const plotBottom = Math.max(plotTop + 90, height - 36 - volumeHeight);
+  return {
+    plotLeft,
+    plotRight,
+    plotTop,
+    plotBottom,
+    volumeTop: plotBottom + 16,
+    volumeHeight,
+    width: Math.max(1, plotRight - plotLeft),
+    height: Math.max(1, plotBottom - plotTop)
+  };
+}
+
 async function loadAndRenderChart(row, { force = false } = {}) {
   const key = rowKey(row);
   const shell = document.getElementById(chartElementId(key));
@@ -1018,27 +1066,35 @@ async function loadAndRenderChart(row, { force = false } = {}) {
     }
 
     const tvSymbol = encodeURIComponent(payload.tradingViewSymbol ?? `BINANCE:${row.symbol}.P`);
+    const last = payload.klines.at(-1);
+    const previous = payload.klines.at(-2);
+    const changePct = previous?.close ? ((Number(last?.close) - Number(previous.close)) / Number(previous.close)) * 100 : null;
+    const changeClass = Number(changePct) >= 0 ? "is-up" : "is-down";
     shell.innerHTML = `
       <div class="chart-toolbar">
-        <div>
+        <div class="chart-title-block">
           <strong>${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} K线</strong>
-          <span>已显示数据库全部缓存：${payload.klines.length} 根。滚轮缩放，拖拽平移。</span>
+          <span>${payload.klines.length} 根缓存 · 滚轮缩放 · 拖拽平移 · 画线辅助观察</span>
         </div>
-        <div class="chart-tools">
-          <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair">十字线</button>
-          <button class="${settings.volume ? "active" : ""}" type="button" data-tool="volume">成交量</button>
-          <button class="${settings.ma100 ? "active" : ""}" type="button" data-tool="ma100">MA100</button>
-          <button class="${settings.ma200 ? "active" : ""}" type="button" data-tool="ma200">MA200</button>
-          <button class="${settings.drawTool === "trend" ? "active" : ""}" type="button" data-tool="trend">趋势线</button>
-          <button class="${settings.drawTool === "hline" ? "active" : ""}" type="button" data-tool="hline">水平线</button>
-          <button type="button" data-tool="clearDrawings">清除画线</button>
+        <div class="chart-tools" role="toolbar" aria-label="K线工具">
+          <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair" title="显示或隐藏十字线">十字线</button>
+          <button class="${settings.volume ? "active" : ""}" type="button" data-tool="volume" title="显示或隐藏成交量">成交量</button>
+          <button class="${settings.ma100 ? "active" : ""}" type="button" data-tool="ma100" title="显示或隐藏 MA100">MA100</button>
+          <button class="${settings.ma200 ? "active" : ""}" type="button" data-tool="ma200" title="显示或隐藏 MA200">MA200</button>
+          <button class="${settings.drawTool === "trend" ? "active" : ""}" type="button" data-tool="trend" title="绘制趋势线">趋势线</button>
+          <button class="${settings.drawTool === "hline" ? "active" : ""}" type="button" data-tool="hline" title="绘制水平线">水平线</button>
+          <button type="button" data-tool="clearDrawings" title="清除当前图表画线">清除</button>
           <a href="https://www.tradingview.com/chart/?symbol=${tvSymbol}" target="_blank" rel="noreferrer">TradingView</a>
         </div>
       </div>
       <div class="chart-meta">
-        <span>最新收盘：${formatNumber(payload.klines.at(-1)?.close)}</span>
-        <span>MA100：${formatNumber(payload.klines.at(-1)?.ma100)}</span>
-        <span>MA200：${formatNumber(payload.klines.at(-1)?.ma200)}</span>
+        <span class="chart-meta-chip ${changeClass}">收盘 ${formatNumber(last?.close)}</span>
+        <span class="chart-meta-chip ${changeClass}">涨跌 ${formatPercent(changePct)}</span>
+        <span class="chart-meta-chip">高 ${formatNumber(last?.high)}</span>
+        <span class="chart-meta-chip">低 ${formatNumber(last?.low)}</span>
+        <span class="chart-meta-chip ma100">MA100 ${formatNumber(last?.ma100)}</span>
+        <span class="chart-meta-chip ma200">MA200 ${formatNumber(last?.ma200)}</span>
+        <span class="chart-meta-chip">量 ${formatCompactNumber(last?.volume)}</span>
       </div>
       <canvas class="kline-canvas" data-key="${escapeHtml(key)}"></canvas>
     `;
@@ -1075,9 +1131,8 @@ function bindChartTools(shell, key) {
     const length = payload.klines.length;
     const minVisible = Math.min(length, 30);
     const rect = canvas.getBoundingClientRect();
-    const plotLeft = 18;
-    const plotRight = Math.max(plotLeft + 10, rect.width - 64);
-    const ratio = clamp((event.clientX - rect.left - plotLeft) / (plotRight - plotLeft), 0, 1);
+    const layout = chartLayout(rect.width, rect.height || 430, settings);
+    const ratio = clamp((event.clientX - rect.left - layout.plotLeft) / (layout.plotRight - layout.plotLeft), 0, 1);
     const anchorIndex = settings.start + Math.floor(settings.visible * ratio);
     const nextVisible = clamp(
       Math.round(settings.visible * (event.deltaY < 0 ? 0.82 : 1.22)),
@@ -1120,8 +1175,8 @@ function bindChartTools(shell, key) {
 
     if (settings.dragging) {
       const rect = canvas.getBoundingClientRect();
-      const plotWidth = Math.max(1, rect.width - 72);
-      const slot = plotWidth / Math.max(1, settings.visible);
+      const layout = chartLayout(rect.width, rect.height || 430, settings);
+      const slot = layout.width / Math.max(1, settings.visible);
       const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
       settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(payload.klines.length, settings.visible));
       settings.hoverIndex = null;
@@ -1184,18 +1239,14 @@ function chartPointFromEvent(canvas, key, event) {
   const payload = state.chartCache.get(key);
   if (!settings || !payload) return null;
   const rect = canvas.getBoundingClientRect();
-  const plotLeft = 18;
-  const plotRight = Math.max(plotLeft + 10, rect.width - 64);
-  const ratio = clamp((event.clientX - rect.left - plotLeft) / (plotRight - plotLeft), 0, 1);
+  const layout = chartLayout(rect.width, rect.height || 430, settings);
+  const ratio = clamp((event.clientX - rect.left - layout.plotLeft) / (layout.plotRight - layout.plotLeft), 0, 1);
   const slotIndex = Math.min(settings.visible - 1, Math.floor(settings.visible * ratio));
   const index = clamp(settings.start + slotIndex, 0, Math.max(0, payload.klines.length - 1));
-  const plotTop = 18;
-  const volumeHeight = settings.volume ? 64 : 0;
-  const plotBottom = rect.height - 30 - volumeHeight;
   return {
     index,
     xRatio: ratio,
-    yRatio: clamp((event.clientY - rect.top - plotTop) / Math.max(1, plotBottom - plotTop), 0, 1)
+    yRatio: clamp((event.clientY - rect.top - layout.plotTop) / Math.max(1, layout.plotBottom - layout.plotTop), 0, 1)
   };
 }
 
@@ -1218,6 +1269,8 @@ function chartCanvasWidth(canvas) {
 function drawLine(ctx, points, color, width = 1.5) {
   ctx.beginPath();
   let started = false;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
   for (const point of points) {
     if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
       started = false;
@@ -1235,21 +1288,21 @@ function drawLine(ctx, points, color, width = 1.5) {
   ctx.stroke();
 }
 
-function drawUserDrawings(ctx, settings, plotLeft, plotRight, plotTop, plotBottom, slot, cssHeight) {
+function drawUserDrawings(ctx, settings, layout, slot, palette) {
   const drawings = [...settings.drawings, settings.draftDrawing].filter(Boolean);
   if (!drawings.length) return;
-  const plotHeight = Math.max(1, plotBottom - plotTop);
+  const plotHeight = Math.max(1, layout.plotBottom - layout.plotTop);
   ctx.save();
-  ctx.strokeStyle = "#1f7aff";
-  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = palette.ma200;
+  ctx.lineWidth = 1.5;
   ctx.setLineDash([6, 4]);
   for (const drawing of drawings) {
     if (drawing.type === "hline") {
-      const y = plotTop + drawing.yRatio * plotHeight;
-      if (y < plotTop || y > plotBottom) continue;
+      const y = layout.plotTop + drawing.yRatio * plotHeight;
+      if (y < layout.plotTop || y > layout.plotBottom) continue;
       ctx.beginPath();
-      ctx.moveTo(plotLeft, y);
-      ctx.lineTo(plotRight, y);
+      ctx.moveTo(layout.plotLeft, y);
+      ctx.lineTo(layout.plotRight, y);
       ctx.stroke();
       continue;
     }
@@ -1257,8 +1310,8 @@ function drawUserDrawings(ctx, settings, plotLeft, plotRight, plotTop, plotBotto
     const endLocal = drawing.end.index - settings.start;
     if ((startLocal < 0 && endLocal < 0) || (startLocal > settings.visible && endLocal > settings.visible)) continue;
     ctx.beginPath();
-    ctx.moveTo(plotLeft + slot * startLocal + slot / 2, plotTop + drawing.start.yRatio * plotHeight);
-    ctx.lineTo(plotLeft + slot * endLocal + slot / 2, plotTop + drawing.end.yRatio * plotHeight);
+    ctx.moveTo(layout.plotLeft + slot * startLocal + slot / 2, layout.plotTop + drawing.start.yRatio * plotHeight);
+    ctx.lineTo(layout.plotLeft + slot * endLocal + slot / 2, layout.plotTop + drawing.end.yRatio * plotHeight);
     ctx.stroke();
   }
   ctx.restore();
@@ -1285,18 +1338,24 @@ function drawChartForKey(key) {
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, parentWidth, cssHeight);
-  ctx.fillStyle = "#ffffff";
+  const palette = chartPalette();
+  ctx.fillStyle = palette.bg;
   ctx.fillRect(0, 0, parentWidth, cssHeight);
 
   const data = visibleKlines(payload, settings);
-  const plotLeft = 18;
-  const plotRight = parentWidth - 64;
-  const plotTop = 18;
-  const volumeHeight = settings.volume ? 64 : 0;
-  const plotBottom = cssHeight - 30 - volumeHeight;
-  const volumeTop = plotBottom + 18;
-  const width = plotRight - plotLeft;
-  const height = plotBottom - plotTop;
+  if (!data.length) return;
+  const layout = chartLayout(parentWidth, cssHeight, settings);
+  const { plotLeft, plotRight, plotTop, plotBottom, volumeTop, volumeHeight, width, height } = layout;
+
+  ctx.save();
+  ctx.fillStyle = palette.panel;
+  ctx.fillRect(plotLeft, plotTop, width, height);
+  if (settings.volume) ctx.fillRect(plotLeft, volumeTop, width, volumeHeight);
+  ctx.strokeStyle = palette.axis;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(plotLeft, plotTop, width, height);
+  if (settings.volume) ctx.strokeRect(plotLeft, volumeTop, width, volumeHeight);
+  ctx.restore();
 
   const prices = data
     .flatMap((item) => [item.high, item.low, settings.ma100 ? item.ma100 : null, settings.ma200 ? item.ma200 : null])
@@ -1308,40 +1367,64 @@ function drawChartForKey(key) {
   const priceMax = maxPrice + pad;
   const y = (price) => plotTop + ((priceMax - price) / (priceMax - priceMin)) * height;
   const slot = width / Math.max(1, settings.visible);
-  const candleWidth = Math.max(1, Math.min(10, slot * 0.62));
+  const candleWidth = Math.max(2, Math.min(14, slot * 0.64));
 
-  ctx.strokeStyle = "#f0e8ee";
+  ctx.strokeStyle = palette.grid;
   ctx.lineWidth = 1;
   ctx.font = "12px Arial";
-  ctx.fillStyle = "#9b8f98";
-  for (let i = 0; i <= 4; i += 1) {
-    const gy = plotTop + (height / 4) * i;
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = palette.muted;
+  for (let i = 0; i <= 5; i += 1) {
+    const gy = plotTop + (height / 5) * i;
     ctx.beginPath();
     ctx.moveTo(plotLeft, gy);
     ctx.lineTo(plotRight, gy);
     ctx.stroke();
-    const label = priceMax - ((priceMax - priceMin) / 4) * i;
-    ctx.fillText(formatNumber(label, 4), plotRight + 8, gy + 4);
+    const label = priceMax - ((priceMax - priceMin) / 5) * i;
+    ctx.fillText(formatNumber(label, 4), plotRight + 8, gy);
+  }
+
+  const tickCount = Math.min(6, data.length);
+  ctx.textBaseline = "top";
+  for (let i = 0; i < tickCount; i += 1) {
+    const localIndex = tickCount === 1 ? 0 : Math.round(((data.length - 1) * i) / (tickCount - 1));
+    const item = data[localIndex];
+    const x = plotLeft + slot * localIndex + slot / 2;
+    ctx.strokeStyle = i === tickCount - 1 ? palette.gridStrong : palette.grid;
+    ctx.beginPath();
+    ctx.moveTo(x, plotTop);
+    ctx.lineTo(x, settings.volume ? volumeTop + volumeHeight : plotBottom);
+    ctx.stroke();
+    const label = new Date(item.openTime)
+      .toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      .replace(/\//g, "-");
+    const labelWidth = ctx.measureText(label).width;
+    ctx.fillStyle = palette.muted;
+    ctx.fillText(label, clamp(x - labelWidth / 2, plotLeft, plotRight - labelWidth), cssHeight - 25);
   }
 
   const maxVolume = Math.max(...data.map((item) => item.volume), 1);
   data.forEach((item, index) => {
     const x = plotLeft + slot * index + slot / 2;
     const up = item.close >= item.open;
-    const color = up ? "#22b981" : "#ed2a75";
+    const color = up ? palette.up : palette.down;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
+    ctx.lineWidth = Math.max(1, Math.min(2, candleWidth / 4));
     ctx.beginPath();
     ctx.moveTo(x, y(item.high));
     ctx.lineTo(x, y(item.low));
     ctx.stroke();
     const bodyTop = y(Math.max(item.open, item.close));
     const bodyBottom = y(Math.min(item.open, item.close));
-    ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, Math.max(1, bodyBottom - bodyTop));
+    const bodyHeight = Math.max(2, bodyBottom - bodyTop);
+    ctx.globalAlpha = up ? 0.92 : 0.95;
+    ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+    ctx.globalAlpha = 1;
 
     if (settings.volume) {
       const volumeBarHeight = (item.volume / maxVolume) * volumeHeight;
-      ctx.globalAlpha = 0.24;
+      ctx.globalAlpha = 0.28;
       ctx.fillRect(x - candleWidth / 2, volumeTop + volumeHeight - volumeBarHeight, candleWidth, volumeBarHeight);
       ctx.globalAlpha = 1;
     }
@@ -1351,20 +1434,45 @@ function drawChartForKey(key) {
     drawLine(
       ctx,
       data.map((item, index) => (Number.isFinite(item.ma100) ? { x: plotLeft + slot * index + slot / 2, y: y(item.ma100) } : null)),
-      "#ed2a75",
-      1.8
+      palette.ma100,
+      2
     );
   }
   if (settings.ma200) {
     drawLine(
       ctx,
       data.map((item, index) => (Number.isFinite(item.ma200) ? { x: plotLeft + slot * index + slot / 2, y: y(item.ma200) } : null)),
-      "#7d5dfc",
-      1.8
+      palette.ma200,
+      2
     );
   }
 
-  drawUserDrawings(ctx, settings, plotLeft, plotRight, plotTop, plotBottom, slot, cssHeight);
+  const last = data.at(-1);
+  if (last && Number.isFinite(last.close)) {
+    const lastY = y(last.close);
+    const lastUp = last.close >= last.open;
+    const lastColor = lastUp ? palette.up : palette.down;
+    ctx.save();
+    ctx.strokeStyle = lastColor;
+    ctx.globalAlpha = 0.7;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, lastY);
+    ctx.lineTo(plotRight, lastY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    const label = formatNumber(last.close, 4);
+    const labelWidth = Math.max(54, ctx.measureText(label).width + 12);
+    ctx.fillStyle = lastColor;
+    ctx.fillRect(plotRight + 4, lastY - 12, labelWidth, 24);
+    ctx.fillStyle = "#ffffff";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, plotRight + 10, lastY);
+    ctx.restore();
+  }
+
+  drawUserDrawings(ctx, settings, layout, slot, palette);
 
   const hoverLocal = settings.hoverIndex === null ? null : settings.hoverIndex - settings.start;
   if (settings.crosshair && hoverLocal !== null && hoverLocal >= 0 && hoverLocal < data.length) {
@@ -1372,7 +1480,7 @@ function drawChartForKey(key) {
     const x = plotLeft + clamp(Number(settings.hoverXRatio ?? 0), 0, 1) * (plotRight - plotLeft);
     const hoverY = plotTop + clamp(Number(settings.hoverYRatio ?? 0), 0, 1) * (plotBottom - plotTop);
     const hoverPrice = priceMax - ((hoverY - plotTop) / Math.max(1, plotBottom - plotTop)) * (priceMax - priceMin);
-    ctx.strokeStyle = "rgba(33, 23, 33, 0.35)";
+    ctx.strokeStyle = palette.crosshair;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(x, plotTop);
@@ -1382,29 +1490,48 @@ function drawChartForKey(key) {
     ctx.stroke();
     ctx.setLineDash([]);
     const priceLabel = formatNumber(hoverPrice, 4);
-    ctx.fillStyle = "#211721";
-    ctx.fillRect(plotRight + 4, hoverY - 11, parentWidth - plotRight - 8, 22);
-    ctx.fillStyle = "#fff";
-    ctx.fillText(priceLabel, plotRight + 8, hoverY + 4);
-    const tooltip = `${new Date(item.openTime).toLocaleString("zh-CN", { hour12: false })}  O ${formatNumber(item.open, 4)}  H ${formatNumber(item.high, 4)}  L ${formatNumber(item.low, 4)}  C ${formatNumber(item.close, 4)}`;
-    ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
-    ctx.strokeStyle = "#eee8ec";
-    const tooltipWidth = Math.min(parentWidth - 24, ctx.measureText(tooltip).width + 20);
+    const priceLabelWidth = Math.max(54, ctx.measureText(priceLabel).width + 12);
+    ctx.fillStyle = palette.text;
+    ctx.fillRect(plotRight + 4, hoverY - 11, priceLabelWidth, 22);
+    ctx.fillStyle = palette.bg;
+    ctx.textBaseline = "middle";
+    ctx.fillText(priceLabel, plotRight + 10, hoverY);
+
+    const changePct = item.open ? ((item.close - item.open) / item.open) * 100 : null;
+    const lines = [
+      new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
+      `O ${formatNumber(item.open, 4)}   H ${formatNumber(item.high, 4)}`,
+      `L ${formatNumber(item.low, 4)}   C ${formatNumber(item.close, 4)}   ${formatPercent(changePct)}`,
+      `V ${formatCompactNumber(item.volume)}   MA100 ${formatNumber(item.ma100, 4)}   MA200 ${formatNumber(item.ma200, 4)}`
+    ];
+    const tooltipWidth = Math.min(parentWidth - 24, Math.max(...lines.map((line) => ctx.measureText(line).width)) + 22);
+    const tooltipHeight = 92;
     const tx = Math.min(parentWidth - tooltipWidth - 12, Math.max(12, x - tooltipWidth / 2));
-    ctx.fillRect(tx, 10, tooltipWidth, 28);
-    ctx.strokeRect(tx, 10, tooltipWidth, 28);
-    ctx.fillStyle = "#211721";
-    ctx.fillText(tooltip, tx + 10, 29);
+    const ty = hoverY < plotTop + tooltipHeight + 16 ? plotTop + 12 : hoverY - tooltipHeight - 12;
+    ctx.fillStyle = palette.tooltipBg;
+    ctx.strokeStyle = palette.tooltipLine;
+    ctx.fillRect(tx, ty, tooltipWidth, tooltipHeight);
+    ctx.strokeRect(tx, ty, tooltipWidth, tooltipHeight);
+    lines.forEach((line, index) => {
+      ctx.fillStyle = index === 0 ? palette.text : palette.muted;
+      ctx.textBaseline = "top";
+      ctx.fillText(line, tx + 11, ty + 10 + index * 19);
+    });
   }
 
-  ctx.fillStyle = "#ed2a75";
-  ctx.fillText("MA100", plotLeft, cssHeight - 8);
-  ctx.fillStyle = "#7d5dfc";
-  ctx.fillText("MA200", plotLeft + 62, cssHeight - 8);
-  ctx.fillStyle = "#9b8f98";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = palette.ma100;
+  ctx.fillRect(plotLeft, cssHeight - 13, 18, 3);
+  ctx.fillStyle = palette.muted;
+  ctx.fillText("MA100", plotLeft + 24, cssHeight - 12);
+  ctx.fillStyle = palette.ma200;
+  ctx.fillRect(plotLeft + 88, cssHeight - 13, 18, 3);
+  ctx.fillStyle = palette.muted;
+  ctx.fillText("MA200", plotLeft + 112, cssHeight - 12);
   const trailingSpace = Math.max(0, settings.start + settings.visible - payload.klines.length);
   const rangeLabel = `范围 ${settings.start + 1}-${settings.start + data.length}/${payload.klines.length}${trailingSpace ? ` +${trailingSpace}空白` : ""}`;
-  ctx.fillText(rangeLabel, plotLeft + 128, cssHeight - 8);
+  const rangeWidth = ctx.measureText(rangeLabel).width;
+  ctx.fillText(rangeLabel, Math.max(plotLeft + 190, plotRight - rangeWidth), cssHeight - 12);
 }
 
 for (const input of document.querySelectorAll(".filter-menu input[type='checkbox']")) {

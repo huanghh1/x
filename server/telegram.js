@@ -184,6 +184,32 @@ export async function sendWatchlistTelegram(item, reason) {
   return { skipped: false, result };
 }
 
+function formatFundingRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `${(number * 100).toFixed(4)}%`;
+}
+
+export async function sendFundingIntervalTelegram(item) {
+  if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
+  if (!config.telegram.botToken || !config.telegram.chatId) return { skipped: true, reason: "Telegram missing config" };
+  const previous = Number(item.previousFundingIntervalHours);
+  const current = Number(item.fundingIntervalHours);
+  const changeText = Number.isFinite(previous) && previous > 0 ? `${previous}h -> ${current}h` : `首次发现 ${current}h`;
+  const text = [
+    "<b>[资金费率结算周期变化]</b>",
+    `交易对：<b>${escapeHtml(item.symbol)}</b>`,
+    `结算周期：<b>${escapeHtml(changeText)}</b>`,
+    `资金费率上限：${escapeHtml(formatFundingRate(item.adjustedFundingRateCap))}`,
+    `资金费率下限：${escapeHtml(formatFundingRate(item.adjustedFundingRateFloor))}`,
+    item.lastChangedAt ? `变化时间：${escapeHtml(new Date(item.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null,
+    "提示：这是 Binance USDⓈ-M fundingInfo 公开数据监控，不构成投资建议。"
+  ].filter(Boolean).join("\n");
+
+  const result = await postTelegram(text, signalReplyMarkup(item));
+  return { skipped: false, result };
+}
+
 export function telegramSearchLinks(symbol) {
   return signalLinks({ symbol });
 }

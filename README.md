@@ -47,6 +47,7 @@ http://localhost:8787
 - 四周期独立计算 MA100/MA200，独立写入 `signal_result`。
 - 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理。
 - 关注池会单独开启 Binance Futures WebSocket 实时层，订阅关注代币的价格和四周期 K 线；价格会轻量落库，K 线按周期节流落库且收盘必落库，全市场均线扫描仍按原规则运行。
+- 资金费率结算周期监控默认每小时扫描一次 Binance USDⓈ-M `fundingInfo`，首次启动只建立基线；后续发现合约结算周期进入 1 小时且未成功 TG 通知过时发送提醒。
 
 ## K 线保留窗口
 
@@ -92,11 +93,31 @@ TELEGRAM_CHAT_ID=你的chat id
 
 只对一级/二级警报发送，且同一交易对同一周期在等级未变化时不会重复刷屏。
 
+资金费率结算周期提醒也复用同一套 Telegram 配置。相关参数：
+
+```bash
+# 是否启用资金费率结算周期监控
+FUNDING_INTERVAL_MONITOR_ENABLED=true
+
+# 默认每小时扫描一次
+FUNDING_INTERVAL_SCAN_MS=3600000
+
+# 首次启动延迟，给数据库和服务预热
+FUNDING_INTERVAL_INITIAL_DELAY_MS=10000
+
+# 目标结算周期：1 表示发现变成 1 小时结算就提醒
+FUNDING_INTERVAL_TARGET_HOURS=1
+
+# Binance fundingInfo 只返回发生调整的合约；不再出现在快照里时按默认周期回写
+FUNDING_INTERVAL_DEFAULT_HOURS=4
+```
+
 ## 接口
 
 - `GET /api/health`：数据库、爬虫、TG 状态。
 - `POST /api/bootstrap`：同步目标币种并启动抓取。
 - `POST /api/crawl/start`：启动抓取。
 - `POST /api/crawl/stop`：暂停抓取。
+- `POST /api/funding-interval/check`：手动触发一次资金费率结算周期扫描。
 - `GET /api/overview`：统计、分类缓存、当前抓取进度。
 - `GET /api/signals?category=A`：A/B 分类信号列表。

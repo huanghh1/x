@@ -87,6 +87,13 @@ export const config = {
     cleanupIntervalDays: numberEnv("KLINE_CLEANUP_INTERVAL_DAYS", 7),
     checkIntervalMs: numberEnv("MAINTENANCE_CHECK_INTERVAL_MS", 60 * 60 * 1000)
   },
+  fundingMonitor: {
+    enabled: boolEnv("FUNDING_INTERVAL_MONITOR_ENABLED", true),
+    scanIntervalMs: numberEnv("FUNDING_INTERVAL_SCAN_MS", 60 * 60 * 1000),
+    initialDelayMs: numberEnv("FUNDING_INTERVAL_INITIAL_DELAY_MS", 10 * 1000),
+    targetIntervalHours: numberEnv("FUNDING_INTERVAL_TARGET_HOURS", 1),
+    defaultIntervalHours: numberEnv("FUNDING_INTERVAL_DEFAULT_HOURS", 4)
+  },
   signal: {
     nearThresholdPct: numberEnv("MA_NEAR_THRESHOLD_PCT", 1)
   },

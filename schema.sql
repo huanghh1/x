@@ -139,3 +139,22 @@ CREATE TABLE IF NOT EXISTS multi_cycle_history (
   KEY idx_multi_history_last (last_triggered_at),
   KEY idx_multi_history_count (multi_match_count, last_triggered_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS funding_interval_state (
+  symbol VARCHAR(32) NOT NULL,
+  funding_interval_hours SMALLINT UNSIGNED NOT NULL,
+  previous_funding_interval_hours SMALLINT UNSIGNED NULL,
+  adjusted_funding_rate_cap DECIMAL(18,10) NULL,
+  adjusted_funding_rate_floor DECIMAL(18,10) NULL,
+  disclaimer TINYINT(1) NOT NULL DEFAULT 0,
+  source_present TINYINT(1) NOT NULL DEFAULT 1,
+  first_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  last_changed_at DATETIME(3) NULL,
+  one_hour_alerted_at DATETIME(3) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (symbol),
+  KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
+  KEY idx_funding_last_changed (last_changed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -278,3 +278,23 @@ export async function fetchRecentKlines({ symbol, intervalCode, limit = 3 }) {
   });
   return Array.isArray(page) ? page : [];
 }
+
+function normalizeFundingInfoItem(item) {
+  const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  const fundingIntervalHours = Number(item?.fundingIntervalHours);
+  if (!symbol || !Number.isFinite(fundingIntervalHours)) return null;
+  return {
+    symbol,
+    fundingIntervalHours: Math.max(0, Math.floor(fundingIntervalHours)),
+    adjustedFundingRateCap: item.adjustedFundingRateCap ?? null,
+    adjustedFundingRateFloor: item.adjustedFundingRateFloor ?? null,
+    disclaimer: Boolean(item.disclaimer)
+  };
+}
+
+export async function fetchFundingInfo() {
+  const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/fundingInfo`, "Binance funding info", {
+    weight: 0
+  });
+  return Array.isArray(data) ? data.map(normalizeFundingInfoItem).filter(Boolean) : [];
+}

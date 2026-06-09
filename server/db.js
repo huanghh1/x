@@ -131,6 +131,24 @@ const TABLE_SQL = [
     PRIMARY KEY (symbol),
     KEY idx_multi_history_last (last_triggered_at),
     KEY idx_multi_history_count (multi_match_count, last_triggered_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS funding_interval_state (
+    symbol VARCHAR(32) NOT NULL,
+    funding_interval_hours SMALLINT UNSIGNED NOT NULL,
+    previous_funding_interval_hours SMALLINT UNSIGNED NULL,
+    adjusted_funding_rate_cap DECIMAL(18,10) NULL,
+    adjusted_funding_rate_floor DECIMAL(18,10) NULL,
+    disclaimer TINYINT(1) NOT NULL DEFAULT 0,
+    source_present TINYINT(1) NOT NULL DEFAULT 1,
+    first_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    last_changed_at DATETIME(3) NULL,
+    one_hour_alerted_at DATETIME(3) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol),
+    KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
+    KEY idx_funding_last_changed (last_changed_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 ];
 
@@ -509,6 +527,126 @@ export async function markMaintenanceState(taskName, result) {
       last_result=VALUES(last_result)`,
     { taskName, result: String(result).slice(0, 2000) }
   );
+}
+
+function normalizedFundingIntervalItem(item) {
+  const symbol = sanitizeDbSymbol(item?.symbol);
+  const fundingIntervalHours = Math.max(0, Math.floor(Number(item?.fundingIntervalHours) || 0));
+  if (!symbol || fundingIntervalHours <= 0) return null;
+  const cap = Number(item?.adjustedFundingRateCap);
+  const floor = Number(item?.adjustedFundingRateFloor);
+  return {
+    symbol,
+    fundingIntervalHours,
+    adjustedFundingRateCap: Number.isFinite(cap) ? cap : null,
+    adjustedFundingRateFloor: Number.isFinite(floor) ? floor : null,
+    disclaimer: item?.disclaimer ? 1 : 0
+  };
+}
+
+export async function recordFundingIntervalSnapshot(items) {
+  const normalized = (items ?? []).map(normalizedFundingIntervalItem).filter(Boolean);
+  if (!normalized.length) return { seenCount: 0, symbols: [] };
+
+  const rows = normalized.map((item) => [
+    item.symbol,
+    item.fundingIntervalHours,
+    item.adjustedFundingRateCap,
+    item.adjustedFundingRateFloor,
+    item.disclaimer,
+    1
+  ]);
+
+  await getPool().query(
+    `INSERT INTO funding_interval_state
+      (symbol, funding_interval_hours, adjusted_funding_rate_cap, adjusted_funding_rate_floor, disclaimer, source_present)
+     VALUES ?
+     ON DUPLICATE KEY UPDATE
+      previous_funding_interval_hours=IF(funding_interval_hours <> VALUES(funding_interval_hours), funding_interval_hours, previous_funding_interval_hours),
+      last_changed_at=IF(funding_interval_hours <> VALUES(funding_interval_hours), NOW(3), last_changed_at),
+      one_hour_alerted_at=IF(VALUES(funding_interval_hours) <> 1 AND funding_interval_hours <> VALUES(funding_interval_hours), NULL, one_hour_alerted_at),
+      funding_interval_hours=VALUES(funding_interval_hours),
+      adjusted_funding_rate_cap=VALUES(adjusted_funding_rate_cap),
+      adjusted_funding_rate_floor=VALUES(adjusted_funding_rate_floor),
+      disclaimer=VALUES(disclaimer),
+      source_present=1,
+      last_seen_at=NOW(3)`,
+    [rows]
+  );
+
+  return { seenCount: normalized.length, symbols: normalized.map((item) => item.symbol) };
+}
+
+export async function markFundingIntervalsMissingFromSnapshot(symbols, defaultIntervalHours = 4) {
+  const safeSymbols = (symbols ?? []).map(sanitizeDbSymbol).filter(Boolean);
+  const safeDefault = Math.max(1, Math.floor(Number(defaultIntervalHours) || 4));
+  const params = { defaultIntervalHours: safeDefault };
+  const whereSql = safeSymbols.length
+    ? "source_present=1 AND symbol NOT IN (:symbols)"
+    : "source_present=1";
+  if (safeSymbols.length) params.symbols = safeSymbols;
+  const [result] = await getPool().query(
+    `UPDATE funding_interval_state
+     SET previous_funding_interval_hours=IF(funding_interval_hours <> :defaultIntervalHours, funding_interval_hours, previous_funding_interval_hours),
+         last_changed_at=IF(funding_interval_hours <> :defaultIntervalHours, NOW(3), last_changed_at),
+         one_hour_alerted_at=IF(funding_interval_hours = 1 AND :defaultIntervalHours <> 1, NULL, one_hour_alerted_at),
+         funding_interval_hours=:defaultIntervalHours,
+         source_present=0
+     WHERE ${whereSql}`,
+    params
+  );
+  return result.affectedRows ?? 0;
+}
+
+export async function listPendingFundingIntervalAlerts(targetIntervalHours = 1, limit = 100) {
+  const safeTarget = Math.max(1, Math.floor(Number(targetIntervalHours) || 1));
+  const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+  const [rows] = await getPool().query(
+    `SELECT symbol,
+      previous_funding_interval_hours AS previousFundingIntervalHours,
+      funding_interval_hours AS fundingIntervalHours,
+      adjusted_funding_rate_cap AS adjustedFundingRateCap,
+      adjusted_funding_rate_floor AS adjustedFundingRateFloor,
+      disclaimer,
+      source_present AS sourcePresent,
+      first_seen_at AS firstSeenAt,
+      last_seen_at AS lastSeenAt,
+      last_changed_at AS lastChangedAt
+     FROM funding_interval_state
+     WHERE funding_interval_hours=:targetIntervalHours
+       AND one_hour_alerted_at IS NULL
+     ORDER BY COALESCE(last_changed_at, first_seen_at) ASC, symbol ASC
+     LIMIT :limit`,
+    { targetIntervalHours: safeTarget, limit: safeLimit }
+  );
+  return rows.map((row) => ({
+    ...row,
+    previousFundingIntervalHours:
+      row.previousFundingIntervalHours === null || row.previousFundingIntervalHours === undefined
+        ? null
+        : Number(row.previousFundingIntervalHours),
+    fundingIntervalHours: Number(row.fundingIntervalHours),
+    adjustedFundingRateCap:
+      row.adjustedFundingRateCap === null || row.adjustedFundingRateCap === undefined
+        ? null
+        : Number(row.adjustedFundingRateCap),
+    adjustedFundingRateFloor:
+      row.adjustedFundingRateFloor === null || row.adjustedFundingRateFloor === undefined
+        ? null
+        : Number(row.adjustedFundingRateFloor),
+    disclaimer: Boolean(row.disclaimer),
+    sourcePresent: Boolean(row.sourcePresent)
+  }));
+}
+
+export async function markFundingIntervalAlertSent(symbols) {
+  const safeSymbols = (symbols ?? []).map(sanitizeDbSymbol).filter(Boolean);
+  if (!safeSymbols.length) return 0;
+  const [result] = await getPool().query(
+    "UPDATE funding_interval_state SET one_hour_alerted_at=NOW(3) WHERE symbol IN (?)",
+    [safeSymbols]
+  );
+  return result.affectedRows ?? 0;
 }
 
 export async function insertKlinePage(token, intervalCode, klines) {

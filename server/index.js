@@ -27,6 +27,11 @@ import {
 } from "./db.js";
 import { fetchKlinesPaged, fetchRecentKlines } from "./binance.js";
 import { getCrawlerState, initializeTokenUniverse, startCrawler, stopCrawler } from "./crawler.js";
+import {
+  getFundingIntervalMonitorState,
+  runFundingIntervalCheck,
+  startFundingIntervalMonitor
+} from "./fundingMonitor.js";
 import { getHotRank } from "./hotRank.js";
 import { calculateSignal, INTERVALS } from "./ma.js";
 import { getMaintenanceRuntimeState, startMaintenanceScheduler } from "./maintenance.js";
@@ -55,6 +60,7 @@ app.get("/api/health", async (_request, response) => {
       crawler: getCrawlerState(),
       maintenance: getMaintenanceRuntimeState(),
       watchRealtime: getWatchlistRealtimeState(),
+      fundingMonitor: getFundingIntervalMonitorState(),
       telegram: { ...telegramState(), bot: getTelegramBotState() },
       now: new Date().toISOString()
     });
@@ -95,6 +101,7 @@ app.get("/api/overview", async (_request, response) => {
     overview: await getOverview(),
     crawler: getCrawlerState(),
     watchRealtime: getWatchlistRealtimeState(),
+    fundingMonitor: getFundingIntervalMonitorState(),
     telegram: { ...telegramState(), bot: getTelegramBotState() },
     database: "connected"
   });
@@ -166,6 +173,17 @@ app.get("/api/hot-rank", async (request, response) => {
       }
     }
     response.json({ ...payload, newTokens: freshTokens.length });
+  } catch (error) {
+    response.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/funding-interval/check", async (_request, response) => {
+  try {
+    response.json(await runFundingIntervalCheck({ force: true }));
   } catch (error) {
     response.status(502).json({
       ok: false,
@@ -367,6 +385,7 @@ startTelegramBot();
 startWatchlistRealtime({ alertSender: sendWatchlistTelegram }).catch((error) => {
   console.error("watchlist realtime start failed", error);
 });
+startFundingIntervalMonitor();
 
 let watchlistRefreshing = false;
 let lastWatchlistFastRefreshAt = 0;
