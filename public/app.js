@@ -40,6 +40,14 @@ const state = {
   hotRankPage: 1,
   hotRankPageSize: 20,
   hotRankTotal: 0,
+  fundingTokens: [],
+  ioData: [],
+  ioWindow: "5m",
+  ioSort: "desc",
+  triggerHistory: [],
+  triggerHistoryPage: 1,
+  triggerHistoryPageSize: 20,
+  triggerHistoryTotal: 0,
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
   watchRealtimeSignature: "",
@@ -331,6 +339,65 @@ function updateHeatPagination() {
   document.querySelectorAll("[data-heat-pagesize]").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.heatPagesize) === state.hotRankPageSize);
   });
+}
+
+async function loadFundingRateTokens() {
+  try {
+    const payload = await api("/api/funding-rate-tokens");
+    state.fundingTokens = payload.tokens || [];
+    renderFundingRateTokens();
+  } catch (error) {
+    console.error("load funding rate tokens failed", error);
+  }
+}
+
+function renderFundingRateTokens() {
+  const target = $("#fundingRateRows");
+  if (!target) return;
+
+  if (!state.fundingTokens.length) {
+    target.innerHTML = '<div class="heat-empty">当前没有1小时资金费率的代币。</div>';
+    return;
+  }
+
+  target.innerHTML = state.fundingTokens
+    .map((token) => `
+      <div class="pool-item">
+        <span>${escapeHtml(token.symbol)}</span>
+        <span>下次结算: ${token.next_settlement_time ? formatTime(token.next_settlement_time) : 'N/A'}</span>
+      </div>
+    `)
+    .join("");
+}
+
+async function loadIOMonitoring() {
+  try {
+    const payload = await api(`/api/io-monitoring?timeWindow=${encodeURIComponent(state.ioWindow)}&sort=${encodeURIComponent(state.ioSort)}`);
+    state.ioData = payload.data || [];
+    renderIOMonitoring();
+  } catch (error) {
+    console.error("load io monitoring failed", error);
+  }
+}
+
+function renderIOMonitoring() {
+  const target = $("#ioRows");
+  if (!target) return;
+
+  if (!state.ioData.length) {
+    target.innerHTML = '<div class="heat-empty">暂无IO数据。</div>';
+    return;
+  }
+
+  target.innerHTML = state.ioData
+    .map((item) => `
+      <div class="pool-item">
+        <span>${escapeHtml(item.symbol)} - ${escapeHtml(item.time_window)}</span>
+        <span>IO: ${formatNumber(item.spike_value, 2)} (${formatPercent(item.spike_percent)})</span>
+        <span>${formatTime(item.spike_time)}</span>
+      </div>
+    `)
+    .join("");
 }
 
 async function loadHotRank({ silent = false } = {}) {
@@ -945,6 +1012,8 @@ function setPage(page) {
   if (page === "heat") loadHotRank({ silent: true });
   if (page === "watch") loadWatchlist();
   else closeWatchRealtime();
+  if (page === "funding") loadFundingRateTokens();
+  if (page === "io") loadIOMonitoring();
 }
 
 function toggleRow(key) {
@@ -1610,6 +1679,19 @@ $("#nextHeatPageBtn")?.addEventListener("click", async () => {
     renderHotRank();
   }
 });
+
+document.querySelectorAll("[data-io-window]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.ioWindow = btn.dataset.ioWindow;
+    document.querySelectorAll("[data-io-window]").forEach((b) => {
+      b.classList.toggle("active", b === btn);
+    });
+    loadIOMonitoring();
+  });
+});
+
+$("#refreshFundingBtn")?.addEventListener("click", () => loadFundingRateTokens());
+$("#refreshIoBtn")?.addEventListener("click", () => loadIOMonitoring());
 
 $("#refreshHotRankBtn")?.addEventListener("click", () => loadHotRank());
 $("#refreshWatchBtn")?.addEventListener("click", () => loadWatchlist());

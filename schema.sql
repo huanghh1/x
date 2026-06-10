@@ -158,3 +158,49 @@ CREATE TABLE IF NOT EXISTS funding_interval_state (
   KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
   KEY idx_funding_last_changed (last_changed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 触发历史记录表
+CREATE TABLE IF NOT EXISTS signal_trigger_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  symbol VARCHAR(32) NOT NULL,
+  trigger_type ENUM('MA_SIGNAL', 'HOT_RANK', 'FUNDING_RATE', 'IO_SPIKE', 'COMPOSITE') NOT NULL,
+  intervals_triggered VARCHAR(100),
+  signal_level VARCHAR(20),
+  trigger_time DATETIME NOT NULL,
+  details JSON,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_symbol_time (symbol, trigger_time DESC),
+  KEY idx_trigger_type_time (trigger_type, trigger_time DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 资金费率代币表
+CREATE TABLE IF NOT EXISTS funding_rate_tokens (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  symbol VARCHAR(32) NOT NULL UNIQUE,
+  funding_interval VARCHAR(50),
+  next_settlement_time DATETIME,
+  is_1hour BOOLEAN,
+  last_check_at DATETIME,
+  KEY idx_1hour_check (is_1hour, last_check_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- IO监控表
+CREATE TABLE IF NOT EXISTS io_monitoring (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  symbol VARCHAR(32) NOT NULL,
+  time_window VARCHAR(20),
+  spike_value DECIMAL(18,8),
+  spike_percent DECIMAL(10,2),
+  spike_time DATETIME,
+  telegram_sent_at DATETIME NULL,
+  KEY idx_window_value (time_window, spike_value DESC, spike_time DESC),
+  KEY idx_symbol_window_time (symbol, time_window, spike_time DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 添加优化索引
+ALTER TABLE signal_result ADD INDEX IF NOT EXISTS idx_symbol_interval_time (symbol, interval_code, signal_time DESC);
+ALTER TABLE signal_result ADD INDEX IF NOT EXISTS idx_alert_level_weight (alert_level, signal_weight DESC, signal_time DESC);
+ALTER TABLE kline_cache ADD INDEX IF NOT EXISTS idx_symbol_interval_time (symbol, interval_code, open_time DESC);
+ALTER TABLE hot_rank_seen ADD INDEX IF NOT EXISTS idx_last_seen (last_seen_at DESC);
+ALTER TABLE token_list ADD INDEX IF NOT EXISTS idx_fetch_status (fetch_status, updated_at);

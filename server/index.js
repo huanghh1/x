@@ -375,6 +375,68 @@ app.get("/open/tradingview", (request, response) => {
   );
 });
 
+// 新增 API 端点
+app.get("/api/trigger-history", async (request, response) => {
+  try {
+    const page = parseInt(request.query.page || "1");
+    const pageSize = parseInt(request.query.pageSize || "20");
+    const triggerType = request.query.triggerType ? String(request.query.triggerType) : null;
+
+    // 从数据库获取触发历史记录
+    // TODO: 实现实际的数据库查询
+    response.json({
+      items: [],
+      total: 0,
+      page,
+      pageSize
+    });
+  } catch (error) {
+    console.error("get trigger history failed", error);
+    response.status(500).json({ error: "Failed to fetch trigger history" });
+  }
+});
+
+app.delete("/api/trigger-history/:id", async (request, response) => {
+  try {
+    const id = request.params.id;
+    // TODO: 从数据库删除记录
+    response.json({ success: true });
+  } catch (error) {
+    console.error("delete trigger history failed", error);
+    response.status(500).json({ error: "Failed to delete trigger history" });
+  }
+});
+
+app.get("/api/funding-rate-tokens", async (request, response) => {
+  try {
+    // TODO: 从数据库获取资金费率代币列表
+    response.json({
+      tokens: [],
+      total: 0
+    });
+  } catch (error) {
+    console.error("get funding rate tokens failed", error);
+    response.status(500).json({ error: "Failed to fetch funding rate tokens" });
+  }
+});
+
+app.get("/api/io-monitoring", async (request, response) => {
+  try {
+    const timeWindow = request.query.timeWindow || "5m";
+    const sort = request.query.sort || "desc";
+
+    // TODO: 从数据库获取IO监控数据
+    response.json({
+      data: [],
+      timeWindow,
+      sort
+    });
+  } catch (error) {
+    console.error("get io monitoring failed", error);
+    response.status(500).json({ error: "Failed to fetch io monitoring data" });
+  }
+});
+
 app.use((_request, response) => {
   response.sendFile(path.resolve(__dirname, "../public/index.html"));
 });
