@@ -19,6 +19,7 @@
             <a class="nav-tab" href="#watchPage" data-nav-page="watch">关注池</a>
             <a class="nav-tab" href="#fundingPage" data-nav-page="funding">资金费率</a>
             <a class="nav-tab" href="#ioPage" data-nav-page="io">IO监控</a>
+            <a class="nav-tab" href="#triggerHistoryPage" data-nav-page="trigger-history">触发历史</a>
             <span id="dbState" class="dot-label">数据库检查中</span>
           </div>
         </nav>
@@ -230,6 +231,64 @@
 
           <div id="ioRows">
             <div class="heat-empty">暂无IO数据。</div>
+          </div>
+        </section>
+
+        <section id="triggerHistoryPage" class="section page-section" aria-labelledby="triggerHistoryTitle" data-page-section="trigger-history">
+          <div class="section-head">
+            <div>
+              <h2 id="triggerHistoryTitle">触发历史记录</h2>
+              <p>记录所有信号触发事件，包括均线、热度、资金费率等。</p>
+            </div>
+            <div class="table-actions">
+              <button id="clearTriggerHistoryBtn" class="ghost-button" type="button">清空历史</button>
+              <button id="refreshTriggerHistoryBtn" class="ghost-button" type="button">刷新数据</button>
+            </div>
+          </div>
+
+          <div class="filter-panel" aria-label="trigger history filters">
+            <details class="filter-menu">
+              <summary>触发类型</summary>
+              <label><input type="checkbox" data-trigger-filter="type" data-value="MA_SIGNAL" checked /> 均线信号</label>
+              <label><input type="checkbox" data-trigger-filter="type" data-value="HOT_RANK" checked /> 热度排行</label>
+              <label><input type="checkbox" data-trigger-filter="type" data-value="FUNDING_RATE" checked /> 资金费率</label>
+              <label><input type="checkbox" data-trigger-filter="type" data-value="IO_SPIKE" checked /> IO暴涨</label>
+              <label><input type="checkbox" data-trigger-filter="type" data-value="COMPOSITE" checked /> 复合信号</label>
+            </details>
+          </div>
+
+          <div class="table-card">
+            <table>
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="selectAllTrigger" /></th>
+                  <th>代币</th>
+                  <th>触发类型</th>
+                  <th>周期</th>
+                  <th>等级</th>
+                  <th>触发时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="triggerHistoryRows">
+                <tr><td colspan="7" class="empty">等待数据</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-bar" aria-label="trigger history pagination">
+            <span id="triggerHistoryPaginationSummary">--</span>
+            <div class="page-size">
+              <span>每页</span>
+              <button class="page-size-btn active" type="button" data-trigger-pagesize="20">20</button>
+              <button class="page-size-btn" type="button" data-trigger-pagesize="50">50</button>
+              <button class="page-size-btn" type="button" data-trigger-pagesize="100">100</button>
+            </div>
+            <div class="page-buttons">
+              <button id="prevTriggerPageBtn" class="ghost-button" type="button">上一页</button>
+              <strong id="triggerPageIndicator">1 / 1</strong>
+              <button id="nextTriggerPageBtn" class="ghost-button" type="button">下一页</button>
+            </div>
           </div>
         </section>
 

@@ -215,7 +215,8 @@ body[data-page="signals"] [data-page-section="signals"],
 body[data-page="heat"] [data-page-section="heat"],
 body[data-page="watch"] [data-page-section="watch"],
 body[data-page="funding"] [data-page-section="funding"],
-body[data-page="io"] [data-page-section="io"] {
+body[data-page="io"] [data-page-section="io"],
+body[data-page="trigger-history"] [data-page-section="trigger-history"] {
   display: block;
 }
 

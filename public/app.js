@@ -400,6 +400,62 @@ function renderIOMonitoring() {
     .join("");
 }
 
+async function loadTriggerHistory() {
+  try {
+    const payload = await api(`/api/trigger-history?page=${state.triggerHistoryPage}&pageSize=${state.triggerHistoryPageSize}`);
+    state.triggerHistory = payload.items || [];
+    state.triggerHistoryTotal = payload.total || 0;
+    renderTriggerHistory();
+  } catch (error) {
+    console.error("load trigger history failed", error);
+  }
+}
+
+function renderTriggerHistory() {
+  const target = $("#triggerHistoryRows");
+  if (!target) return;
+
+  if (!state.triggerHistory.length) {
+    target.innerHTML = '<tr><td colspan="7" class="empty">暂无记录</td></tr>';
+    updateTriggerHistoryPagination();
+    return;
+  }
+
+  target.innerHTML = state.triggerHistory
+    .map((item) => `
+      <tr>
+        <td><input type="checkbox" data-trigger-id="${item.id}" /></td>
+        <td>${escapeHtml(item.symbol)}</td>
+        <td>${escapeHtml(item.trigger_type)}</td>
+        <td>${escapeHtml(item.intervals_triggered || '-')}</td>
+        <td>${escapeHtml(item.signal_level || '-')}</td>
+        <td>${formatTime(item.trigger_time)}</td>
+        <td><button class="ghost-button" data-delete-trigger="${item.id}">删除</button></td>
+      </tr>
+    `)
+    .join("");
+
+  updateTriggerHistoryPagination();
+}
+
+function updateTriggerHistoryPagination() {
+  const totalPages = Math.ceil(state.triggerHistoryTotal / state.triggerHistoryPageSize) || 1;
+  const summary = state.triggerHistoryTotal
+    ? `第 ${state.triggerHistoryPage} / ${totalPages} 页，共 ${state.triggerHistoryTotal} 项`
+    : "--";
+  setText("#triggerHistoryPaginationSummary", summary);
+  setText("#triggerPageIndicator", `${state.triggerHistoryPage} / ${totalPages}`);
+
+  const prevBtn = $("#prevTriggerPageBtn");
+  const nextBtn = $("#nextTriggerPageBtn");
+  if (prevBtn) prevBtn.disabled = state.triggerHistoryPage <= 1;
+  if (nextBtn) nextBtn.disabled = state.triggerHistoryPage >= totalPages;
+
+  document.querySelectorAll("[data-trigger-pagesize]").forEach((btn) => {
+    btn.classList.toggle("active", parseInt(btn.dataset.triggerPagesize) === state.triggerHistoryPageSize);
+  });
+}
+
 async function loadHotRank({ silent = false } = {}) {
   if (state.hotRankLoading) return;
   state.hotRankLoading = true;
@@ -993,6 +1049,7 @@ function pageFromHash() {
   if (window.location.hash === "#watchPage") return "watch";
   if (window.location.hash === "#fundingPage") return "funding";
   if (window.location.hash === "#ioPage") return "io";
+  if (window.location.hash === "#triggerHistoryPage") return "trigger-history";
   if (window.location.hash === "#overview") {
     window.history.replaceState(null, "", "#signalsPage");
   }
@@ -1014,6 +1071,7 @@ function setPage(page) {
   else closeWatchRealtime();
   if (page === "funding") loadFundingRateTokens();
   if (page === "io") loadIOMonitoring();
+  if (page === "trigger-history") loadTriggerHistory();
 }
 
 function toggleRow(key) {
@@ -1692,6 +1750,56 @@ document.querySelectorAll("[data-io-window]").forEach((btn) => {
 
 $("#refreshFundingBtn")?.addEventListener("click", () => loadFundingRateTokens());
 $("#refreshIoBtn")?.addEventListener("click", () => loadIOMonitoring());
+$("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
+$("#clearTriggerHistoryBtn")?.addEventListener("click", async () => {
+  if (!confirm("确定要清空所有历史记录吗？")) return;
+  try {
+    await api("/api/trigger-history", { method: "DELETE" });
+    state.triggerHistory = [];
+    state.triggerHistoryTotal = 0;
+    renderTriggerHistory();
+  } catch (error) {
+    console.error("clear trigger history failed", error);
+  }
+});
+
+document.addEventListener("click", async (e) => {
+  const deleteBtn = e.target.closest("[data-delete-trigger]");
+  if (deleteBtn) {
+    const id = deleteBtn.dataset.deleteTrigger;
+    if (confirm("确定要删除这条记录吗？")) {
+      try {
+        await api(`/api/trigger-history/${id}`, { method: "DELETE" });
+        await loadTriggerHistory();
+      } catch (error) {
+        console.error("delete trigger history failed", error);
+      }
+    }
+  }
+});
+
+document.querySelectorAll("[data-trigger-pagesize]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.triggerHistoryPageSize = Number(btn.dataset.triggerPagesize);
+    state.triggerHistoryPage = 1;
+    loadTriggerHistory();
+  });
+});
+
+$("#prevTriggerPageBtn")?.addEventListener("click", () => {
+  if (state.triggerHistoryPage > 1) {
+    state.triggerHistoryPage -= 1;
+    loadTriggerHistory();
+  }
+});
+
+$("#nextTriggerPageBtn")?.addEventListener("click", () => {
+  const totalPages = Math.ceil(state.triggerHistoryTotal / state.triggerHistoryPageSize) || 1;
+  if (state.triggerHistoryPage < totalPages) {
+    state.triggerHistoryPage += 1;
+    loadTriggerHistory();
+  }
+});
 
 $("#refreshHotRankBtn")?.addEventListener("click", () => loadHotRank());
 $("#refreshWatchBtn")?.addEventListener("click", () => loadWatchlist());
