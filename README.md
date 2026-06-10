@@ -33,7 +33,10 @@ npm start
 ```text
 http://localhost:8787
 ```
-
+## 关闭后台运行
+pm2 stop 二级监控
+## 永久删除关闭后台运行
+pm2 delete 二级监控
 ## 核心规则
 
 - 目标代币分两类：A 类为 Alpha + 合约 + 无现货；B 类为现货 + 合约。
