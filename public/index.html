@@ -11,10 +11,14 @@
       <header class="site-header">
         <nav class="nav">
           <a class="brand" href="#signalsPage">signal.monitor<span>.</span></a>
-          <div class="nav-actions">
+        </nav>
+        <nav class="navbar-sticky">
+          <div class="navbar-container">
             <a class="nav-tab active" href="#signalsPage" data-nav-page="signals">均线信号</a>
             <a class="nav-tab" href="#heatPage" data-nav-page="heat">热度排行</a>
             <a class="nav-tab" href="#watchPage" data-nav-page="watch">关注池</a>
+            <a class="nav-tab" href="#fundingPage" data-nav-page="funding">资金费率</a>
+            <a class="nav-tab" href="#ioPage" data-nav-page="io">IO监控</a>
             <span id="dbState" class="dot-label">数据库检查中</span>
           </div>
         </nav>
@@ -72,6 +76,20 @@
           <div class="heat-rank-status" id="hotRankStatus">等待刷新</div>
           <div class="heat-rank-list" id="hotRankRows">
             <div class="heat-empty">暂无热度数据。</div>
+          </div>
+          <div class="pagination-bar" aria-label="hot rank pagination">
+            <span id="heatPaginationSummary">--</span>
+            <div class="page-size">
+              <span>每页</span>
+              <button class="page-size-btn active" type="button" data-heat-pagesize="20">20</button>
+              <button class="page-size-btn" type="button" data-heat-pagesize="50">50</button>
+              <button class="page-size-btn" type="button" data-heat-pagesize="100">100</button>
+            </div>
+            <div class="page-buttons">
+              <button id="prevHeatPageBtn" class="ghost-button" type="button">上一页</button>
+              <strong id="heatPageIndicator">1 / 1</strong>
+              <button id="nextHeatPageBtn" class="ghost-button" type="button">下一页</button>
+            </div>
           </div>
         </section>
 
@@ -172,6 +190,46 @@
 
           <div class="watch-list" id="watchRows">
             <div class="heat-empty">暂无关注代币。</div>
+          </div>
+        </section>
+
+        <section id="fundingPage" class="section page-section" aria-labelledby="fundingTitle" data-page-section="funding">
+          <div class="section-head">
+            <div>
+              <h2 id="fundingTitle">资金费率监控</h2>
+              <p>监控Binance期货资金费率变化，检测1小时结算期的代币。</p>
+            </div>
+            <div class="table-actions">
+              <button id="refreshFundingBtn" class="ghost-button" type="button">刷新资金费率</button>
+            </div>
+          </div>
+
+          <div id="fundingRateRows">
+            <div class="heat-empty">当前没有1小时资金费率的代币。</div>
+          </div>
+        </section>
+
+        <section id="ioPage" class="section page-section" aria-labelledby="ioTitle" data-page-section="io">
+          <div class="section-head">
+            <div>
+              <h2 id="ioTitle">IO监控</h2>
+              <p>实时监控IO指标，检测异常暴涨信号。</p>
+            </div>
+            <div class="table-actions">
+              <button id="refreshIoBtn" class="ghost-button" type="button">刷新数据</button>
+            </div>
+          </div>
+
+          <div class="table-actions">
+            <button class="page-size-btn active" type="button" data-io-window="5m">5分钟</button>
+            <button class="page-size-btn" type="button" data-io-window="15m">15分钟</button>
+            <button class="page-size-btn" type="button" data-io-window="1h">1小时</button>
+            <button class="page-size-btn" type="button" data-io-window="4h">4小时</button>
+            <button class="page-size-btn" type="button" data-io-window="1d">1天</button>
+          </div>
+
+          <div id="ioRows">
+            <div class="heat-empty">暂无IO数据。</div>
           </div>
         </section>
 

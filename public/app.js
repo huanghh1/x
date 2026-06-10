@@ -37,6 +37,9 @@ const state = {
   hotRankErrors: [],
   hotRankLoading: false,
   hotRankError: "",
+  hotRankPage: 1,
+  hotRankPageSize: 20,
+  hotRankTotal: 0,
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
   watchRealtimeSignature: "",
@@ -245,7 +248,7 @@ function renderHotRank() {
   const status = $("#hotRankStatus");
   if (!target || !status) return;
 
-  setText("#heatRankCount", state.hotRank.length || "--");
+  setText("#heatRankCount", state.hotRankTotal || "--");
   document.querySelectorAll("[data-heat-chain]").forEach((button) => {
     button.classList.toggle("active", button.dataset.heatChain === state.hotRankChain);
   });
@@ -253,6 +256,7 @@ function renderHotRank() {
   if (state.hotRankLoading) {
     status.textContent = "正在刷新热度排行...";
     target.innerHTML = '<div class="heat-empty">正在读取 Binance 社交热度数据。</div>';
+    updateHeatPagination();
     return;
   }
 
@@ -270,10 +274,16 @@ function renderHotRank() {
 
   if (!state.hotRank.length) {
     target.innerHTML = '<div class="heat-empty">暂无热度数据。</div>';
+    updateHeatPagination();
     return;
   }
 
-  target.innerHTML = state.hotRank
+  // 分页显示
+  const startIdx = (state.hotRankPage - 1) * state.hotRankPageSize;
+  const endIdx = startIdx + state.hotRankPageSize;
+  const pageData = state.hotRank.slice(startIdx, endIdx);
+
+  target.innerHTML = pageData
     .map((token) => {
       const change = Number(token.priceChange);
       const changeClass = Number.isFinite(change) && change < 0 ? "down" : "up";
@@ -301,6 +311,26 @@ function renderHotRank() {
       `;
     })
     .join("");
+
+  updateHeatPagination();
+}
+
+function updateHeatPagination() {
+  const totalPages = Math.ceil(state.hotRankTotal / state.hotRankPageSize) || 1;
+  const summary = state.hotRankTotal
+    ? `第 ${state.hotRankPage} / ${totalPages} 页，共 ${state.hotRankTotal} 项`
+    : "--";
+  setText("#heatPaginationSummary", summary);
+  setText("#heatPageIndicator", `${state.hotRankPage} / ${totalPages}`);
+
+  const prevBtn = $("#prevHeatPageBtn");
+  const nextBtn = $("#nextHeatPageBtn");
+  if (prevBtn) prevBtn.disabled = state.hotRankPage <= 1;
+  if (nextBtn) nextBtn.disabled = state.hotRankPage >= totalPages;
+
+  document.querySelectorAll("[data-heat-pagesize]").forEach((btn) => {
+    btn.classList.toggle("active", parseInt(btn.dataset.heatPagesize) === state.hotRankPageSize);
+  });
 }
 
 async function loadHotRank({ silent = false } = {}) {
@@ -309,8 +339,9 @@ async function loadHotRank({ silent = false } = {}) {
   if (!silent) renderHotRank();
   try {
     state.hotRankError = "";
-    const payload = await api(`/api/hot-rank?chain=${encodeURIComponent(state.hotRankChain)}&limit=30`);
+    const payload = await api(`/api/hot-rank?chain=${encodeURIComponent(state.hotRankChain)}&limit=500`);
     state.hotRank = payload.tokens ?? [];
+    state.hotRankTotal = state.hotRank.length;
     state.hotRankSource = payload.source ?? "";
     state.hotRankFetchedAt = payload.fetchedAt ?? new Date().toISOString();
     state.hotRankPartial = Boolean(payload.partial);
@@ -893,6 +924,8 @@ function updateWatchRealtime() {
 function pageFromHash() {
   if (window.location.hash === "#heatPage") return "heat";
   if (window.location.hash === "#watchPage") return "watch";
+  if (window.location.hash === "#fundingPage") return "funding";
+  if (window.location.hash === "#ioPage") return "io";
   if (window.location.hash === "#overview") {
     window.history.replaceState(null, "", "#signalsPage");
   }
@@ -1550,9 +1583,33 @@ for (const button of document.querySelectorAll(".page-size .page-size-btn")) {
 for (const button of document.querySelectorAll("[data-heat-chain]")) {
   button.addEventListener("click", async () => {
     state.hotRankChain = button.dataset.heatChain ?? "all";
+    state.hotRankPage = 1;
     await loadHotRank();
   });
 }
+
+for (const button of document.querySelectorAll("[data-heat-pagesize]")) {
+  button.addEventListener("click", () => {
+    state.hotRankPageSize = Number(button.dataset.heatPagesize);
+    state.hotRankPage = 1;
+    renderHotRank();
+  });
+}
+
+$("#prevHeatPageBtn")?.addEventListener("click", async () => {
+  if (state.hotRankPage > 1) {
+    state.hotRankPage -= 1;
+    renderHotRank();
+  }
+});
+
+$("#nextHeatPageBtn")?.addEventListener("click", async () => {
+  const totalPages = Math.ceil(state.hotRankTotal / state.hotRankPageSize) || 1;
+  if (state.hotRankPage < totalPages) {
+    state.hotRankPage += 1;
+    renderHotRank();
+  }
+});
 
 $("#refreshHotRankBtn")?.addEventListener("click", () => loadHotRank());
 $("#refreshWatchBtn")?.addEventListener("click", () => loadWatchlist());
