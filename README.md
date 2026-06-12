@@ -33,6 +33,8 @@ npm start
 ```text
 http://localhost:8787
 ```
+## 启动后台运行
+pm2 start 二级监控
 ## 关闭后台运行
 pm2 stop 二级监控
 ## 永久删除关闭后台运行
