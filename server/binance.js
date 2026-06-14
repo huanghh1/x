@@ -298,3 +298,50 @@ export async function fetchFundingInfo() {
   });
   return Array.isArray(data) ? data.map(normalizeFundingInfoItem).filter(Boolean) : [];
 }
+
+export async function fetchCurrentFundingRates() {
+  const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/premiumIndex`, "Binance premium index", {
+    weight: 10
+  });
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => {
+      const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+      const currentFundingRate = Number(item?.lastFundingRate);
+      const nextFundingTime = Number(item?.nextFundingTime);
+      if (!symbol) return null;
+      return {
+        symbol,
+        currentFundingRate: Number.isFinite(currentFundingRate) ? currentFundingRate : null,
+        nextFundingTime: Number.isFinite(nextFundingTime) && nextFundingTime > 0 ? nextFundingTime : null
+      };
+    })
+    .filter(Boolean);
+}
+
+export async function fetchOpenInterestHistory({ symbol, period = "5m", limit = 289 }) {
+  const safePeriod = ["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"].includes(period)
+    ? period
+    : "5m";
+  const safeLimit = Math.max(2, Math.min(500, Number(limit) || 289));
+  const url = new URL(`${config.binance.futuresBaseUrl}/futures/data/openInterestHist`);
+  url.searchParams.set("symbol", symbol);
+  url.searchParams.set("period", safePeriod);
+  url.searchParams.set("limit", String(safeLimit));
+  const data = await fetchJson(url.toString(), `${symbol} open interest history`, { weight: 0 });
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => ({
+      symbol: String(item?.symbol ?? symbol).toUpperCase(),
+      sumOpenInterest: Number(item?.sumOpenInterest),
+      sumOpenInterestValue: Number(item?.sumOpenInterestValue),
+      timestamp: Number(item?.timestamp)
+    }))
+    .filter(
+      (item) =>
+        Number.isFinite(item.sumOpenInterest) &&
+        Number.isFinite(item.sumOpenInterestValue) &&
+        Number.isFinite(item.timestamp)
+    )
+    .sort((a, b) => a.timestamp - b.timestamp);
+}

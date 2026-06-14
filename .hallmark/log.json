@@ -1,0 +1,25 @@
+{
+  "lastUpdatedAt": "2026-06-13",
+  "outputs": [
+    {
+      "target": "public/index.html",
+      "genre": "modern-minimal",
+      "theme": "Quiet dark adaptation",
+      "macrostructure": "Workbench",
+      "navigation": "N5 floating pill",
+      "footer": "Ft2 inline-rule single line",
+      "motion": "motion-cut",
+      "audience": "Binance derivatives researchers",
+      "primaryUse": "Switch signal pools and inspect correlated token evidence",
+      "tone": "technical and austere",
+      "critique": {
+        "philosophy": 5,
+        "hierarchy": 5,
+        "execution": 4,
+        "specificity": 5,
+        "restraint": 4,
+        "variety": 5
+      }
+    }
+  ]
+}

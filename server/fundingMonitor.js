@@ -1,12 +1,15 @@
-import { fetchFundingInfo } from "./binance.js";
+import { fetchCurrentFundingRates, fetchFundingInfo } from "./binance.js";
 import { config } from "./config.js";
 import {
   getMaintenanceState,
+  getSignalCorrelationContext,
+  listOneHourFundingIntervals,
   listPendingFundingIntervalAlerts,
   markFundingIntervalAlertSent,
   markFundingIntervalsMissingFromSnapshot,
   markMaintenanceState,
-  recordFundingIntervalSnapshot
+  recordFundingIntervalSnapshot,
+  recordTriggerHistory
 } from "./db.js";
 import { sendFundingIntervalTelegram } from "./telegram.js";
 
@@ -84,12 +87,39 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
   try {
     const baselineState = await getMaintenanceState(BASELINE_TASK);
     const baselineOnly = !baselineState;
-    const items = await fetchFundingInfo();
+    const [fundingInfo, currentRates] = await Promise.all([
+      fetchFundingInfo(),
+      fetchCurrentFundingRates()
+    ]);
+    const currentRateBySymbol = new Map(currentRates.map((item) => [item.symbol, item]));
+    const items = fundingInfo.map((item) => ({
+      ...item,
+      ...currentRateBySymbol.get(item.symbol)
+    }));
     const snapshot = await recordFundingIntervalSnapshot(items);
     const missingCount = await markFundingIntervalsMissingFromSnapshot(
       snapshot.symbols,
       config.fundingMonitor.defaultIntervalHours
     );
+    const currentOneHourTokens = await listOneHourFundingIntervals();
+    for (const item of currentOneHourTokens) {
+      const stateTime = new Date(item.lastChangedAt ?? item.firstSeenAt ?? item.lastSeenAt ?? Date.now());
+      const triggerTime = Number.isNaN(stateTime.getTime()) ? Date.now() : stateTime.getTime();
+      await recordTriggerHistory({
+        eventKey: `funding:${item.symbol}:${triggerTime}`,
+        symbol: item.symbol,
+        triggerType: "FUNDING_RATE",
+        triggerTime,
+        details: {
+          fundingIntervalHours: item.fundingIntervalHours,
+          previousFundingIntervalHours: item.previousFundingIntervalHours,
+          adjustedFundingRateCap: item.adjustedFundingRateCap,
+          adjustedFundingRateFloor: item.adjustedFundingRateFloor,
+          currentFundingRate: item.currentFundingRate,
+          nextFundingTime: item.nextFundingTime
+        }
+      });
+    }
 
     if (baselineOnly) {
       const baselineTargetSymbols = items
@@ -110,7 +140,8 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
 
     for (const alert of pendingAlerts) {
       try {
-        const result = await sendFundingIntervalTelegram(alert);
+        const context = await getSignalCorrelationContext(alert.symbol);
+        const result = await sendFundingIntervalTelegram(alert, context);
         if (result.skipped) {
           skippedAlerts.push(`${alert.symbol}: ${result.reason}`);
         } else {

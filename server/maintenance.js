@@ -1,5 +1,10 @@
 import { config } from "./config.js";
-import { cleanupAllKlineRetention, getMaintenanceState, markMaintenanceState } from "./db.js";
+import {
+  cleanupAllKlineRetention,
+  cleanupExpiredData,
+  getMaintenanceState,
+  markMaintenanceState
+} from "./db.js";
 
 const KLINE_CLEANUP_TASK = "kline_retention_cleanup";
 
@@ -45,7 +50,11 @@ export async function runWeeklyKlineCleanupIfDue({ initializeOnly = false } = {}
 
   maintenanceState.running = true;
   try {
-    const result = await cleanupAllKlineRetention(config.crawler.retentionLimits);
+    const [klineRetention, expiredData] = await Promise.all([
+      cleanupAllKlineRetention(config.crawler.retentionLimits),
+      cleanupExpiredData()
+    ]);
+    const result = { klineRetention, expiredData };
     const summary = JSON.stringify(result);
     await markMaintenanceState(KLINE_CLEANUP_TASK, summary);
     const updated = await getMaintenanceState(KLINE_CLEANUP_TASK);

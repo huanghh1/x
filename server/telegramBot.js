@@ -1,15 +1,36 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createAsyncCache } from "./asyncCache.js";
 import { config } from "./config.js";
 import { getHotRank } from "./hotRank.js";
-import { getHotMaSignalsPage, getMultiCycleSignalsPage, getSignalsPage, listWatchlist } from "./db.js";
-import { telegramSearchLinks } from "./telegram.js";
+import {
+  getHotMaSignalsPage,
+  getMultiCycleSignalsPage,
+  getSignalGroupsPage,
+  listOneHourFundingIntervals,
+  listOpenInterestMonitor,
+  listWatchlist
+} from "./db.js";
+import { resolveSignalProfile } from "./signalPriority.js";
+import {
+  telegramApi,
+  telegramTokenCopyButton,
+  telegramTokenLine
+} from "./telegram.js";
 
 let botRunning = false;
 let updateOffset = 0;
 let lockFd = null;
+let menuWarmTimer = null;
 const lockPath = path.join(os.tmpdir(), "binance-ma-monitor-telegram-bot.lock");
+const menuCache = createAsyncCache({
+  ttlMs: config.telegram.menuCacheMs,
+  staleMs: config.telegram.menuStaleMs,
+  onBackgroundError: (error) => {
+    console.error("telegram menu background refresh failed:", error instanceof Error ? error.message : error);
+  }
+});
 const botStatus = {
   running: false,
   state: "stopped",
@@ -49,45 +70,6 @@ function levelLabel(level) {
 function clampPage(page, total, pageSize) {
   const totalPages = Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 1)));
   return Math.min(Math.max(1, Number(page) || 1), totalPages);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function telegramApi(method, payload) {
-  const attempts = 2;
-  let lastError = null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const controller = new AbortController();
-    const payloadTimeout = Number(payload?.timeout ?? 0) * 1000;
-    const timer = setTimeout(() => controller.abort(), Math.max(config.telegram.timeoutMs + 3000, payloadTimeout + 8000));
-    try {
-      const response = await fetch(`https://api.telegram.org/bot${config.telegram.botToken}/${method}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.ok === false) {
-        throw new Error(data.description ?? `Telegram ${method} HTTP ${response.status}`);
-      }
-      return data.result;
-    } catch (error) {
-      const cause = error?.cause?.message ? `: ${error.cause.message}` : "";
-      lastError = error instanceof Error && error.message === "fetch failed"
-        ? new Error(`Telegram ${method} fetch failed${cause}`)
-        : error;
-      if (!(lastError instanceof Error) || !lastError.message.includes("fetch failed") || attempt >= attempts - 1) {
-        throw lastError;
-      }
-      await sleep(800 * (attempt + 1));
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  throw lastError ?? new Error(`Telegram ${method} failed`);
 }
 
 async function sendOrEditMessage({ chatId, messageId = null, text, replyMarkup }) {
@@ -161,34 +143,39 @@ function releasePollingLock() {
   }
 }
 
-function signalKeyboard() {
-  const levels = [
-    ["一级", "LEVEL1"],
-    ["二级", "LEVEL2"]
-  ];
-  const intervals = ["15m", "1h", "4h", "1d"];
+function navButtonText(label, key, active) {
+  return active === key ? `【${label}】` : label;
+}
+
+export function signalKeyboard(active = null) {
   return {
     inline_keyboard: [
-      ...levels.map(([label, level]) =>
-        intervals.map((interval) => ({ text: `${label} ${interval}`, callback_data: `sig:${level}:${interval}` }))
-      ),
       [
-        { text: "热度+均线信号", callback_data: "hotma:1" },
-        { text: "多周期共振", callback_data: "multi:1" },
-        { text: "热度排行", callback_data: "heat" },
-        { text: "关注池", callback_data: "watch" }
+        { text: navButtonText("均线组合", "signals", active), callback_data: "signals" },
+        { text: navButtonText("多周期", "multi", active), callback_data: "multi:1" },
+        { text: navButtonText("热度排行", "heat", active), callback_data: "heat" }
+      ],
+      [
+        { text: navButtonText("资金费率", "funding", active), callback_data: "funding" },
+        { text: navButtonText("OI监控", "oi", active), callback_data: "oi:5m:desc" },
+        { text: navButtonText("关注池", "watch", active), callback_data: "watch" }
       ]
     ]
   };
 }
 
-function tokenButtons(symbol) {
-  const links = telegramSearchLinks(symbol);
-  return [
-    { text: `复制 ${symbol}`, copy_text: { text: symbol } },
-    { text: `${symbol} 推特`, url: links.twitter },
-    { text: `${symbol} 广场`, url: links.binanceSquare }
-  ];
+function tokenOperationRows(symbols, limit = 20) {
+  const buttons = [...new Set((symbols ?? []).filter(Boolean))]
+    .slice(0, limit)
+    .map((symbol) => telegramTokenCopyButton(symbol));
+  return Array.from({ length: Math.ceil(buttons.length / 3) }, (_, index) =>
+    buttons.slice(index * 3, index * 3 + 3)
+  );
+}
+
+function appendMainNavigation(keyboard, active = null) {
+  keyboard.inline_keyboard.push(...signalKeyboard(active).inline_keyboard);
+  return keyboard;
 }
 
 function pageButtons({ prefix, page, total, pageSize }) {
@@ -202,51 +189,62 @@ function pageButtons({ prefix, page, total, pageSize }) {
 
 function signalNavKeyboard({ level, interval, page, total, pageSize, symbols }) {
   const keyboard = { inline_keyboard: [] };
-  for (const symbol of symbols) keyboard.inline_keyboard.push(tokenButtons(symbol));
-  keyboard.inline_keyboard.push(pageButtons({ prefix: `sig:${level}:${interval}`, page, total, pageSize }));
-  keyboard.inline_keyboard.push([
-    { text: "热度+均线信号", callback_data: "hotma:1" },
-    { text: "多周期共振", callback_data: "multi:1" },
-    { text: "热度排行", callback_data: "heat" },
-    { text: "关注池", callback_data: "watch" }
-  ]);
-  keyboard.inline_keyboard.push(...signalKeyboard().inline_keyboard.slice(0, 2));
-  return keyboard;
+  keyboard.inline_keyboard.push(pageButtons({ prefix: "ranked", page, total, pageSize }));
+  keyboard.inline_keyboard.push(...tokenOperationRows(symbols));
+  return appendMainNavigation(keyboard, "signals");
 }
 
-function signalRowText(row, index) {
+export function signalRowText(row, index) {
   const multiRequired = Number(row.multiMatchRequired ?? 0);
   const multiCount = Number(row.multiMatchCount ?? 0);
   const multiText = multiRequired > 1 && multiCount >= multiRequired ? `\n多周期：${multiCount}/${multiRequired}` : "";
+  const profile = resolveSignalProfile({
+    fundingOneHour: row.fundingOneHour,
+    oiMatched: row.oiMatched,
+    oiSpike: row.oiSpikeHit,
+    hotRank: Boolean(row.hotRankHit),
+    multiCycleCount: row.multiMatchCount,
+    alertLevel: row.bestAlertLevel ?? row.alertLevel
+  });
+  const formatOiChange = (value) => {
+    const numeric = Number(value);
+    return value === null || value === undefined || !Number.isFinite(numeric) ? "--" : `${numeric.toFixed(2)}%`;
+  };
+  const oiText = row.oiMatched
+    ? `OI暴涨：5m ${formatOiChange(row.oiChange5mPct)}｜1h ${formatOiChange(row.oiChange1hPct)}`
+    : null;
   return [
-    `<b>${index}. ${escapeHtml(row.symbol)}</b>${multiText}`,
-    `分类：${escapeHtml(row.categoryLabel)}｜周期：${escapeHtml(row.intervalCode)}｜等级：${escapeHtml(levelLabel(row.alertLevel))}`,
+    `${telegramTokenLine(row.symbol, `${index}. `)}${multiText}`,
+    `分类：${escapeHtml(row.categoryLabel)}｜周期：${escapeHtml((row.intervals ?? [row.intervalCode]).join(" / "))}`,
+    `组合等级：${escapeHtml(profile.label)}`,
+    oiText ? escapeHtml(oiText) : null,
     `现价：${escapeHtml(formatNumber(row.currentPrice))}`,
     `MA100：${escapeHtml(formatNumber(row.ma100))}`,
     `MA200：${escapeHtml(formatNumber(row.ma200))}`,
     `状态：${escapeHtml(row.signalStatus)}`,
     `说明：${escapeHtml(row.note || "--")}`
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 async function sendSignals(chatId, level = "LEVEL1", interval = "15m", page = 1, messageId = null) {
   const pageSize = 4;
-  const payload = await getSignalsPage({
-    categories: "A,B",
-    levels: level,
-    intervals: interval,
-    page,
-    pageSize
-  });
+  const payload = await menuCache.get(`signals:${page}`, () =>
+    getSignalGroupsPage({
+      categories: "A,B",
+      levels: "LEVEL1,LEVEL2",
+      intervals: "15m,1h,4h,1d",
+      page,
+      pageSize
+    })
+  );
   const safePage = clampPage(payload.page, payload.total, payload.pageSize);
-  const label = levelLabel(level);
   const startIndex = (safePage - 1) * payload.pageSize;
   const rows = payload.signals.map((row, index) => signalRowText(row, startIndex + index + 1));
   const symbols = [...new Set(payload.signals.map((row) => row.symbol).filter(Boolean))];
   const totalPages = Math.max(1, Math.ceil(payload.total / payload.pageSize));
   const text = rows.length
-    ? [`<b>均线信号 · ${escapeHtml(label)} · ${escapeHtml(interval)}</b>`, `第 ${safePage}/${totalPages} 页 · 共 ${payload.total} 条`, ...rows].join("\n\n")
-    : `<b>均线信号 · ${escapeHtml(label)} · ${escapeHtml(interval)}</b>\n暂无信号`;
+    ? ["<b>均线组合排行</b>", `第 ${safePage}/${totalPages} 页 · 共 ${payload.total} 个代币`, ...rows].join("\n\n")
+    : "<b>均线组合排行</b>\n暂无信号";
   await sendOrEditMessage({
     chatId,
     messageId,
@@ -257,15 +255,9 @@ async function sendSignals(chatId, level = "LEVEL1", interval = "15m", page = 1,
 
 function multiNavKeyboard({ page, total, pageSize, symbols }) {
   const keyboard = { inline_keyboard: [] };
-  for (const symbol of symbols) keyboard.inline_keyboard.push(tokenButtons(symbol));
   keyboard.inline_keyboard.push(pageButtons({ prefix: "multi", page, total, pageSize }));
-  keyboard.inline_keyboard.push([
-    { text: "热度+均线信号", callback_data: "hotma:1" },
-    { text: "均线信号", callback_data: "signals" },
-    { text: "热度排行", callback_data: "heat" },
-    { text: "关注池", callback_data: "watch" }
-  ]);
-  return keyboard;
+  keyboard.inline_keyboard.push(...tokenOperationRows(symbols));
+  return appendMainNavigation(keyboard, "multi");
 }
 
 function multiGroupText(group, index) {
@@ -278,18 +270,23 @@ function multiGroupText(group, index) {
       `${escapeHtml(row.note || row.signalStatus || "--")}`
     ].join("｜")
   );
-  return [`<b>${index}. ${escapeHtml(group.symbol)} · 多周期 ${group.multiMatchCount}/${group.multiMatchRequired}</b>`, ...rows].join("\n");
+  return [
+    `${telegramTokenLine(group.symbol, `${index}. `)} · 多周期 ${group.multiMatchCount}/${group.multiMatchRequired}`,
+    ...rows
+  ].join("\n");
 }
 
 async function sendMultiCycleSignals(chatId, page = 1, messageId = null) {
   const pageSize = 4;
-  const payload = await getMultiCycleSignalsPage({
-    categories: "A,B",
-    levels: "LEVEL1,LEVEL2",
-    intervals: "15m,1h,4h,1d",
-    page,
-    pageSize
-  });
+  const payload = await menuCache.get(`multi:${page}`, () =>
+    getMultiCycleSignalsPage({
+      categories: "A,B",
+      levels: "LEVEL1,LEVEL2",
+      intervals: "15m,1h,4h,1d",
+      page,
+      pageSize
+    })
+  );
   const safePage = clampPage(payload.page, payload.total, payload.pageSize);
   const startIndex = (safePage - 1) * payload.pageSize;
   const rows = payload.groups.map((group, index) => multiGroupText(group, startIndex + index + 1));
@@ -307,20 +304,14 @@ async function sendMultiCycleSignals(chatId, page = 1, messageId = null) {
 
 function hotMaNavKeyboard({ page, total, pageSize, symbols }) {
   const keyboard = { inline_keyboard: [] };
-  for (const symbol of symbols) keyboard.inline_keyboard.push(tokenButtons(symbol));
   keyboard.inline_keyboard.push(pageButtons({ prefix: "hotma", page, total, pageSize }));
-  keyboard.inline_keyboard.push([
-    { text: "均线信号", callback_data: "signals" },
-    { text: "多周期共振", callback_data: "multi:1" },
-    { text: "热度排行", callback_data: "heat" },
-    { text: "关注池", callback_data: "watch" }
-  ]);
-  return keyboard;
+  keyboard.inline_keyboard.push(...tokenOperationRows(symbols));
+  return appendMainNavigation(keyboard, "heat");
 }
 
 function hotMaRowText(row, index) {
   return [
-    `<b>${index}. 🔥 ${escapeHtml(row.symbol)}</b> · 热度 #${escapeHtml(row.hotRank ?? "--")} · ${escapeHtml(levelLabel(row.alertLevel))}`,
+    `${telegramTokenLine(row.symbol, `${index}. 🔥 `)} · 热度 #${escapeHtml(row.hotRank ?? "--")} · ${escapeHtml(levelLabel(row.alertLevel))}`,
     `周期：${escapeHtml(row.intervalCode)}｜现价：${escapeHtml(formatNumber(row.currentPrice))}`,
     `MA100：${escapeHtml(formatNumber(row.ma100))}｜MA200：${escapeHtml(formatNumber(row.ma200))}`,
     `说明：${escapeHtml(row.note || "--")}`
@@ -329,7 +320,7 @@ function hotMaRowText(row, index) {
 
 async function sendHotMa(chatId, page = 1, messageId = null) {
   const pageSize = 5;
-  const payload = await getHotMaSignalsPage({ page, pageSize });
+  const payload = await menuCache.get(`hotma:${page}`, () => getHotMaSignalsPage({ page, pageSize }));
   const safePage = clampPage(payload.page, payload.total, payload.pageSize);
   const startIndex = (safePage - 1) * payload.pageSize;
   const rows = payload.signals.map((row, index) => hotMaRowText(row, startIndex + index + 1));
@@ -346,13 +337,15 @@ async function sendHotMa(chatId, page = 1, messageId = null) {
 }
 
 async function sendHeat(chatId, messageId = null) {
-  const payload = await getHotRank({ chain: "all", limit: 30 });
-  const rows = (payload.tokens ?? []).map((token) =>
-    `#${escapeHtml(token.rank)} <b>${escapeHtml(token.symbol)}</b> · 综合 ${escapeHtml(token.heat)} · 广场 ${escapeHtml(token.binanceHeat ?? "--")} · 推特 ${escapeHtml(token.twitterHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
+  const payload = await menuCache.get("heat", () => getHotRank({ chain: "all", limit: 30 }));
+  const visibleTokens = (payload.tokens ?? []).slice(0, 12);
+  const rows = visibleTokens.map((token) =>
+    `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 综合 ${escapeHtml(token.heat)} · 广场 ${escapeHtml(token.binanceHeat ?? "--")} · 推特 ${escapeHtml(token.twitterHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
   );
-  const firstSymbol = payload.tokens?.[0]?.symbol;
-  const keyboard = { inline_keyboard: [[{ text: "热度+均线信号", callback_data: "hotma:1" }, { text: "均线信号", callback_data: "signals" }, { text: "关注池", callback_data: "watch" }]] };
-  if (firstSymbol) keyboard.inline_keyboard.unshift(tokenButtons(firstSymbol));
+  const keyboard = appendMainNavigation(
+    { inline_keyboard: tokenOperationRows(visibleTokens.map((token) => token.symbol)) },
+    "heat"
+  );
   await sendOrEditMessage({
     chatId,
     messageId,
@@ -362,17 +355,87 @@ async function sendHeat(chatId, messageId = null) {
 }
 
 async function sendWatch(chatId, messageId = null) {
-  const items = await listWatchlist();
+  const items = await menuCache.get("watch", () => listWatchlist());
   const rows = items.slice(0, 12).map((item, index) =>
-    `${index + 1}. <b>${escapeHtml(item.symbol)}</b> · 现价 ${escapeHtml(item.currentPrice ?? "--")} · 高于 ${escapeHtml(item.alertAbove ?? "--")} · 低于 ${escapeHtml(item.alertBelow ?? "--")}`
+    `${index + 1}. ${telegramTokenLine(item.symbol)} · 现价 ${escapeHtml(item.currentPrice ?? "--")} · 高于 ${escapeHtml(item.alertAbove ?? "--")} · 低于 ${escapeHtml(item.alertBelow ?? "--")}`
   );
-  const firstSymbol = items[0]?.symbol;
-  const keyboard = { inline_keyboard: [[{ text: "热度+均线信号", callback_data: "hotma:1" }, { text: "均线信号", callback_data: "signals" }, { text: "热度排行", callback_data: "heat" }]] };
-  if (firstSymbol) keyboard.inline_keyboard.unshift(tokenButtons(firstSymbol));
+  const keyboard = appendMainNavigation(
+    { inline_keyboard: tokenOperationRows(items.slice(0, 12).map((item) => item.symbol)) },
+    "watch"
+  );
   await sendOrEditMessage({
     chatId,
     messageId,
     text: rows.length ? [`<b>关注池</b>`, ...rows].join("\n") : "<b>关注池</b>\n暂无关注代币。",
+    replyMarkup: keyboard
+  });
+}
+
+async function sendFunding(chatId, messageId = null) {
+  const items = await menuCache.get("funding", () => listOneHourFundingIntervals());
+  const rows = items.slice(0, 20).map((item, index) => {
+    const matches = [
+      item.oiMatched ? "OI" : null,
+      item.hotRank ? "热度" : null,
+      Number(item.multiCycleCount ?? 0) >= 3 ? "多周期" : null
+    ].filter(Boolean);
+    return `${index + 1}. ${telegramTokenLine(item.symbol)} · 当前资金费率 ${escapeHtml(
+      item.currentFundingRate === null ? "--" : `${(Number(item.currentFundingRate) * 100).toFixed(4)}%`
+    )} · 均线 ${escapeHtml((item.intervals ?? []).join(" / ") || "--")} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
+  });
+  const keyboard = appendMainNavigation(
+    { inline_keyboard: tokenOperationRows(items.slice(0, 20).map((item) => item.symbol)) },
+    "funding"
+  );
+  await sendOrEditMessage({
+    chatId,
+    messageId,
+    text: rows.length ? ["<b>1小时资金费率代币</b>", ...rows].join("\n") : "<b>资金费率</b>\n当前没有1小时资金费率的代币。",
+    replyMarkup: keyboard
+  });
+}
+
+export function oiFilterKeyboard({ timeWindow = "5m", sort = "desc", symbols = [] } = {}) {
+  const keyboard = {
+    inline_keyboard: [
+      ["5m", "15m", "1h", "4h", "1d"].map((window) => ({
+        text: window === timeWindow ? `✓ ${window}` : window,
+        callback_data: `oi:${window}:${sort}`
+      })),
+      [
+        { text: sort === "desc" ? "✓ 从高到低" : "从高到低", callback_data: `oi:${timeWindow}:desc` },
+        { text: sort === "asc" ? "✓ 从低到高" : "从低到高", callback_data: `oi:${timeWindow}:asc` }
+      ],
+      ...tokenOperationRows(symbols)
+    ]
+  };
+  return appendMainNavigation(keyboard, "oi");
+}
+
+async function sendOI(chatId, timeWindow = "5m", sort = "desc", messageId = null) {
+  const items = await menuCache.get(`oi:${timeWindow}:${sort}`, () =>
+    listOpenInterestMonitor({ timeWindow, sort, limit: 20 })
+  );
+  const rows = items.slice(0, 20).map((item, index) => {
+    const intervals = item.signalIntervals ?? [];
+    const matches = [
+      item.hotRankHit ? "热度" : null,
+      item.fundingOneHour ? "1h资金费率" : null,
+      intervals.length ? `均线 ${intervals.join(" / ")}` : null
+    ].filter(Boolean);
+    return `${index + 1}. ${telegramTokenLine(item.symbol)} · ${escapeHtml(timeWindow)} ${escapeHtml(
+      item.changePercent === null ? "--" : `${Number(item.changePercent).toFixed(2)}%`
+    )} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
+  });
+  const keyboard = oiFilterKeyboard({
+    timeWindow,
+    sort,
+    symbols: items.slice(0, 20).map((item) => item.symbol)
+  });
+  await sendOrEditMessage({
+    chatId,
+    messageId,
+    text: rows.length ? [`<b>OI监控 · ${escapeHtml(timeWindow)}</b>`, ...rows].join("\n") : "<b>OI监控</b>\n暂无 OI 数据。",
     replyMarkup: keyboard
   });
 }
@@ -385,10 +448,12 @@ async function handleMessage(message) {
   if (text.startsWith("/watch")) return sendWatch(chatId);
   if (text.startsWith("/hotma")) return sendHotMa(chatId, 1);
   if (text.startsWith("/multi")) return sendMultiCycleSignals(chatId, 1);
+  if (text.startsWith("/funding")) return sendFunding(chatId);
+  if (text.startsWith("/oi")) return sendOI(chatId);
   if (text.startsWith("/signals")) return sendSignals(chatId, "LEVEL1", "15m");
   return telegramApi("sendMessage", {
     chat_id: chatId,
-    text: "可用命令：/hotma 查看热度+均线信号，/signals 查看均线信号，/multi 查看多周期共振，/heat 查看热度排行，/watch 查看关注池。",
+    text: "可用命令：/signals 均线排行，/multi 多周期，/heat 热度排行，/funding 资金费率，/oi OI监控，/watch 关注池。",
     reply_markup: signalKeyboard()
   });
 }
@@ -409,6 +474,7 @@ async function handleCallback(callback) {
     const messageId = callback?.message?.message_id ?? null;
     if (data === "heat") return sendHeat(chatId, messageId);
     if (data === "watch") return sendWatch(chatId, messageId);
+    if (data === "funding") return sendFunding(chatId, messageId);
     if (data === "signals") return sendSignals(chatId, "LEVEL1", "15m", 1, messageId);
     if (data.startsWith("hotma:")) {
       const [, page] = data.split(":");
@@ -421,6 +487,14 @@ async function handleCallback(callback) {
     if (data.startsWith("sig:")) {
       const [, level, interval, page] = data.split(":");
       return sendSignals(chatId, level, interval, page, messageId);
+    }
+    if (data.startsWith("ranked:")) {
+      const [, page] = data.split(":");
+      return sendSignals(chatId, "LEVEL1", "15m", page, messageId);
+    }
+    if (data.startsWith("oi:")) {
+      const [, timeWindow, sort] = data.split(":");
+      return sendOI(chatId, timeWindow, sort, messageId);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -444,9 +518,52 @@ async function pollOnce() {
   for (const update of updates) {
     updateOffset = Math.max(updateOffset, Number(update.update_id) + 1);
     botStatus.lastUpdateAt = new Date().toISOString();
-    if (update.message) await handleMessage(update.message);
-    if (update.callback_query) await handleCallback(update.callback_query);
+    const task = update.message
+      ? handleMessage(update.message)
+      : update.callback_query
+        ? handleCallback(update.callback_query)
+        : null;
+    task?.catch((error) => {
+      console.error("telegram update handling failed:", error instanceof Error ? error.message : error);
+    });
   }
+}
+
+async function warmPrimaryMenus() {
+  await Promise.allSettled([
+    menuCache.get("signals:1", () =>
+      getSignalGroupsPage({
+        categories: "A,B",
+        levels: "LEVEL1,LEVEL2",
+        intervals: "15m,1h,4h,1d",
+        page: 1,
+        pageSize: 4
+      })
+    ),
+    menuCache.get("multi:1", () =>
+      getMultiCycleSignalsPage({
+        categories: "A,B",
+        levels: "LEVEL1,LEVEL2",
+        intervals: "15m,1h,4h,1d",
+        page: 1,
+        pageSize: 4
+      })
+    ),
+    menuCache.get("funding", () => listOneHourFundingIntervals()),
+    menuCache.get("oi:5m:desc", () => listOpenInterestMonitor({ timeWindow: "5m", sort: "desc", limit: 20 }))
+  ]);
+}
+
+function startMenuWarmup() {
+  warmPrimaryMenus().catch((error) => {
+    console.error("telegram menu warmup failed:", error instanceof Error ? error.message : error);
+  });
+  menuWarmTimer = setInterval(() => {
+    warmPrimaryMenus().catch((error) => {
+      console.error("telegram menu refresh failed:", error instanceof Error ? error.message : error);
+    });
+  }, config.telegram.menuWarmIntervalMs);
+  menuWarmTimer.unref?.();
 }
 
 export function startTelegramBot() {
@@ -470,10 +587,13 @@ export function startTelegramBot() {
   botStatus.state = "starting";
   botStatus.startedAt = new Date().toISOString();
   botStatus.lastError = null;
+  startMenuWarmup();
   const loop = async () => {
+    let consecutiveErrors = 0;
     while (botRunning) {
       try {
         await pollOnce();
+        consecutiveErrors = 0;
         botStatus.lastError = null;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -488,7 +608,9 @@ export function startTelegramBot() {
         botStatus.state = "error";
         botStatus.lastError = message;
         console.error("telegram bot polling failed:", message);
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        consecutiveErrors += 1;
+        const delayMs = Math.min(60_000, 3000 * 2 ** Math.min(4, consecutiveErrors - 1));
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
     botStatus.running = false;
@@ -502,6 +624,7 @@ export function startTelegramBot() {
 for (const eventName of ["exit", "SIGINT", "SIGTERM"]) {
   process.once(eventName, () => {
     botRunning = false;
+    if (menuWarmTimer) clearInterval(menuWarmTimer);
     releasePollingLock();
     if (eventName !== "exit") process.exit(0);
   });

@@ -4,8 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node server/index.js"
+    "start": "node server/launcher.js",
+    "dev": "node server/launcher.js",
+    "start:api": "SERVICE_ROLE=api node server/index.js",
+    "start:crawler": "SERVICE_ROLE=crawler node server/crawlerService.js",
+    "start:realtime": "SERVICE_ROLE=realtime node server/realtimeService.js",
+    "start:scheduler": "SERVICE_ROLE=scheduler node server/schedulerService.js",
+    "test": "node --test",
+    "check": "node --test"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

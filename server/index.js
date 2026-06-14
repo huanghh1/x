@@ -1,18 +1,26 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Readable } from "node:stream";
 import { config } from "./config.js";
 import {
+  clearTriggerHistory,
   countActiveTokens,
+  deleteTriggerHistory,
   deleteWatchlistItem,
   ensureDatabase,
   findKlineGap,
   getKlines,
   getHotMaSignalsPage,
+  getSignalGroupsPage,
   listMultiCycleHistory,
   getOverview,
   getSignals,
   getSignalsPage,
+  klineStats,
+  listOneHourFundingIntervals,
+  listOpenInterestMonitor,
+  listTriggerHistory,
   listWatchlistTokens,
   listWatchlist,
   markHotRankNotified,
@@ -26,23 +34,10 @@ import {
   upsertWatchlistItem
 } from "./db.js";
 import { fetchKlinesPaged, fetchRecentKlines } from "./binance.js";
-import { getCrawlerState, initializeTokenUniverse, startCrawler, stopCrawler } from "./crawler.js";
-import {
-  getFundingIntervalMonitorState,
-  runFundingIntervalCheck,
-  startFundingIntervalMonitor
-} from "./fundingMonitor.js";
 import { getHotRank } from "./hotRank.js";
-import { calculateSignal, INTERVALS } from "./ma.js";
-import { getMaintenanceRuntimeState, startMaintenanceScheduler } from "./maintenance.js";
-import { sendHotRankTelegram, sendWatchlistTelegram, telegramState } from "./telegram.js";
-import { getTelegramBotState, startTelegramBot } from "./telegramBot.js";
-import {
-  getWatchlistRealtimeState,
-  refreshWatchlistRealtime,
-  startWatchlistRealtime,
-  watchRealtimeEvents
-} from "./watchRealtime.js";
+import { telegramState } from "./telegram.js";
+import { requestService, serviceStates, serviceUrl } from "./serviceClient.js";
+import { getTokenUnlockCache } from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,18 +45,24 @@ const app = express();
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.resolve(__dirname, "../public")));
+app.get("/tokens.css", (_request, response) => {
+  response.sendFile(path.resolve(__dirname, "../tokens.css"));
+});
 
 app.get("/api/health", async (_request, response) => {
   try {
     await pingDatabase();
+    const services = await serviceStates();
     response.json({
       ok: true,
       database: "connected",
-      crawler: getCrawlerState(),
-      maintenance: getMaintenanceRuntimeState(),
-      watchRealtime: getWatchlistRealtimeState(),
-      fundingMonitor: getFundingIntervalMonitorState(),
-      telegram: { ...telegramState(), bot: getTelegramBotState() },
+      services,
+      crawler: services.crawler?.crawler ?? null,
+      maintenance: services.scheduler?.maintenance ?? null,
+      watchRealtime: services.realtime?.watchRealtime ?? null,
+      fundingMonitor: services.scheduler?.fundingMonitor ?? null,
+      openInterestMonitor: services.scheduler?.openInterestMonitor ?? null,
+      telegram: { ...telegramState(), bot: services.scheduler?.telegramBot ?? null },
       now: new Date().toISOString()
     });
   } catch (error) {
@@ -74,42 +75,47 @@ app.get("/api/health", async (_request, response) => {
 });
 
 app.post("/api/bootstrap", async (_request, response) => {
-  let universe;
   try {
-    universe = await initializeTokenUniverse();
+    response.json(await requestService("crawler", "/internal/bootstrap", { method: "POST", body: "{}" }));
   } catch (error) {
-    universe = {
-      count: await countActiveTokens(),
-      warning: error instanceof Error ? error.message : String(error)
-    };
+    response.status(503).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
-  const crawler = await startCrawler();
-  response.json({ ok: true, universe: { count: universe.count, warning: universe.warning ?? null }, crawler });
 });
 
 app.post("/api/crawl/start", async (_request, response) => {
-  response.json({ ok: true, crawler: await startCrawler() });
+  response.json(await requestService("crawler", "/internal/crawl/start", { method: "POST", body: "{}" }));
 });
 
-app.post("/api/crawl/stop", (_request, response) => {
-  response.json({ ok: true, crawler: stopCrawler() });
+app.post("/api/crawl/stop", async (_request, response) => {
+  response.json(await requestService("crawler", "/internal/crawl/stop", { method: "POST", body: "{}" }));
+});
+
+app.post("/api/kline-audit", async (_request, response) => {
+  response.json(await requestService("crawler", "/internal/kline/audit", {
+    method: "POST",
+    body: "{}",
+    timeoutMs: 60_000
+  }));
 });
 
 app.get("/api/overview", async (_request, response) => {
+  const services = await serviceStates();
   response.json({
     ok: true,
     overview: await getOverview(),
-    crawler: getCrawlerState(),
-    watchRealtime: getWatchlistRealtimeState(),
-    fundingMonitor: getFundingIntervalMonitorState(),
-    telegram: { ...telegramState(), bot: getTelegramBotState() },
+    crawler: services.crawler?.crawler ?? null,
+    watchRealtime: services.realtime?.watchRealtime ?? null,
+    fundingMonitor: services.scheduler?.fundingMonitor ?? null,
+    openInterestMonitor: services.scheduler?.openInterestMonitor ?? null,
+    tokenUnlock: services.scheduler?.tokenUnlock ?? null,
+    telegram: { ...telegramState(), bot: services.scheduler?.telegramBot ?? null },
     database: "connected"
   });
 });
 
 app.get("/api/signals", async (request, response) => {
   if (request.query.categories || request.query.levels || request.query.intervals || request.query.page || request.query.pageSize) {
-    const result = await getSignalsPage({
+    const result = await getSignalGroupsPage({
       categories: request.query.categories,
       levels: request.query.levels,
       intervals: request.query.intervals,
@@ -163,16 +169,7 @@ app.get("/api/hot-rank", async (request, response) => {
       socialLanguage: String(request.query.socialLanguage ?? "ALL"),
       timeRange: request.query.timeRange
     });
-    const freshTokens = await recordHotRankSnapshot(payload.tokens ?? []);
-    if (freshTokens.length > 0) {
-      try {
-        const result = await sendHotRankTelegram(freshTokens);
-        if (!result.skipped) await markHotRankNotified(freshTokens.map((token) => token.symbol));
-      } catch (error) {
-        console.error("hot rank telegram alert failed", error);
-      }
-    }
-    response.json({ ...payload, newTokens: freshTokens.length });
+    response.json(payload);
   } catch (error) {
     response.status(502).json({
       ok: false,
@@ -183,7 +180,18 @@ app.get("/api/hot-rank", async (request, response) => {
 
 app.post("/api/funding-interval/check", async (_request, response) => {
   try {
-    response.json(await runFundingIntervalCheck({ force: true }));
+    response.json(await requestService("scheduler", "/internal/funding/check", { method: "POST", body: "{}" }));
+  } catch (error) {
+    response.status(502).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.post("/api/open-interest/check", async (_request, response) => {
+  try {
+    response.json(await requestService("scheduler", "/internal/open-interest/check", { method: "POST", body: "{}" }));
   } catch (error) {
     response.status(502).json({
       ok: false,
@@ -197,39 +205,42 @@ app.get("/api/watchlist", async (_request, response) => {
 });
 
 app.get("/api/watchlist/events", async (request, response) => {
+  const upstream = await fetch(serviceUrl("realtime", "/internal/events"), {
+    headers: config.service.internalToken ? { "X-Internal-Service-Token": config.service.internalToken } : {}
+  });
+  if (!upstream.ok || !upstream.body) {
+    response.status(503).end();
+    return;
+  }
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
     "X-Accel-Buffering": "no"
   });
-  response.write(`event: ready\ndata: ${JSON.stringify(getWatchlistRealtimeState())}\n\n`);
-
-  const send = (payload) => {
-    response.write(`data: ${JSON.stringify(payload)}\n\n`);
-  };
-  const heartbeat = setInterval(() => {
-    response.write(`event: ping\ndata: ${Date.now()}\n\n`);
-  }, 25_000);
-
-  watchRealtimeEvents.on("price", send);
-  watchRealtimeEvents.on("kline", send);
-  request.on("close", () => {
-    clearInterval(heartbeat);
-    watchRealtimeEvents.off("price", send);
-    watchRealtimeEvents.off("kline", send);
-  });
+  const stream = Readable.fromWeb(upstream.body);
+  stream.pipe(response);
+  request.on("close", () => stream.destroy());
 });
 
 app.post("/api/watchlist", async (request, response) => {
   try {
     const items = await upsertWatchlistItem(request.body ?? {});
-    refreshWatchlistMarketData({ force: true, full: true }).catch((error) => {
-      console.error("watchlist post-refresh failed", error);
-    });
-    refreshWatchlistRealtime().catch((error) => {
-      console.error("watchlist realtime refresh failed", error);
-    });
+    const symbol = sanitizeSymbol(request.body?.symbol);
+    const baseAsset = symbol.replace(/USDT$/, "");
+    void requestService("crawler", "/internal/watchlist/refresh", {
+      method: "POST",
+      body: JSON.stringify({ full: true }),
+      timeoutMs: 60_000
+    }).catch((error) => console.error("watchlist post-refresh failed", error));
+    void requestService("realtime", "/internal/refresh", { method: "POST", body: "{}" })
+      .catch((error) => console.error("watchlist realtime refresh failed", error));
+    void requestService("scheduler", "/internal/unlock/check", {
+      method: "POST",
+      body: JSON.stringify({ symbol, baseAsset }),
+      timeoutMs: 60_000
+    })
+      .catch((error) => console.error("watchlist unlock refresh failed", error));
     response.json({ ok: true, items });
   } catch (error) {
     response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -238,10 +249,21 @@ app.post("/api/watchlist", async (request, response) => {
 
 app.delete("/api/watchlist/:symbol", async (request, response) => {
   const deleted = await deleteWatchlistItem(request.params.symbol);
-  refreshWatchlistRealtime().catch((error) => {
-    console.error("watchlist realtime refresh failed", error);
-  });
+  void requestService("realtime", "/internal/refresh", { method: "POST", body: "{}" })
+    .catch((error) => console.error("watchlist realtime refresh failed", error));
   response.json({ ok: true, deleted });
+});
+
+app.get("/api/watchlist/:symbol/unlock", async (request, response) => {
+  response.json({ ok: true, item: await getTokenUnlockCache(request.params.symbol) });
+});
+
+app.post("/api/watchlist/unlock/refresh", async (_request, response) => {
+  response.json(await requestService("scheduler", "/internal/unlock/check", {
+    method: "POST",
+    body: "{}",
+    timeoutMs: 60_000
+  }));
 });
 
 function sanitizeSymbol(value) {
@@ -375,65 +397,70 @@ app.get("/open/tradingview", (request, response) => {
   );
 });
 
-// 新增 API 端点
 app.get("/api/trigger-history", async (request, response) => {
   try {
-    const page = parseInt(request.query.page || "1");
-    const pageSize = parseInt(request.query.pageSize || "20");
-    const triggerType = request.query.triggerType ? String(request.query.triggerType) : null;
-
-    // 从数据库获取触发历史记录
-    // TODO: 实现实际的数据库查询
     response.json({
-      items: [],
-      total: 0,
-      page,
-      pageSize
+      ok: true,
+      ...(await listTriggerHistory({
+        page: request.query.page,
+        pageSize: request.query.pageSize,
+        triggerTypes: request.query.triggerTypes
+      }))
     });
   } catch (error) {
     console.error("get trigger history failed", error);
-    response.status(500).json({ error: "Failed to fetch trigger history" });
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 
 app.delete("/api/trigger-history/:id", async (request, response) => {
   try {
-    const id = request.params.id;
-    // TODO: 从数据库删除记录
-    response.json({ success: true });
+    const deleted = await deleteTriggerHistory(request.params.id);
+    response.json({ ok: true, deleted });
   } catch (error) {
     console.error("delete trigger history failed", error);
-    response.status(500).json({ error: "Failed to delete trigger history" });
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 
-app.get("/api/funding-rate-tokens", async (request, response) => {
+app.delete("/api/trigger-history", async (request, response) => {
   try {
-    // TODO: 从数据库获取资金费率代币列表
-    response.json({
-      tokens: [],
-      total: 0
-    });
+    const ids = Array.isArray(request.body?.ids) ? request.body.ids : [];
+    const deleted = ids.length ? await deleteTriggerHistory(ids) : await clearTriggerHistory();
+    response.json({ ok: true, deleted });
+  } catch (error) {
+    console.error("clear trigger history failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/funding-rate-tokens", async (_request, response) => {
+  try {
+    const tokens = await listOneHourFundingIntervals();
+    response.json({ ok: true, tokens, total: tokens.length });
   } catch (error) {
     console.error("get funding rate tokens failed", error);
-    response.status(500).json({ error: "Failed to fetch funding rate tokens" });
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 
 app.get("/api/io-monitoring", async (request, response) => {
   try {
-    const timeWindow = request.query.timeWindow || "5m";
-    const sort = request.query.sort || "desc";
-
-    // TODO: 从数据库获取IO监控数据
+    const timeWindow = ["5m", "15m", "1h", "4h", "1d"].includes(request.query.timeWindow)
+      ? request.query.timeWindow
+      : "5m";
+    const sort = request.query.sort === "asc" ? "asc" : "desc";
+    const scheduler = await requestService("scheduler", "/internal/health").catch(() => null);
     response.json({
-      data: [],
+      ok: true,
+      data: await listOpenInterestMonitor({ timeWindow, sort }),
       timeWindow,
-      sort
+      sort,
+      monitor: scheduler?.openInterestMonitor ?? null
     });
   } catch (error) {
     console.error("get io monitoring failed", error);
-    response.status(500).json({ error: "Failed to fetch io monitoring data" });
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -442,143 +469,6 @@ app.use((_request, response) => {
 });
 
 await ensureDatabase();
-await startMaintenanceScheduler();
-startTelegramBot();
-startWatchlistRealtime({ alertSender: sendWatchlistTelegram }).catch((error) => {
-  console.error("watchlist realtime start failed", error);
-});
-startFundingIntervalMonitor();
-
-let watchlistRefreshing = false;
-let lastWatchlistFastRefreshAt = 0;
-let lastWatchlistFullRefreshAt = 0;
-
-function intervalMs(intervalCode) {
-  return {
-    "15m": 15 * 60 * 1000,
-    "1h": 60 * 60 * 1000,
-    "4h": 4 * 60 * 60 * 1000,
-    "1d": 24 * 60 * 60 * 1000
-  }[intervalCode];
-}
-
-async function repairWatchlistKlineGaps(token, intervals) {
-  const repaired = [];
-  for (const intervalCode of intervals) {
-    const ms = intervalMs(intervalCode);
-    if (!ms) continue;
-
-    for (let pass = 0; pass < 3; pass += 1) {
-      const gap = await findKlineGap(token.symbol, intervalCode, ms, 0, Date.now());
-      if (!gap) break;
-
-      let fetchedRows = 0;
-      await fetchKlinesPaged({
-        symbol: token.symbol,
-        intervalCode,
-        startTime: gap.startTime,
-        endTime: gap.endTime,
-        onPage: async (page) => {
-          fetchedRows += page.length;
-          await upsertKlinePage(token, intervalCode, page);
-        },
-        shouldContinue: () => true
-      });
-
-      repaired.push({
-        intervalCode,
-        fetchedRows,
-        startTime: gap.startTime,
-        endTime: gap.endTime
-      });
-      if (fetchedRows === 0) break;
-    }
-  }
-
-  if (repaired.length > 0) {
-    console.log("watchlist kline gaps repaired", token.symbol, repaired);
-  }
-}
-
-async function refreshWatchlistMarketData({ force = false, full = false } = {}) {
-  if (watchlistRefreshing) return;
-  const now = Date.now();
-  if (!force && now - lastWatchlistFastRefreshAt < 15_000) return;
-  watchlistRefreshing = true;
-  try {
-    const tokens = await listWatchlistTokens();
-    const shouldFullRefresh = full || now - lastWatchlistFullRefreshAt >= 60_000;
-    const intervals = shouldFullRefresh ? INTERVALS : ["15m"];
-    for (const token of tokens) {
-      for (const intervalCode of intervals) {
-        const klines = await fetchRecentKlines({ symbol: token.symbol, intervalCode, limit: 2 });
-        if (klines.length > 0) await upsertKlinePage(token, intervalCode, klines);
-      }
-      if (shouldFullRefresh) await repairWatchlistKlineGaps(token, intervals);
-      await refreshTokenFetchState(token.id);
-      for (const intervalCode of intervals) {
-        const closes = await selectClosePrices(token.symbol, intervalCode);
-        await upsertSignal(token, calculateSignal({ intervalCode, closes }));
-      }
-    }
-    lastWatchlistFastRefreshAt = Date.now();
-    if (shouldFullRefresh) lastWatchlistFullRefreshAt = lastWatchlistFastRefreshAt;
-  } catch (error) {
-    console.error("watchlist market refresh failed", error);
-  } finally {
-    watchlistRefreshing = false;
-  }
-}
-
-let watchlistChecking = false;
-async function checkWatchlistAlerts() {
-  if (watchlistChecking) return;
-  watchlistChecking = true;
-  try {
-    await refreshWatchlistMarketData();
-    const items = await listWatchlist();
-    const cooldownMs = 30 * 60 * 1000;
-    for (const item of items) {
-      if (!item.alertEnabled || item.currentPrice === null || item.currentPrice === undefined) continue;
-      const lastAlertAt = item.lastAlertAt ? new Date(item.lastAlertAt).getTime() : 0;
-      if (Date.now() - lastAlertAt < cooldownMs) continue;
-      const aboveHit = item.alertAbove !== null && item.currentPrice >= item.alertAbove;
-      const belowHit = item.alertBelow !== null && item.currentPrice <= item.alertBelow;
-      if (!aboveHit && !belowHit) continue;
-      const reason = aboveHit
-        ? `现价 ${item.currentPrice} 高于提醒价 ${item.alertAbove}`
-        : `现价 ${item.currentPrice} 低于提醒价 ${item.alertBelow}`;
-      const result = await sendWatchlistTelegram(item, reason);
-      if (!result.skipped) await markWatchlistAlertSent(item.symbol);
-    }
-  } catch (error) {
-    console.error("watchlist alert check failed", error);
-  } finally {
-    watchlistChecking = false;
-  }
-}
-
-setInterval(() => {
-  checkWatchlistAlerts();
-}, 15 * 1000);
-
-setInterval(() => {
-  initializeTokenUniverse().catch((error) => {
-    console.error("Token universe sync failed:", error);
-  });
-}, config.crawler.tokenUniverseSyncMs);
-
-setInterval(() => {
-  startCrawler().catch((error) => {
-    console.error("Incremental crawler start failed:", error);
-  });
-}, config.crawler.incrementalRefreshMs);
-
-app.listen(config.port, () => {
-  console.log(`Binance MA monitor running at http://localhost:${config.port}`);
-  if (config.crawler.autoStart) {
-    startCrawler().catch((error) => {
-      console.error("Auto crawler start failed:", error);
-    });
-  }
+app.listen(config.service.apiPort, config.service.apiHost, () => {
+  console.log(`API service running at http://${config.service.apiHost}:${config.service.apiPort}`);
 });

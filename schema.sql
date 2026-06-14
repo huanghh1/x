@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS token_list (
   has_futures TINYINT(1) NOT NULL DEFAULT 1,
   is_alpha TINYINT(1) NOT NULL DEFAULT 0,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
+  inactive_since DATETIME(3) NULL,
   fetch_status ENUM('pending','fetching','partial','completed','failed') NOT NULL DEFAULT 'pending',
   current_interval VARCHAR(8) NULL,
   fetched_interval_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -28,7 +29,9 @@ CREATE TABLE IF NOT EXISTS token_list (
   PRIMARY KEY (id),
   UNIQUE KEY uk_token_symbol (symbol),
   KEY idx_token_category_status (category_type, fetch_status),
-  KEY idx_token_status (fetch_status, updated_at)
+  KEY idx_token_status (fetch_status, updated_at),
+  KEY idx_token_base_active (base_asset, is_active, updated_at),
+  KEY idx_token_inactive_since (is_active, inactive_since)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS kline_cache (
@@ -49,6 +52,7 @@ CREATE TABLE IF NOT EXISTS kline_cache (
   PRIMARY KEY (id),
   UNIQUE KEY uk_kline_symbol_interval_time (symbol, interval_code, open_time),
   KEY idx_kline_token_interval_time (token_id, interval_code, open_time),
+  KEY idx_kline_symbol_interval_close (symbol, interval_code, close_time),
   CONSTRAINT fk_kline_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -74,6 +78,8 @@ CREATE TABLE IF NOT EXISTS signal_result (
   UNIQUE KEY uk_signal_symbol_interval (symbol, interval_code),
   KEY idx_signal_category_level (category_type, alert_level, signal_weight),
   KEY idx_signal_time (signal_time),
+  KEY idx_signal_filter_page (category_type, alert_level, interval_code, updated_at, symbol),
+  KEY idx_signal_symbol_time (symbol, signal_time),
   CONSTRAINT fk_signal_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -95,7 +101,9 @@ CREATE TABLE IF NOT EXISTS hot_rank_seen (
   last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   notified_at DATETIME(3) NULL,
   PRIMARY KEY (symbol),
-  KEY idx_hot_rank_last_seen (last_seen_at)
+  KEY idx_hot_rank_last_seen (last_seen_at),
+  KEY idx_hot_base_seen (base_asset, last_seen_at, last_seen_rank),
+  KEY idx_hot_chain_seen (chain_label, last_seen_at, last_seen_rank)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS watchlist (
@@ -146,6 +154,8 @@ CREATE TABLE IF NOT EXISTS funding_interval_state (
   previous_funding_interval_hours SMALLINT UNSIGNED NULL,
   adjusted_funding_rate_cap DECIMAL(18,10) NULL,
   adjusted_funding_rate_floor DECIMAL(18,10) NULL,
+  current_funding_rate DECIMAL(18,10) NULL,
+  next_funding_time BIGINT UNSIGNED NULL,
   disclaimer TINYINT(1) NOT NULL DEFAULT 0,
   source_present TINYINT(1) NOT NULL DEFAULT 1,
   first_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -162,45 +172,77 @@ CREATE TABLE IF NOT EXISTS funding_interval_state (
 -- 触发历史记录表
 CREATE TABLE IF NOT EXISTS signal_trigger_history (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  event_key VARCHAR(191) NOT NULL,
   symbol VARCHAR(32) NOT NULL,
-  trigger_type ENUM('MA_SIGNAL', 'HOT_RANK', 'FUNDING_RATE', 'IO_SPIKE', 'COMPOSITE') NOT NULL,
-  intervals_triggered VARCHAR(100),
-  signal_level VARCHAR(20),
-  trigger_time DATETIME NOT NULL,
-  details JSON,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','OI_SPIKE','COMPOSITE') NOT NULL,
+  intervals_triggered VARCHAR(100) NULL,
+  signal_level VARCHAR(32) NULL,
+  trigger_time DATETIME(3) NOT NULL,
+  details JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  KEY idx_symbol_time (symbol, trigger_time DESC),
-  KEY idx_trigger_type_time (trigger_type, trigger_time DESC)
+  UNIQUE KEY uk_trigger_event (event_key),
+  KEY idx_trigger_time (trigger_time),
+  KEY idx_trigger_time_id (trigger_time, id),
+  KEY idx_trigger_symbol_time (symbol, trigger_time),
+  KEY idx_trigger_type_time (trigger_type, trigger_time),
+  KEY idx_trigger_type_time_id (trigger_type, trigger_time, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 资金费率代币表
-CREATE TABLE IF NOT EXISTS funding_rate_tokens (
-  id INT PRIMARY KEY AUTO_INCREMENT,
-  symbol VARCHAR(32) NOT NULL UNIQUE,
-  funding_interval VARCHAR(50),
-  next_settlement_time DATETIME,
-  is_1hour BOOLEAN,
-  last_check_at DATETIME,
-  KEY idx_1hour_check (is_1hour, last_check_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- IO监控表
-CREATE TABLE IF NOT EXISTS io_monitoring (
-  id INT PRIMARY KEY AUTO_INCREMENT,
+-- OI（Open Interest，持仓量）监控表
+CREATE TABLE IF NOT EXISTS open_interest_monitor (
   symbol VARCHAR(32) NOT NULL,
-  time_window VARCHAR(20),
-  spike_value DECIMAL(18,8),
-  spike_percent DECIMAL(10,2),
-  spike_time DATETIME,
-  telegram_sent_at DATETIME NULL,
-  KEY idx_window_value (time_window, spike_value DESC, spike_time DESC),
-  KEY idx_symbol_window_time (symbol, time_window, spike_time DESC)
+  current_open_interest DECIMAL(38,12) NULL,
+  current_open_interest_value DECIMAL(38,12) NULL,
+  change_5m_pct DECIMAL(18,8) NULL,
+  change_15m_pct DECIMAL(18,8) NULL,
+  change_1h_pct DECIMAL(18,8) NULL,
+  change_4h_pct DECIMAL(18,8) NULL,
+  change_1d_pct DECIMAL(18,8) NULL,
+  observed_at DATETIME(3) NOT NULL,
+  last_spike_alert_at DATETIME(3) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (symbol),
+  KEY idx_oi_observed (observed_at),
+  KEY idx_oi_5m (change_5m_pct, observed_at),
+  KEY idx_oi_15m (change_15m_pct, observed_at),
+  KEY idx_oi_1h (change_1h_pct, observed_at),
+  KEY idx_oi_4h (change_4h_pct, observed_at),
+  KEY idx_oi_1d (change_1d_pct, observed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 添加优化索引
-ALTER TABLE signal_result ADD INDEX IF NOT EXISTS idx_symbol_interval_time (symbol, interval_code, signal_time DESC);
-ALTER TABLE signal_result ADD INDEX IF NOT EXISTS idx_alert_level_weight (alert_level, signal_weight DESC, signal_time DESC);
-ALTER TABLE kline_cache ADD INDEX IF NOT EXISTS idx_symbol_interval_time (symbol, interval_code, open_time DESC);
-ALTER TABLE hot_rank_seen ADD INDEX IF NOT EXISTS idx_last_seen (last_seen_at DESC);
-ALTER TABLE token_list ADD INDEX IF NOT EXISTS idx_fetch_status (fetch_status, updated_at);
+CREATE TABLE IF NOT EXISTS hot_rank_snapshot (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  symbol VARCHAR(32) NOT NULL,
+  base_asset VARCHAR(32) NOT NULL,
+  chain_label VARCHAR(32) NOT NULL DEFAULT '',
+  rank_value INT UNSIGNED NOT NULL,
+  heat_value DECIMAL(20,4) NULL,
+  snapshot_time DATETIME NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_hot_snapshot (symbol, chain_label, snapshot_time),
+  KEY idx_hot_snapshot_chain_time (chain_label, snapshot_time, rank_value),
+  KEY idx_hot_snapshot_symbol_time (symbol, snapshot_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS token_unlock_cache (
+  symbol VARCHAR(32) NOT NULL,
+  base_asset VARCHAR(32) NOT NULL,
+  next_unlock_at DATETIME(3) NULL,
+  unlock_amount DECIMAL(38,12) NULL,
+  unlock_percent DECIMAL(12,6) NULL,
+  provider VARCHAR(32) NOT NULL,
+  source_url VARCHAR(512) NULL,
+  status ENUM('available','none','undated','unconfigured','error') NOT NULL DEFAULT 'unconfigured',
+  error_message VARCHAR(500) NULL,
+  raw_payload JSON NULL,
+  checked_at DATETIME(3) NOT NULL,
+  expires_at DATETIME(3) NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (symbol),
+  KEY idx_unlock_base_asset (base_asset),
+  KEY idx_unlock_next (next_unlock_at, symbol),
+  KEY idx_unlock_expiry (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { filterEligibleHotTokens } from "./hotRankFilters.js";
 
 const CHAIN_LABELS = {
   "56": "BSC",
@@ -13,17 +14,39 @@ const CHAIN_GROUPS = {
   solana: ["CT_501"]
 };
 
-let hotRankCache = new Map();
-let lastHotRankPayload = null;
-let twitterTokenCursor = 0;
+const FALLBACK_TOP_MARKET_CAP_SYMBOLS = [
+  "BTC",
+  "ETH",
+  "USDT",
+  "BNB",
+  "USDC",
+  "XRP",
+  "SOL",
+  "TRX",
+  "DOGE",
+  "ADA"
+];
+
+const hotRankCache = new Map();
+const hotRankInflight = new Map();
+const hotRankChainCache = new Map();
+const hotRankChainInflight = new Map();
+const lastHotRankPayloadByChain = new Map();
 const twitterTokenCooldownUntil = new Map();
 const twitterHeatCache = new Map();
+const twitterRefreshInflight = new Map();
+const twitterRefreshQueue = [];
 
-function limitAndRerankTokens(tokens, limit) {
-  return (tokens ?? [])
-    .slice(0, limit)
-    .map((token, index) => ({ ...token, rank: index + 1 }));
-}
+let twitterTokenCursor = 0;
+let twitterActiveRequests = 0;
+let twitterLastRequestAt = 0;
+let twitterRequestGate = Promise.resolve();
+let twitterGlobalBackoffUntil = 0;
+let topMarketCapCache = {
+  fetchedAt: 0,
+  source: "fallback",
+  symbols: new Set(FALLBACK_TOP_MARKET_CAP_SYMBOLS)
+};
 
 function numberValue(value, fallback = 0) {
   const number = Number(value);
@@ -37,17 +60,18 @@ function logoUrl(value) {
   return `https://bin.bnbstatic.com${path.startsWith("/") ? "" : "/"}${path}`;
 }
 
-function normalizeHotToken(item, chainId) {
+function normalizeHotToken(item, requestedChainId) {
   const meta = item.metaInfo ?? item.meta ?? {};
   const market = item.marketInfo ?? item.market ?? {};
   const hype = item.socialHypeInfo ?? item.social ?? {};
   const symbol = String(meta.symbol ?? item.symbol ?? "").toUpperCase();
-  if (!symbol) return null;
+  const chainId = String(meta.chainId ?? item.chainId ?? requestedChainId);
+  if (!symbol || chainId !== String(requestedChainId)) return null;
 
   return {
     symbol,
-    chainId: String(meta.chainId ?? item.chainId ?? chainId),
-    chainLabel: CHAIN_LABELS[String(meta.chainId ?? item.chainId ?? chainId)] ?? String(chainId),
+    chainId,
+    chainLabel: CHAIN_LABELS[chainId] ?? chainId,
     contractAddress: String(meta.contractAddress ?? item.contractAddress ?? ""),
     logo: logoUrl(meta.logo ?? meta.icon ?? item.logo ?? item.icon),
     heat: numberValue(hype.socialHype ?? item.socialHype),
@@ -62,7 +86,8 @@ function normalizeHotToken(item, chainId) {
       ).trim(),
     marketCap: numberValue(market.marketCap ?? item.marketCap),
     priceChange: numberValue(market.priceChange ?? item.priceChange),
-    tokenAge: numberValue(meta.tokenAge ?? item.tokenAge)
+    tokenAge: numberValue(meta.tokenAge ?? item.tokenAge),
+    tagInfoList: item.tagInfoList ?? {}
   };
 }
 
@@ -89,8 +114,7 @@ function nextTwitterToken() {
   for (let attempt = 0; attempt < tokens.length; attempt += 1) {
     const index = (twitterTokenCursor + attempt) % tokens.length;
     const token = tokens[index];
-    const cooldownUntil = twitterTokenCooldownUntil.get(token) ?? 0;
-    if (cooldownUntil > now) continue;
+    if ((twitterTokenCooldownUntil.get(token) ?? 0) > now) continue;
     twitterTokenCursor = (index + 1) % tokens.length;
     return token;
   }
@@ -106,13 +130,21 @@ function twitterCacheKey(symbol) {
   return String(symbol ?? "").toUpperCase().replace(/USDT$/, "");
 }
 
-function getCachedTwitterHeat(symbol, { allowFailure = true } = {}) {
-  const key = twitterCacheKey(symbol);
-  const cached = twitterHeatCache.get(key);
+function getCachedTwitterHeat(symbol, { allowFailure = true, allowStaleOk = false } = {}) {
+  const cached = twitterHeatCache.get(twitterCacheKey(symbol));
   if (!cached) return null;
-  const maxAge = cached.result.status === "ok" ? config.twitter.heatCacheMs : config.twitter.failureCacheMs;
-  if (!allowFailure && cached.result.status !== "ok") return null;
-  if (Date.now() - cached.fetchedAt > maxAge) return null;
+  const isOk = cached.result.status === "ok";
+  if (!allowFailure && !isOk) return null;
+  const maxAge = isOk
+    ? config.twitter.heatCacheMs
+    : cached.result.status === "rate_limited_retrying"
+      ? Math.min(config.twitter.failureCacheMs, 15_000)
+      : config.twitter.failureCacheMs;
+  const age = Date.now() - cached.fetchedAt;
+  if (age > maxAge) {
+    if (!allowStaleOk || !isOk || age > maxAge * 4) return null;
+    return { ...cached.result, status: "stale_cache", cached: true };
+  }
   return { ...cached.result, cached: true };
 }
 
@@ -133,17 +165,53 @@ function twitterRows(json) {
     json?.list,
     json
   ];
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) return candidate;
+  return candidates.find(Array.isArray) ?? [];
+}
+
+function quotaRemaining(json) {
+  const value = Number(json?.usage?.quota ?? json?.usage?.remaining ?? json?.quota);
+  return Number.isFinite(value) ? value : null;
+}
+
+function waitForTwitterRequestSlot() {
+  const task = twitterRequestGate.then(async () => {
+    const waitMs = Math.max(0, config.twitter.requestSpacingMs - (Date.now() - twitterLastRequestAt));
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    twitterLastRequestAt = Date.now();
+  });
+  twitterRequestGate = task.catch(() => {});
+  return task;
+}
+
+function twitterSemanticError(json, httpStatus) {
+  const message = String(json?.message ?? json?.error ?? json?.description ?? "").trim();
+  if (!message) return null;
+  if (/insufficient quota|quota exceeded|余额不足/i.test(message)) {
+    const error = new Error(message);
+    error.status = 429;
+    error.kind = "quota";
+    return error;
   }
-  return [];
+  if (/rate limit|too frequently|频繁/i.test(message)) {
+    const error = new Error(message);
+    error.status = 429;
+    error.kind = "rate";
+    return error;
+  }
+  if (/unauthorized|invalid token|forbidden/i.test(message)) {
+    const error = new Error(message);
+    error.status = httpStatus === 200 ? 401 : httpStatus;
+    return error;
+  }
+  return null;
 }
 
 async function fetchTwitterHeatWithToken(symbol, token) {
-  const baseAsset = String(symbol ?? "").toUpperCase().replace(/USDT$/, "");
+  const baseAsset = twitterCacheKey(symbol);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.twitter.timeoutMs);
   try {
+    await waitForTwitterRequestSlot();
     const response = await fetch("https://ai.6551.io/open/twitter_search", {
       method: "POST",
       headers: {
@@ -160,6 +228,8 @@ async function fetchTwitterHeatWithToken(symbol, token) {
       })
     });
     const json = await response.json().catch(() => ({}));
+    const semanticError = twitterSemanticError(json, response.status);
+    if (semanticError) throw semanticError;
     if (!response.ok || json?.success === false || json?.ok === false) {
       const message = json?.message ?? json?.error ?? json?.description ?? `http_${response.status}`;
       const error = new Error(String(message));
@@ -167,10 +237,18 @@ async function fetchTwitterHeatWithToken(symbol, token) {
       throw error;
     }
     const tweets = twitterRows(json);
+    const quota = quotaRemaining(json);
+    if (tweets.length === 0 && quota !== null && quota <= 0) {
+      const error = new Error("insufficient quota");
+      error.status = 429;
+      error.kind = "quota";
+      throw error;
+    }
     return {
       heat: twitterHeatScore(tweets),
-      status: "ok",
-      tweetCount: tweets.length
+      status: tweets.length ? "ok" : "no_results",
+      tweetCount: tweets.length,
+      quotaRemaining: quota
     };
   } finally {
     clearTimeout(timer);
@@ -181,53 +259,97 @@ async function fetchTwitterHeat(symbol) {
   const cached = getCachedTwitterHeat(symbol);
   if (cached) return cached;
   if (!config.twitter.heatEnabled || !twitterTokens().length) {
-    return { heat: 0, status: "not_configured" };
+    return { heat: null, status: "not_configured", tweetCount: 0 };
   }
-  const baseAsset = String(symbol ?? "").toUpperCase().replace(/USDT$/, "");
-  if (!baseAsset) return { heat: 0, status: "empty_symbol" };
+  const baseAsset = twitterCacheKey(symbol);
+  if (!baseAsset) return { heat: null, status: "empty_symbol", tweetCount: 0 };
+  if (Date.now() < twitterGlobalBackoffUntil) {
+    return setCachedTwitterHeat(symbol, { heat: null, status: "rate_limited_retrying", tweetCount: 0 });
+  }
 
-  const tokens = twitterTokens();
   const failures = [];
-  for (let attempt = 0; attempt < tokens.length; attempt += 1) {
+  let failureStatus = "quota_pool_exhausted";
+  for (let attempt = 0; attempt < twitterTokens().length; attempt += 1) {
     const token = nextTwitterToken();
     if (!token) break;
     try {
-      return setCachedTwitterHeat(symbol, await fetchTwitterHeatWithToken(symbol, token));
+      const result = await fetchTwitterHeatWithToken(symbol, token);
+      if (result.quotaRemaining !== null && result.quotaRemaining <= 0) coolDownTwitterToken(token);
+      const { quotaRemaining: _quotaRemaining, ...publicResult } = result;
+      return setCachedTwitterHeat(symbol, publicResult);
     } catch (error) {
       const status = Number(error?.status ?? 0);
-      if ([401, 403, 408, 429, 500, 502, 503, 504].includes(status) || !status) {
+      if (error?.kind === "rate" || (status === 429 && error?.kind !== "quota")) {
+        twitterGlobalBackoffUntil = Date.now() + 30_000;
+        failureStatus = "rate_limited_retrying";
+        failures.push(error instanceof Error ? error.message : String(error));
+        break;
+      }
+      if (error?.kind === "quota" || [401, 403].includes(status)) {
         coolDownTwitterToken(token);
+        failureStatus = "quota_pool_exhausted";
       }
       failures.push(error instanceof Error ? error.message : String(error));
-    }
-  }
-  const stale = getCachedTwitterHeat(symbol, { allowFailure: false });
-  if (stale) return { ...stale, status: "stale_cache" };
-  return setCachedTwitterHeat(symbol, {
-    heat: 0,
-    status: failures.length ? `token_pool_failed:${failures.at(-1)}` : "token_pool_cooling_down"
-  });
-}
-
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      try {
-        results[index] = { status: "fulfilled", value: await mapper(items[index], index) };
-      } catch (error) {
-        results[index] = { status: "rejected", reason: error };
+      if (![401, 403, 429].includes(status)) {
+        failureStatus = "rate_limited_retrying";
+        twitterGlobalBackoffUntil = Date.now() + 15_000;
+        break;
       }
     }
+  }
+
+  const stale = getCachedTwitterHeat(symbol, { allowFailure: false, allowStaleOk: true });
+  if (stale) return stale;
+  return setCachedTwitterHeat(symbol, {
+    heat: null,
+    status: failureStatus,
+    tweetCount: 0
   });
-  await Promise.all(workers);
-  return results;
 }
 
-async function fetchHotRankChain(chainId, { targetLanguage, socialLanguage, timeRange }) {
+function drainTwitterRefreshQueue() {
+  const concurrency = Math.max(1, Number(config.twitter.concurrentRequests) || 1);
+  while (twitterActiveRequests < concurrency && twitterRefreshQueue.length) {
+    const task = twitterRefreshQueue.shift();
+    twitterActiveRequests += 1;
+    void fetchTwitterHeat(task.symbol)
+      .catch((error) => {
+        setCachedTwitterHeat(task.symbol, {
+          heat: null,
+          status: `token_pool_failed:${error instanceof Error ? error.message : String(error)}`,
+          tweetCount: 0
+        });
+      })
+      .finally(() => {
+        twitterActiveRequests -= 1;
+        twitterRefreshInflight.delete(task.key);
+        task.resolve();
+        drainTwitterRefreshQueue();
+      });
+  }
+}
+
+function queueTwitterRefresh(symbol) {
+  const key = twitterCacheKey(symbol);
+  if (!key || getCachedTwitterHeat(symbol) || twitterRefreshInflight.has(key)) return;
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  twitterRefreshInflight.set(key, promise);
+  twitterRefreshQueue.push({ key, symbol, resolve });
+  drainTwitterRefreshQueue();
+}
+
+function scheduleTwitterRefresh(tokens) {
+  if (!config.twitter.heatEnabled || !twitterTokens().length) return;
+  const candidates = (tokens ?? [])
+    .filter((token) => !getCachedTwitterHeat(token.symbol) && !twitterRefreshInflight.has(twitterCacheKey(token.symbol)))
+    .slice(0, Math.max(0, Number(config.twitter.maxFreshPerRank) || 0));
+  candidates.forEach((token) => queueTwitterRefresh(token.symbol));
+}
+
+async function requestHotRankChain(chainId, { targetLanguage, socialLanguage, timeRange }) {
   const url = new URL(config.binance.socialHypeRankUrl);
   url.searchParams.set("chainId", chainId);
   url.searchParams.set("sentiment", "All");
@@ -255,98 +377,207 @@ async function fetchHotRankChain(chainId, { targetLanguage, socialLanguage, time
   }
 }
 
-export async function getHotRank({ chain = "all", limit = 30, targetLanguage = "zh", socialLanguage = "ALL", timeRange = 1 } = {}) {
-  const normalizedChain = Object.hasOwn(CHAIN_GROUPS, chain) ? chain : "all";
-  const safeLimit = Math.max(5, Math.min(100, Number(limit) || 30));
-  const safeTimeRange = Math.max(1, Number(timeRange) || 1);
-  const cacheKey = JSON.stringify({ normalizedChain, safeLimit, targetLanguage, socialLanguage, safeTimeRange });
-  const cached = hotRankCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < config.binance.hotRankCacheMs) return cached.payload;
+async function fetchHotRankChain(chainId, options) {
+  const cacheKey = JSON.stringify({ chainId, ...options });
+  const cached = hotRankChainCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < config.binance.hotRankCacheMs) return cached.tokens;
 
-  const chains = CHAIN_GROUPS[normalizedChain];
-  const results = await Promise.allSettled(
-    chains.map((chainId) => fetchHotRankChain(chainId, { targetLanguage, socialLanguage, timeRange: safeTimeRange }))
-  );
-  const binanceTokens = results
-    .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
-    .sort((a, b) => b.heat - a.heat)
-    .slice(0, safeLimit);
-  const errors = results
-    .filter((result) => result.status === "rejected")
-    .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason)));
-
-  if (!binanceTokens.length && errors.length) {
-    if (lastHotRankPayload) {
-      return {
-        ...lastHotRankPayload,
-        tokens: limitAndRerankTokens(lastHotRankPayload.tokens, safeLimit),
-        fetchedAt: new Date().toISOString(),
-        partial: true,
-        stale: true,
-        errors
-      };
-    }
-    return {
-      ok: true,
-      source: config.twitter.heatEnabled && twitterTokens().length ? "Binance Web3 Social Hype + Twitter/X" : "Binance Web3 Social Hype",
-      twitterEnabled: Boolean(config.twitter.heatEnabled && twitterTokens().length),
-      chain: normalizedChain,
-      chains,
-      fetchedAt: new Date().toISOString(),
-      partial: true,
-      stale: false,
-      errors,
-      tokens: []
-    };
+  let request = hotRankChainInflight.get(cacheKey);
+  if (!request) {
+    request = requestHotRankChain(chainId, options);
+    hotRankChainInflight.set(cacheKey, request);
   }
+  try {
+    const tokens = await request;
+    hotRankChainCache.set(cacheKey, { fetchedAt: Date.now(), tokens });
+    return tokens;
+  } finally {
+    if (hotRankChainInflight.get(cacheKey) === request) hotRankChainInflight.delete(cacheKey);
+  }
+}
 
-  let freshBudget = Math.max(0, config.twitter.maxFreshPerRank);
-  const twitterResults = await mapWithConcurrency(
-    binanceTokens,
-    config.twitter.concurrentRequests,
-    (token) => {
-      const cached = getCachedTwitterHeat(token.symbol);
-      if (cached) return cached;
-      if (freshBudget <= 0) return { heat: 0, status: "pending_refresh" };
-      freshBudget -= 1;
-      return fetchTwitterHeat(token.symbol);
-    }
+async function getTopMarketCapSymbols() {
+  const cacheMs = Math.max(60_000, Number(config.hotRank.marketCapTopCacheMs) || 0);
+  if (Date.now() - topMarketCapCache.fetchedAt < cacheMs) return topMarketCapCache;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.hotRank.marketCapTopTimeoutMs);
+  try {
+    const response = await fetch(config.hotRank.marketCapTopUrl, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`market cap top 10 HTTP ${response.status}`);
+    const json = await response.json();
+    if (!Array.isArray(json) || json.length < 10) throw new Error("market cap top 10 returned incomplete data");
+    const symbols = new Set(
+      json
+        .slice(0, 10)
+        .map((item) => String(item?.symbol ?? "").toUpperCase())
+        .filter(Boolean)
+    );
+    if (symbols.size < 10) throw new Error("market cap top 10 symbols are incomplete");
+    topMarketCapCache = { fetchedAt: Date.now(), source: "coingecko", symbols };
+  } catch (error) {
+    topMarketCapCache = {
+      fetchedAt: Date.now(),
+      source: "fallback",
+      symbols: topMarketCapCache.symbols.size
+        ? topMarketCapCache.symbols
+        : new Set(FALLBACK_TOP_MARKET_CAP_SYMBOLS),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+  return topMarketCapCache;
+}
+
+function materializeHotRank(basePayload, safeLimit) {
+  const binanceTokens = (basePayload.binanceTokens ?? []).slice(0, safeLimit);
+  scheduleTwitterRefresh(binanceTokens);
+  const twitterResults = binanceTokens.map((token) =>
+    getCachedTwitterHeat(token.symbol) ?? { heat: null, status: "pending_refresh", tweetCount: 0 }
   );
   const maxBinanceHeat = Math.max(...binanceTokens.map((token) => token.heat), 1);
-  const maxTwitterHeat = Math.max(
-    ...twitterResults.map((result) => (result.status === "fulfilled" ? result.value.heat : 0)),
-    1
-  );
+  const availableTwitterHeat = twitterResults
+    .map((result) => result.heat === null || result.heat === undefined ? Number.NaN : Number(result.heat))
+    .filter(Number.isFinite);
+  const maxTwitterHeat = Math.max(...availableTwitterHeat, 1);
   const tokens = binanceTokens
     .map((token, index) => {
-      const twitter = twitterResults[index].status === "fulfilled" ? twitterResults[index].value : { heat: 0, status: "failed" };
+      const twitter = twitterResults[index];
       const binanceScore = (token.heat / maxBinanceHeat) * 70;
-      const twitterScore = (twitter.heat / maxTwitterHeat) * 30;
+      const twitterHeat =
+        twitter.heat === null || twitter.heat === undefined ? Number.NaN : Number(twitter.heat);
+      const twitterScore = Number.isFinite(twitterHeat) ? (twitterHeat / maxTwitterHeat) * 30 : 0;
       return {
         ...token,
         binanceHeat: token.heat,
-        twitterHeat: twitter.heat,
+        twitterHeat: Number.isFinite(twitterHeat) ? twitterHeat : null,
         twitterStatus: twitter.status,
         twitterTweetCount: twitter.tweetCount ?? 0,
         heat: Number((binanceScore + twitterScore).toFixed(4))
       };
     })
     .sort((a, b) => b.heat - a.heat)
-    .slice(0, safeLimit)
     .map((token, index) => ({ ...token, rank: index + 1 }));
 
-  const payload = {
+  return {
     ok: true,
-    source: config.twitter.heatEnabled && twitterTokens().length ? "Binance Web3 Social Hype + Twitter/X" : "Binance Web3 Social Hype",
+    source: config.twitter.heatEnabled && twitterTokens().length
+      ? "Binance Web3 Social Hype + Twitter/X"
+      : "Binance Web3 Social Hype",
     twitterEnabled: Boolean(config.twitter.heatEnabled && twitterTokens().length),
+    twitterPendingCount: twitterResults.filter(
+      (result) => result.status === "pending_refresh" || result.status === "rate_limited_retrying"
+    ).length,
+    chain: basePayload.chain,
+    chains: basePayload.chains,
+    fetchedAt: basePayload.fetchedAt,
+    partial: basePayload.partial,
+    stale: basePayload.stale,
+    errors: basePayload.errors,
+    filters: basePayload.filters,
+    tokens
+  };
+}
+
+async function fetchHotRankBase({ normalizedChain, safeLimit, targetLanguage, socialLanguage, safeTimeRange }) {
+  const chains = CHAIN_GROUPS[normalizedChain];
+  const [results, topMarketCap] = await Promise.all([
+    Promise.allSettled(
+      chains.map((chainId) =>
+        fetchHotRankChain(chainId, {
+          targetLanguage,
+          socialLanguage,
+          timeRange: safeTimeRange
+        })
+      )
+    ),
+    getTopMarketCapSymbols()
+  ]);
+  const rawTokens = results
+    .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
+    .sort((a, b) => b.heat - a.heat);
+  const filtered = filterEligibleHotTokens(rawTokens, topMarketCap.symbols);
+  const binanceTokens = filtered.tokens.slice(0, safeLimit);
+  const errors = results
+    .filter((result) => result.status === "rejected")
+    .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason)));
+  const filters = {
+    excluded: filtered.excluded,
+    topMarketCapSource: topMarketCap.source,
+    topMarketCapSymbols: [...topMarketCap.symbols],
+    ...(topMarketCap.error ? { warning: topMarketCap.error } : {})
+  };
+
+  if (!rawTokens.length && errors.length) {
+    const previous = lastHotRankPayloadByChain.get(normalizedChain);
+    if (previous) {
+      return {
+        ...previous,
+        fetchedAt: new Date().toISOString(),
+        partial: true,
+        stale: true,
+        errors
+      };
+    }
+  }
+
+  const basePayload = {
     chain: normalizedChain,
     chains,
     fetchedAt: new Date().toISOString(),
     partial: errors.length > 0,
+    stale: false,
     errors,
-    tokens
+    filters,
+    binanceTokens
   };
-  hotRankCache.set(cacheKey, { fetchedAt: Date.now(), payload });
-  lastHotRankPayload = payload;
-  return payload;
+  if (rawTokens.length) lastHotRankPayloadByChain.set(normalizedChain, basePayload);
+  return basePayload;
+}
+
+export async function getHotRank({
+  chain = "all",
+  limit = 30,
+  targetLanguage = "zh",
+  socialLanguage = "ALL",
+  timeRange = 1
+} = {}) {
+  const normalizedChain = Object.hasOwn(CHAIN_GROUPS, chain) ? chain : "all";
+  const safeLimit = Math.max(5, Math.min(100, Number(limit) || 30));
+  const safeTimeRange = Math.max(1, Number(timeRange) || 1);
+  const cacheKey = JSON.stringify({
+    normalizedChain,
+    safeLimit,
+    targetLanguage,
+    socialLanguage,
+    safeTimeRange
+  });
+  const cached = hotRankCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < config.binance.hotRankCacheMs) {
+    return materializeHotRank(cached.basePayload, safeLimit);
+  }
+
+  let request = hotRankInflight.get(cacheKey);
+  if (!request) {
+    request = fetchHotRankBase({
+      normalizedChain,
+      safeLimit,
+      targetLanguage,
+      socialLanguage,
+      safeTimeRange
+    });
+    hotRankInflight.set(cacheKey, request);
+  }
+
+  try {
+    const basePayload = await request;
+    hotRankCache.set(cacheKey, { fetchedAt: Date.now(), basePayload });
+    return materializeHotRank(basePayload, safeLimit);
+  } finally {
+    if (hotRankInflight.get(cacheKey) === request) hotRankInflight.delete(cacheKey);
+  }
 }

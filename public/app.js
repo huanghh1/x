@@ -17,6 +17,7 @@ const state = {
   page: 1,
   pageSize: 20,
   expandedKey: null,
+  signalChartIntervals: new Map(),
   chartCache: new Map(),
   chartState: new Map(),
   multiHistory: [],
@@ -37,17 +38,27 @@ const state = {
   hotRankErrors: [],
   hotRankLoading: false,
   hotRankError: "",
+  hotRankRequestId: 0,
+  hotRankController: null,
+  hotRankRefreshTimer: null,
+  hotRankTwitterPending: 0,
   hotRankPage: 1,
   hotRankPageSize: 20,
   hotRankTotal: 0,
   fundingTokens: [],
+  fundingExpandedSymbol: null,
+  fundingInterval: "15m",
   ioData: [],
   ioWindow: "5m",
   ioSort: "desc",
+  ioExpandedSymbol: null,
+  ioChartInterval: "15m",
   triggerHistory: [],
   triggerHistoryPage: 1,
   triggerHistoryPageSize: 20,
   triggerHistoryTotal: 0,
+  selectedTriggerIds: new Set(),
+  triggerTypes: new Set(["MA_SIGNAL", "HOT_RANK", "FUNDING_RATE", "OI_SPIKE", "COMPOSITE"]),
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
   watchRealtimeSignature: "",
@@ -103,6 +114,12 @@ function formatPercent(value) {
   return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", { maximumFractionDigits: 2 })}%`;
 }
 
+function formatFundingPercent(value) {
+  const number = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(number)) return "--";
+  return `${(number * 100).toFixed(4)}%`;
+}
+
 function cssVar(name, fallback) {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
@@ -142,7 +159,7 @@ function levelBadge(level) {
 }
 
 function rowKey(row) {
-  return `${row.symbol}|${row.intervalCode}`;
+  return String(row.symbol ?? "");
 }
 
 function baseAsset(symbol) {
@@ -154,7 +171,51 @@ function twitterSearchUrl(symbol) {
 }
 
 function binanceSquareSearchUrl(symbol) {
-  return `https://www.binance.com/en/square/search?keyword=${encodeURIComponent(baseAsset(symbol))}`;
+  return `https://www.binance.com/en/square/search?s=${encodeURIComponent(baseAsset(symbol))}`;
+}
+
+function signalProfile(row) {
+  if (row.compositeProfile) {
+    const sources = Array.isArray(row.compositeProfile.sources) ? row.compositeProfile.sources : [];
+    return {
+      label: row.compositeProfile.label ?? "观察",
+      priority: Number(row.compositeProfile.priority ?? 99),
+      classes: [
+        sources.includes("资金费") ? "has-funding" : "",
+        sources.includes("OI") ? "has-oi" : "",
+        sources.includes("热度") ? "has-hot" : "",
+        sources.includes("多周期") ? "has-multi" : ""
+      ].filter(Boolean).join(" ")
+    };
+  }
+  const funding = Boolean(row.fundingOneHour);
+  const oi = Boolean(row.oiMatched ?? row.oiSpikeHit);
+  const hot = Boolean(Number(row.hotRankHit ?? 0));
+  const multi = Number(row.multiMatchCount ?? 0) >= 3;
+  const alertLevel = row.bestAlertLevel === "LEVEL1" || row.bestAlertLevel === "LEVEL2"
+    ? row.bestAlertLevel
+    : row.alertLevel === "LEVEL1" || row.alertLevel === "LEVEL2"
+      ? row.alertLevel
+      : null;
+  if (!alertLevel) return { label: "观察", priority: 99, classes: "" };
+  const sourceMask = (funding ? 8 : 0) + (oi ? 4 : 0) + (hot ? 2 : 0) + (multi ? 1 : 0);
+  const sources = [
+    funding ? "资金费" : null,
+    oi ? "OI" : null,
+    hot ? "热度" : null,
+    multi ? "多周期" : null
+  ].filter(Boolean);
+  const levelLabel = alertLevel === "LEVEL1" ? "一级警报" : "二级警报";
+  return {
+    label: sources.length ? `${sources.join(" + ")} · ${levelLabel}` : levelLabel,
+    priority: sourceMask ? (15 - sourceMask) * 2 + (alertLevel === "LEVEL2" ? 1 : 0) : alertLevel === "LEVEL1" ? 30 : 31,
+    classes: [
+      funding ? "has-funding" : "",
+      oi ? "has-oi" : "",
+      hot ? "has-hot" : "",
+      multi ? "has-multi" : ""
+    ].filter(Boolean).join(" ")
+  };
 }
 
 function searchButtons(symbol) {
@@ -183,6 +244,39 @@ function updateSignalWatchButtons() {
     button.textContent = isWatched ? "已关注" : "加关注";
     button.title = isWatched ? `${symbol} 已在关注池` : `加入关注池：${symbol}`;
     button.setAttribute("aria-pressed", isWatched ? "true" : "false");
+  }
+}
+
+function watchButton(symbol, note) {
+  const safeSymbol = escapeHtml(symbol);
+  const watched = isWatchedSymbol(symbol);
+  return `<button class="copy-symbol watch-add ${watched ? "is-added" : ""}" type="button" data-watch-symbol="${safeSymbol}" data-watch-note="${escapeHtml(note)}" title="${watched ? `${safeSymbol} 已在关注池` : `加入关注池：${safeSymbol}`}" aria-pressed="${watched ? "true" : "false"}" ${watched ? "disabled" : ""}>${watched ? "已关注" : "加关注"}</button>`;
+}
+
+function bindWatchButtons(root = document) {
+  for (const button of root.querySelectorAll("[data-watch-symbol]:not([data-watch-bound])")) {
+    button.dataset.watchBound = "true";
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const symbol = button.dataset.watchSymbol ?? "";
+      try {
+        button.disabled = true;
+        button.textContent = "加入中";
+        button.classList.add("is-pending");
+        if (!state.watchLoaded) await loadWatchlist({ silent: true });
+        if (isWatchedSymbol(symbol)) {
+          updateSignalWatchButtons();
+          return;
+        }
+        await addWatchItem({ symbol, note: button.dataset.watchNote ?? "" });
+        updateSignalWatchButtons();
+      } catch {
+        button.textContent = "失败";
+        setTimeout(updateSignalWatchButtons, 1200);
+      } finally {
+        button.classList.remove("is-pending");
+      }
+    });
   }
 }
 
@@ -240,8 +334,11 @@ function sentimentLabel(value) {
 function twitterStatusLabel(token) {
   if (!token.twitterStatus) return "推特未启用";
   if (token.twitterStatus === "ok") return `推特 ${formatNumber(token.twitterHeat, 0)}`;
+  if (token.twitterStatus === "no_results") return "推特暂无结果";
   if (token.twitterStatus === "not_configured") return "推特未配置";
-  if (token.twitterStatus === "token_pool_cooling_down") return "推特冷却中";
+  if (token.twitterStatus === "rate_limited_retrying") return "推特限频，自动重试中";
+  if (token.twitterStatus === "quota_pool_exhausted") return "推特额度池暂不可用";
+  if (token.twitterStatus === "token_pool_cooling_down") return "推特额度池暂不可用";
   if (token.twitterStatus.includes("insufficient quota")) return "推特额度不足";
   if (token.twitterStatus.startsWith("token_pool_failed")) return "推特请求失败";
   if (token.twitterStatus === "pending_refresh") return "推特待刷新";
@@ -272,6 +369,7 @@ function renderHotRank() {
     const flags = [];
     if (state.hotRankStale) flags.push("使用上次缓存");
     else if (state.hotRankPartial) flags.push("部分链失败");
+    if (state.hotRankTwitterPending > 0) flags.push(`推特后台更新 ${state.hotRankTwitterPending} 项`);
     if (state.hotRankErrors.length) flags.push(`错误 ${state.hotRankErrors.length} 条`);
     status.textContent = `来源：${state.hotRankSource || "Binance Web3 Social Hype"} · 更新时间 ${formatTime(state.hotRankFetchedAt)}${flags.length ? ` · ${flags.join(" · ")}` : ""}`;
     status.title = state.hotRankErrors.join("\n");
@@ -357,17 +455,47 @@ function renderFundingRateTokens() {
 
   if (!state.fundingTokens.length) {
     target.innerHTML = '<div class="heat-empty">当前没有1小时资金费率的代币。</div>';
+    setText("#fundingStatus", "当前没有1小时资金费率的代币");
     return;
   }
 
   target.innerHTML = state.fundingTokens
-    .map((token) => `
-      <div class="pool-item">
-        <span>${escapeHtml(token.symbol)}</span>
-        <span>下次结算: ${token.next_settlement_time ? formatTime(token.next_settlement_time) : 'N/A'}</span>
-      </div>
-    `)
+    .map((token) => {
+      const matches = [
+        token.hotRank ? "热度" : null,
+        Number(token.multiCycleCount ?? 0) >= 3
+          ? `多周期 ${token.multiCycleCount}`
+          : Number(token.multiCycleCount ?? 0) > 0
+            ? `均线 ${token.multiCycleCount} 周期`
+            : null,
+        token.oiSpike
+          ? `OI 5m ${formatPercent(token.oiChange5mPct)} / 1h ${formatPercent(token.oiChange1hPct)}`
+          : null
+      ].filter(Boolean);
+      const expanded = state.fundingExpandedSymbol === token.symbol;
+      return `
+        <article class="funding-card">
+          <div class="funding-symbol">
+            <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
+            <span class="level-badge level1">1 小时结算</span>
+          </div>
+          <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
+          <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
+          <div><span>当前资金费率</span><b class="mono">${formatFundingPercent(token.currentFundingRate)}</b></div>
+          <div><span>下次结算</span><b>${formatTime(token.nextFundingTime)}</b></div>
+          <div><span>最近变化</span><b>${formatTime(token.lastChangedAt || token.lastSeenAt)}</b></div>
+          <div class="heat-links">
+            ${watchButton(token.symbol, "从资金费率监控加入")}
+            ${searchButtons(token.symbol)}
+          </div>
+        </article>
+        ${expanded ? marketChartPanel(token.symbol, state.fundingInterval, "funding") : ""}
+      `;
+    })
     .join("");
+  bindWatchButtons(target);
+  bindMarketChartControls(target, "funding");
+  setText("#fundingStatus", `当前共 ${state.fundingTokens.length} 个 1 小时资金费率代币，按最近变化时间排序`);
 }
 
 async function loadIOMonitoring() {
@@ -385,26 +513,104 @@ function renderIOMonitoring() {
   if (!target) return;
 
   if (!state.ioData.length) {
-    target.innerHTML = '<div class="heat-empty">暂无IO数据。</div>';
+    target.innerHTML = '<div class="heat-empty">暂无 OI 数据。</div>';
+    setText("#ioStatus", "等待 OI 扫描数据");
     return;
   }
 
   target.innerHTML = state.ioData
-    .map((item) => `
-      <div class="pool-item">
-        <span>${escapeHtml(item.symbol)} - ${escapeHtml(item.time_window)}</span>
-        <span>IO: ${formatNumber(item.spike_value, 2)} (${formatPercent(item.spike_percent)})</span>
-        <span>${formatTime(item.spike_time)}</span>
-      </div>
-    `)
+    .map((item) => {
+      const matches = [
+        item.hotRankHit ? "热度" : null,
+        item.fundingOneHour ? "1h资金费率" : null,
+        Number(item.multiCycleCount ?? 0) >= 3
+          ? `多周期 ${item.multiCycleCount}`
+          : Number(item.multiCycleCount ?? 0) > 0
+            ? `均线 ${item.multiCycleCount} 周期`
+            : null
+      ].filter(Boolean);
+      const changeClass = Number(item.changePercent) >= 0 ? "up" : "down";
+      const expanded = state.ioExpandedSymbol === item.symbol;
+      return `
+        <article class="io-card">
+          <div class="io-symbol"><button class="market-symbol-button" type="button" data-market-chart="io" data-market-symbol="${escapeHtml(item.symbol)}" aria-expanded="${expanded}">${escapeHtml(item.symbol)}</button><span>${escapeHtml(state.ioWindow)}</span></div>
+          <div><span>变化</span><b class="${changeClass}">${formatPercent(item.changePercent)}</b></div>
+          <div><span>当前持仓量</span><b class="mono">${formatCompactNumber(item.currentOpenInterest)}</b></div>
+          <div><span>持仓价值</span><b class="mono">${formatCompactUsd(item.currentOpenInterestValue)}</b></div>
+          <div><span>同币种命中</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
+          <div><span>更新时间</span><b>${formatTime(item.observedAt)}</b></div>
+          <div class="heat-links">
+            ${watchButton(item.symbol, "从 OI 监控加入")}
+            ${searchButtons(item.symbol)}
+          </div>
+        </article>
+        ${expanded ? marketChartPanel(item.symbol, state.ioChartInterval, "io") : ""}
+      `;
+    })
     .join("");
+  bindWatchButtons(target);
+  bindMarketChartControls(target, "io");
+  setText("#ioStatus", `${state.ioWindow} 变化率 · ${state.ioSort === "desc" ? "从高到低" : "从低到高"} · ${state.ioData.length} 个代币`);
+}
+
+function marketChartPanel(symbol, intervalCode, kind) {
+  return `
+    <article class="market-chart-detail">
+      <div class="market-chart-head">
+        <strong>${escapeHtml(symbol)} K线</strong>
+        <div class="signal-chart-switch" aria-label="${escapeHtml(symbol)} 图表周期">
+          ${ALL_INTERVALS.map((interval) => `<button type="button" class="${intervalCode === interval ? "active" : ""}" data-market-chart-interval="${interval}" data-market-chart-kind="${kind}">${interval}</button>`).join("")}
+        </div>
+      </div>
+      <div class="chart-shell" id="${chartElementId(`${symbol}|${intervalCode}`)}">
+        <div class="chart-loading">正在读取 ${escapeHtml(symbol)} ${escapeHtml(intervalCode)} K线...</div>
+      </div>
+    </article>
+  `;
+}
+
+function bindMarketChartControls(target, kind) {
+  for (const button of target.querySelectorAll(`[data-market-chart="${kind}"]`)) {
+    button.addEventListener("click", () => {
+      const symbol = button.dataset.marketSymbol ?? "";
+      if (kind === "funding") {
+        state.fundingExpandedSymbol = state.fundingExpandedSymbol === symbol ? null : symbol;
+        renderFundingRateTokens();
+      } else {
+        state.ioExpandedSymbol = state.ioExpandedSymbol === symbol ? null : symbol;
+        renderIOMonitoring();
+      }
+    });
+  }
+  for (const button of target.querySelectorAll(`[data-market-chart-kind="${kind}"]`)) {
+    button.addEventListener("click", () => {
+      if (kind === "funding") {
+        state.fundingInterval = button.dataset.marketChartInterval ?? "15m";
+        renderFundingRateTokens();
+      } else {
+        state.ioChartInterval = button.dataset.marketChartInterval ?? "15m";
+        renderIOMonitoring();
+      }
+    });
+  }
+  const symbol = kind === "funding" ? state.fundingExpandedSymbol : state.ioExpandedSymbol;
+  const intervalCode = kind === "funding" ? state.fundingInterval : state.ioChartInterval;
+  if (symbol) loadAndRenderChart({ symbol, intervalCode });
 }
 
 async function loadTriggerHistory() {
   try {
-    const payload = await api(`/api/trigger-history?page=${state.triggerHistoryPage}&pageSize=${state.triggerHistoryPageSize}`);
+    const params = new URLSearchParams({
+      page: String(state.triggerHistoryPage),
+      pageSize: String(state.triggerHistoryPageSize),
+      triggerTypes: Array.from(state.triggerTypes).join(",")
+    });
+    const payload = await api(`/api/trigger-history?${params.toString()}`);
     state.triggerHistory = payload.items || [];
     state.triggerHistoryTotal = payload.total || 0;
+    state.selectedTriggerIds = new Set(
+      Array.from(state.selectedTriggerIds).filter((id) => state.triggerHistory.some((item) => item.id === id))
+    );
     renderTriggerHistory();
   } catch (error) {
     console.error("load trigger history failed", error);
@@ -417,6 +623,7 @@ function renderTriggerHistory() {
 
   if (!state.triggerHistory.length) {
     target.innerHTML = '<tr><td colspan="7" class="empty">暂无记录</td></tr>';
+    updateTriggerSelectionUi();
     updateTriggerHistoryPagination();
     return;
   }
@@ -424,18 +631,54 @@ function renderTriggerHistory() {
   target.innerHTML = state.triggerHistory
     .map((item) => `
       <tr>
-        <td><input type="checkbox" data-trigger-id="${item.id}" /></td>
+        <td><input type="checkbox" data-trigger-id="${item.id}" ${state.selectedTriggerIds.has(item.id) ? "checked" : ""} /></td>
         <td>${escapeHtml(item.symbol)}</td>
-        <td>${escapeHtml(item.trigger_type)}</td>
-        <td>${escapeHtml(item.intervals_triggered || '-')}</td>
-        <td>${escapeHtml(item.signal_level || '-')}</td>
-        <td>${formatTime(item.trigger_time)}</td>
+        <td>${escapeHtml(triggerTypeLabel(item.triggerType))}</td>
+        <td>${escapeHtml(item.intervalsTriggered || "-")}</td>
+        <td>${escapeHtml(item.signalLevel || "-")}</td>
+        <td>${formatTime(item.triggerTime)}</td>
         <td><button class="ghost-button" data-delete-trigger="${item.id}">删除</button></td>
       </tr>
     `)
     .join("");
 
+  bindTriggerSelection();
   updateTriggerHistoryPagination();
+}
+
+function triggerTypeLabel(type) {
+  return {
+    MA_SIGNAL: "均线一级",
+    HOT_RANK: "热度上榜",
+    FUNDING_RATE: "1h资金费率",
+    OI_SPIKE: "OI暴涨",
+    COMPOSITE: "复合信号"
+  }[type] ?? type ?? "--";
+}
+
+function updateTriggerSelectionUi() {
+  const count = state.selectedTriggerIds.size;
+  setText("#selectedTriggerCount", `已选 ${count} 条`);
+  const deleteButton = $("#deleteSelectedTriggerBtn");
+  if (deleteButton) deleteButton.disabled = count === 0;
+  const selectAll = $("#selectAllTrigger");
+  if (selectAll) {
+    const visibleIds = state.triggerHistory.map((item) => item.id);
+    selectAll.checked = visibleIds.length > 0 && visibleIds.every((id) => state.selectedTriggerIds.has(id));
+    selectAll.indeterminate = visibleIds.some((id) => state.selectedTriggerIds.has(id)) && !selectAll.checked;
+  }
+}
+
+function bindTriggerSelection() {
+  document.querySelectorAll("[data-trigger-id]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = Number(input.dataset.triggerId);
+      if (input.checked) state.selectedTriggerIds.add(id);
+      else state.selectedTriggerIds.delete(id);
+      updateTriggerSelectionUi();
+    });
+  });
+  updateTriggerSelectionUi();
 }
 
 function updateTriggerHistoryPagination() {
@@ -457,12 +700,22 @@ function updateTriggerHistoryPagination() {
 }
 
 async function loadHotRank({ silent = false } = {}) {
-  if (state.hotRankLoading) return;
+  const requestedChain = state.hotRankChain;
+  const requestId = state.hotRankRequestId + 1;
+  state.hotRankRequestId = requestId;
+  state.hotRankController?.abort();
+  const controller = new AbortController();
+  state.hotRankController = controller;
+  clearTimeout(state.hotRankRefreshTimer);
   state.hotRankLoading = true;
   if (!silent) renderHotRank();
   try {
     state.hotRankError = "";
-    const payload = await api(`/api/hot-rank?chain=${encodeURIComponent(state.hotRankChain)}&limit=500`);
+    const payload = await api(`/api/hot-rank?chain=${encodeURIComponent(requestedChain)}&limit=100`, {
+      signal: controller.signal
+    });
+    if (requestId !== state.hotRankRequestId || requestedChain !== state.hotRankChain) return;
+    if (payload.chain !== requestedChain) throw new Error(`分链响应不匹配：请求 ${requestedChain}，返回 ${payload.chain}`);
     state.hotRank = payload.tokens ?? [];
     state.hotRankTotal = state.hotRank.length;
     state.hotRankSource = payload.source ?? "";
@@ -470,16 +723,26 @@ async function loadHotRank({ silent = false } = {}) {
     state.hotRankPartial = Boolean(payload.partial);
     state.hotRankStale = Boolean(payload.stale);
     state.hotRankErrors = Array.isArray(payload.errors) ? payload.errors : [];
+    state.hotRankTwitterPending = Math.max(0, Number(payload.twitterPendingCount) || 0);
+    if (state.hotRankTwitterPending > 0) {
+      state.hotRankRefreshTimer = setTimeout(() => {
+        if (state.hotRankChain === requestedChain) loadHotRank({ silent: true });
+      }, 2500);
+    }
   } catch (error) {
+    if (controller.signal.aborted || requestId !== state.hotRankRequestId) return;
     state.hotRank = [];
     state.hotRankSource = "";
     state.hotRankFetchedAt = null;
     state.hotRankPartial = false;
     state.hotRankStale = false;
     state.hotRankErrors = [];
+    state.hotRankTwitterPending = 0;
     state.hotRankError = `热度数据读取失败：${error instanceof Error ? error.message : String(error)}`;
   } finally {
+    if (requestId !== state.hotRankRequestId) return;
     state.hotRankLoading = false;
+    state.hotRankController = null;
     renderHotRank();
   }
 }
@@ -508,7 +771,7 @@ function renderSignals() {
   renderPagination(state.totalSignals, totalPages);
 
   if (!rows.length) {
-    target.innerHTML = '<tr><td colspan="9" class="empty">当前筛选条件下暂无信号。可放宽等级、周期或分类筛选。</td></tr>';
+    target.innerHTML = '<tr><td colspan="8" class="empty">当前筛选条件下暂无信号。可放宽等级、周期或分类筛选。</td></tr>';
     return;
   }
 
@@ -516,39 +779,68 @@ function renderSignals() {
     .map((row) => {
       const key = rowKey(row);
       const expanded = state.expandedKey === key;
-      const multiRequired = Number(row.multiMatchRequired ?? 0);
       const multiCount = Number(row.multiMatchCount ?? 0);
-      const multiQualified = multiRequired > 1 && multiCount >= multiRequired;
+      const multiQualified = multiCount >= 3;
       const hotRankHit = Boolean(Number(row.hotRankHit ?? 0));
-      const watched = isWatchedSymbol(row.symbol);
+      const profile = signalProfile(row);
+      const oiChangeText = row.oiMatched
+        ? `5m ${formatPercent(row.oiChange5mPct)} / 1h ${formatPercent(row.oiChange1hPct)}`
+        : "";
+      const details = Array.isArray(row.intervalDetails) ? row.intervalDetails : [];
+      const triggered = details.filter((item) => ["LEVEL1", "LEVEL2"].includes(item.alertLevel));
+      const availableIntervals = details.map((item) => item.intervalCode).filter(Boolean);
+      const preferredInterval =
+        state.signalChartIntervals.get(row.symbol) ??
+        triggered[0]?.intervalCode ??
+        row.intervalCode ??
+        availableIntervals[0] ??
+        "1h";
+      const selectedInterval = availableIntervals.includes(preferredInterval) ? preferredInterval : availableIntervals[0] ?? "1h";
+      state.signalChartIntervals.set(row.symbol, selectedInterval);
+      const selectedDetail = details.find((item) => item.intervalCode === selectedInterval) ?? row;
+      const bestLevel = row.bestAlertLevel ??
+        (triggered.some((item) => item.alertLevel === "LEVEL1")
+          ? "LEVEL1"
+          : triggered.some((item) => item.alertLevel === "LEVEL2")
+            ? "LEVEL2"
+            : row.alertLevel);
+      const intervalBadges = triggered.length
+        ? triggered.map((item) => `<span class="interval-badge interval-${escapeHtml(item.intervalCode)} ${item.alertLevel === "LEVEL1" ? "is-level1" : "is-level2"}">${escapeHtml(item.intervalCode)}</span>`).join("")
+        : `<span class="interval-badge interval-${escapeHtml(row.intervalCode || "")}">${escapeHtml(row.intervalCode || "--")}</span>`;
       const signalRow = `
-        <tr class="signal-row ${expanded ? "is-expanded" : ""} ${multiQualified ? "is-multi-hit" : ""} ${hotRankHit ? "is-hot-ma-hit" : ""}" data-key="${escapeHtml(key)}">
+        <tr class="signal-row priority-${profile.priority} ${expanded ? "is-expanded" : ""} ${multiQualified ? "is-multi-hit" : ""} ${hotRankHit ? "is-hot-ma-hit" : ""}" data-key="${escapeHtml(key)}">
           <td>
             <div class="symbol-cell">
               <button class="symbol-button" type="button" data-key="${escapeHtml(key)}" title="查看K线">${escapeHtml(row.symbol)}</button>
               <button class="copy-symbol" type="button" data-symbol="${escapeHtml(row.symbol)}" title="复制交易对">复制</button>
-              <button class="copy-symbol watch-add ${watched ? "is-added" : ""}" type="button" data-watch-symbol="${escapeHtml(row.symbol)}" title="${watched ? `${escapeHtml(row.symbol)} 已在关注池` : `加入关注池：${escapeHtml(row.symbol)}`}" aria-pressed="${watched ? "true" : "false"}" ${watched ? "disabled" : ""}>${watched ? "已关注" : "加关注"}</button>
+              ${watchButton(row.symbol, "从均线信号加入")}
               ${searchButtons(row.symbol)}
-              ${hotRankHit ? `<span class="hot-ma-badge">热度+均线 #${escapeHtml(row.hotRank ?? "--")}</span>` : ""}
-              ${multiQualified ? `<span class="multi-badge">多周期 ${multiCount}/${multiRequired}</span>` : ""}
             </div>
           </td>
           <td>${escapeHtml(row.categoryLabel)}</td>
-          <td class="mono">${escapeHtml(row.intervalCode)}</td>
-          <td>${levelBadge(row.alertLevel)}</td>
-          <td class="mono">${formatNumber(row.ma100)}</td>
-          <td class="mono">${formatNumber(row.ma200)}</td>
-          <td class="mono">${formatNumber(row.currentPrice)}</td>
-          <td>${escapeHtml(row.signalStatus)}</td>
-          <td>${escapeHtml(row.note)}</td>
+          <td><div class="interval-stack">${intervalBadges}</div></td>
+          <td>
+            <div class="signal-profile-stack">
+              <span class="signal-profile priority-${profile.priority} ${profile.classes}">${escapeHtml(profile.label)}</span>
+              ${oiChangeText ? `<span class="signal-oi-change">OI暴涨 ${escapeHtml(oiChangeText)}</span>` : ""}
+            </div>
+          </td>
+          <td>${levelBadge(bestLevel)}</td>
+          <td class="mono">${formatNumber(selectedDetail.currentPrice)}</td>
+          <td class="mono"><span>MA100 ${formatNumber(selectedDetail.ma100)}</span><span>MA200 ${formatNumber(selectedDetail.ma200)}</span></td>
+          <td>${formatTime(selectedDetail.signalTime || selectedDetail.updatedAt)}</td>
         </tr>
       `;
       if (!expanded) return signalRow;
       return `${signalRow}
         <tr class="chart-row">
-          <td colspan="9">
-            <div class="chart-shell" id="${chartElementId(key)}">
-              <div class="chart-loading">正在读取 ${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} 全部K线缓存...</div>
+          <td colspan="8">
+            <div class="signal-chart-switch">
+              <span>图表周期</span>
+              ${availableIntervals.map((interval) => `<button type="button" class="${selectedInterval === interval ? "active" : ""}" data-signal-chart-interval="${escapeHtml(interval)}" data-signal-symbol="${escapeHtml(row.symbol)}">${escapeHtml(interval)}</button>`).join("")}
+            </div>
+            <div class="chart-shell" id="${chartElementId(`${row.symbol}|${selectedInterval}`)}">
+              <div class="chart-loading">正在读取 ${escapeHtml(row.symbol)} ${escapeHtml(selectedInterval)} 全部 K 线缓存...</div>
             </div>
           </td>
         </tr>`;
@@ -556,9 +848,21 @@ function renderSignals() {
     .join("");
 
   bindRowClicks();
+  document.querySelectorAll("[data-signal-chart-interval]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.signalChartIntervals.set(button.dataset.signalSymbol, button.dataset.signalChartInterval);
+      renderSignals();
+    });
+  });
   if (state.expandedKey) {
     const expandedRow = rows.find((row) => rowKey(row) === state.expandedKey);
-    if (expandedRow) loadAndRenderChart(expandedRow);
+    if (expandedRow) {
+      loadAndRenderChart({
+        symbol: expandedRow.symbol,
+        intervalCode: state.signalChartIntervals.get(expandedRow.symbol) ?? expandedRow.intervalCode ?? "1h"
+      });
+    }
   }
 }
 
@@ -631,29 +935,7 @@ function bindRowClicks() {
     });
   }
 
-  for (const button of document.querySelectorAll("[data-watch-symbol]")) {
-    button.addEventListener("click", async (event) => {
-      event.stopPropagation();
-      const symbol = button.dataset.watchSymbol ?? "";
-      try {
-        button.disabled = true;
-        button.textContent = "加入中";
-        button.classList.add("is-pending");
-        if (!state.watchLoaded) await loadWatchlist({ silent: true });
-        if (isWatchedSymbol(symbol)) {
-          updateSignalWatchButtons();
-          return;
-        }
-        await addWatchItem({ symbol, note: "从均线信号加入" });
-        updateSignalWatchButtons();
-      } catch {
-        button.textContent = "失败";
-        setTimeout(updateSignalWatchButtons, 1200);
-      } finally {
-        button.classList.remove("is-pending");
-      }
-    });
-  }
+  bindWatchButtons();
 
   for (const link of document.querySelectorAll(".signal-row .mini-link")) {
     link.addEventListener("click", (event) => event.stopPropagation());
@@ -683,6 +965,17 @@ function renderWatchlist() {
     const expanded = state.watchExpandedSymbol === item.symbol;
     const alertText = item.alertEnabled ? "已开启" : "已关闭";
     const safeSymbol = escapeHtml(item.symbol);
+    const unlockLabel = item.unlockStatus === "available"
+      ? formatTime(item.nextUnlockAt)
+      : item.unlockStatus === "none"
+        ? "暂无未来解锁"
+        : item.unlockStatus === "undated"
+          ? "待核验解锁日期"
+        : item.unlockStatus === "unconfigured"
+          ? "待搜索解锁日期"
+          : item.unlockStatus === "error"
+            ? "自动查询失败"
+            : "等待查询";
     const detail = expanded ? `
       <article class="watch-detail">
         <form class="watch-settings" data-watch-settings="${safeSymbol}">
@@ -727,6 +1020,16 @@ function renderWatchlist() {
         <div><span>最新周期</span><div class="mono">${escapeHtml(item.latestInterval || "--")}</div></div>
         <div><span>高于提醒</span><div class="mono">${formatNumber(item.alertAbove)}</div></div>
         <div><span>低于提醒</span><div class="mono">${formatNumber(item.alertBelow)}</div></div>
+        <div class="watch-unlock">
+          <span>下次解锁</span>
+          <div title="${escapeHtml(item.unlockError || "")}">
+            ${
+              item.unlockSourceUrl
+                ? `<a class="unlock-value" href="${escapeHtml(item.unlockSourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(unlockLabel)}</a>`
+                : `<span class="unlock-value">${escapeHtml(unlockLabel)}</span>`
+            }
+          </div>
+        </div>
         <div><span>警报</span><div>${escapeHtml(alertText)}</div></div>
         <div class="watch-actions">
           ${searchButtons(item.symbol)}
@@ -791,7 +1094,9 @@ function watchlistRenderSignature(items) {
         item.alertBelow ?? "",
         item.alertEnabled ? "1" : "0",
         item.categoryLabel ?? "",
-        item.latestInterval ?? ""
+        item.latestInterval ?? "",
+        item.nextUnlockAt ?? "",
+        item.unlockStatus ?? ""
       ].join(":")
     )
     .join("|");
@@ -949,7 +1254,7 @@ function updateChartKline(symbol, interval, kline) {
     if (klines.length > 6000) klines.shift();
     const settings = state.chartState.get(key);
     if (settings) {
-      settings.start = chartMaxStart(klines.length, settings.visible);
+      settings.start = Math.max(0, klines.length - settings.visible);
     }
   } else {
     return;
@@ -1063,9 +1368,23 @@ function setPage(page) {
     state.expandedKey = null;
     renderSignals();
   }
+  if (page !== "watch" && state.watchExpandedSymbol) {
+    state.watchExpandedSymbol = null;
+    renderWatchlist();
+  }
+  if (page !== "funding" && state.fundingExpandedSymbol) {
+    state.fundingExpandedSymbol = null;
+    renderFundingRateTokens();
+  }
+  if (page !== "io" && state.ioExpandedSymbol) {
+    state.ioExpandedSymbol = null;
+    renderIOMonitoring();
+  }
   document.querySelectorAll("[data-nav-page]").forEach((link) => {
     link.classList.toggle("active", link.dataset.navPage === page);
   });
+  const mobileSelect = $("#mobilePageSelect");
+  if (mobileSelect) mobileSelect.value = page;
   if (page === "heat") loadHotRank({ silent: true });
   if (page === "watch") loadWatchlist();
   else closeWatchRealtime();
@@ -1142,7 +1461,7 @@ function summarizeSet(set, labels, fallback) {
 }
 
 function updateFilterControls() {
-  for (const input of document.querySelectorAll(".filter-menu input[type='checkbox']")) {
+  for (const input of document.querySelectorAll(".filter-menu input[data-filter]")) {
     const target =
       input.dataset.filter === "category"
         ? state.categories
@@ -1157,6 +1476,7 @@ function updateFilterControls() {
 }
 
 function chartDefaults(dataLength) {
+  const visible = Math.max(1, Math.min(dataLength, 180));
   return {
     crosshair: true,
     volume: true,
@@ -1165,20 +1485,28 @@ function chartDefaults(dataLength) {
     drawTool: null,
     drawings: [],
     draftDrawing: null,
-    visible: Math.max(1, dataLength),
-    start: 0,
+    visible,
+    start: Math.max(0, dataLength - visible),
+    priceScale: 1,
+    priceOffset: 0,
     hoverIndex: null,
     hoverXRatio: null,
     hoverYRatio: null,
     dragging: false,
+    activePointerId: null,
+    dragMode: null,
     dragStartX: 0,
-    dragStartStart: 0
+    dragStartY: 0,
+    dragStartStart: 0,
+    dragStartScale: 1,
+    dragStartOffset: 0,
+    dragStartSpan: 0
   };
 }
 
 function chartRightSpaceSlots(visible) {
   if (visible <= 1) return 0;
-  return clamp(Math.round(visible * 0.45), 1, visible - 1);
+  return Math.max(1, Math.round(visible * 1.5));
 }
 
 function chartMaxStart(length, visible) {
@@ -1205,7 +1533,7 @@ function chartLayout(width, height, settings) {
 }
 
 async function loadAndRenderChart(row, { force = false } = {}) {
-  const key = rowKey(row);
+  const key = `${row.symbol}|${row.intervalCode}`;
   const shell = document.getElementById(chartElementId(key));
   if (!shell) return;
 
@@ -1234,7 +1562,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
       <div class="chart-toolbar">
         <div class="chart-title-block">
           <strong>${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} K线</strong>
-          <span>${payload.klines.length} 根缓存 · 滚轮缩放 · 拖拽平移 · 画线辅助观察</span>
+          <span>数据库全部 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根 · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
         </div>
         <div class="chart-tools" role="toolbar" aria-label="K线工具">
           <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair" title="显示或隐藏十字线">十字线</button>
@@ -1292,6 +1620,18 @@ function bindChartTools(shell, key) {
     const minVisible = Math.min(length, 30);
     const rect = canvas.getBoundingClientRect();
     const layout = chartLayout(rect.width, rect.height || 430, settings);
+    if (event.clientX - rect.left >= layout.plotRight) {
+      const range = chartPriceRange(payload, settings);
+      const yRatio = clamp((event.clientY - rect.top - layout.plotTop) / layout.height, 0, 1);
+      const nextScale = clamp(settings.priceScale * (event.deltaY < 0 ? 0.86 : 1.16), 0.15, 8);
+      const anchorPrice = range.max - yRatio * (range.max - range.min);
+      const nextSpan = range.baseSpan * nextScale;
+      const nextCenter = anchorPrice - (0.5 - yRatio) * nextSpan;
+      settings.priceScale = nextScale;
+      settings.priceOffset = nextCenter - range.baseCenter;
+      drawChartForKey(key);
+      return;
+    }
     const ratio = clamp((event.clientX - rect.left - layout.plotLeft) / (layout.plotRight - layout.plotLeft), 0, 1);
     const anchorIndex = settings.start + Math.floor(settings.visible * ratio);
     const nextVisible = clamp(
@@ -1307,10 +1647,11 @@ function bindChartTools(shell, key) {
     drawChartForKey(key);
   }, { passive: false });
 
-  canvas.addEventListener("mousedown", (event) => {
+  canvas.addEventListener("pointerdown", (event) => {
     const settings = state.chartState.get(key);
     const payload = state.chartCache.get(key);
-    if (!settings || !payload) return;
+    if (!settings || !payload || event.button !== 0) return;
+    canvas.setPointerCapture?.(event.pointerId);
     if (settings.drawTool) {
       const point = chartPointFromEvent(canvas, key, event);
       if (!point) return;
@@ -1323,12 +1664,23 @@ function bindChartTools(shell, key) {
       drawChartForKey(key);
       return;
     }
+    const rect = canvas.getBoundingClientRect();
+    const layout = chartLayout(rect.width, rect.height || 430, settings);
     settings.dragging = true;
+    settings.activePointerId = event.pointerId;
+    settings.dragMode = event.clientX - rect.left >= layout.plotRight
+      ? "price-scale"
+      : "chart-pan";
     settings.dragStartX = event.clientX;
+    settings.dragStartY = event.clientY;
     settings.dragStartStart = settings.start;
+    settings.dragStartScale = settings.priceScale;
+    settings.dragStartOffset = settings.priceOffset;
+    settings.dragStartSpan = chartPriceRange(payload, settings).baseSpan * settings.priceScale;
+    canvas.classList.add("is-dragging");
   });
 
-  canvas.addEventListener("mousemove", (event) => {
+  canvas.addEventListener("pointermove", (event) => {
     const settings = state.chartState.get(key);
     const payload = state.chartCache.get(key);
     if (!settings || !payload) return;
@@ -1336,9 +1688,21 @@ function bindChartTools(shell, key) {
     if (settings.dragging) {
       const rect = canvas.getBoundingClientRect();
       const layout = chartLayout(rect.width, rect.height || 430, settings);
+      if (settings.dragMode === "price-scale") {
+        settings.priceScale = clamp(
+          settings.dragStartScale * Math.exp((event.clientY - settings.dragStartY) / 180),
+          0.15,
+          8
+        );
+        drawChartForKey(key);
+        return;
+      }
       const slot = layout.width / Math.max(1, settings.visible);
       const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
       settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(payload.klines.length, settings.visible));
+      settings.priceOffset =
+        settings.dragStartOffset +
+        ((event.clientY - settings.dragStartY) / Math.max(1, layout.height)) * settings.dragStartSpan;
       settings.hoverIndex = null;
       settings.hoverXRatio = null;
       settings.hoverYRatio = null;
@@ -1372,10 +1736,81 @@ function bindChartTools(shell, key) {
     }
   });
 
-  canvas.addEventListener("mouseup", () => finishChartPointer(key));
+  canvas.addEventListener("pointerup", (event) => {
+    canvas.releasePointerCapture?.(event.pointerId);
+    canvas.classList.remove("is-dragging");
+    finishChartPointer(key);
+  });
+  canvas.addEventListener("pointercancel", () => {
+    canvas.classList.remove("is-dragging");
+    finishChartPointer(key);
+  });
+  canvas.addEventListener("pointerleave", () => {
+    const settings = state.chartState.get(key);
+    if (!settings || settings.dragging) return;
+    settings.hoverIndex = null;
+    settings.hoverXRatio = null;
+    settings.hoverYRatio = null;
+    drawChartForKey(key);
+  });
+
+  canvas.addEventListener("mousedown", (event) => {
+    const settings = state.chartState.get(key);
+    const payload = state.chartCache.get(key);
+    if (!settings || !payload || settings.dragging || settings.drawTool || event.button !== 0) return;
+    const rect = canvas.getBoundingClientRect();
+    const layout = chartLayout(rect.width, rect.height || 430, settings);
+    settings.dragging = true;
+    settings.dragMode = event.clientX - rect.left >= layout.plotRight ? "price-scale" : "chart-pan";
+    settings.dragStartX = event.clientX;
+    settings.dragStartY = event.clientY;
+    settings.dragStartStart = settings.start;
+    settings.dragStartScale = settings.priceScale;
+    settings.dragStartOffset = settings.priceOffset;
+    settings.dragStartSpan = chartPriceRange(payload, settings).baseSpan * settings.priceScale;
+    canvas.classList.add("is-dragging");
+  });
+
+  canvas.addEventListener("mousemove", (event) => {
+    const settings = state.chartState.get(key);
+    const payload = state.chartCache.get(key);
+    if (!settings?.dragging || !payload) return;
+    const rect = canvas.getBoundingClientRect();
+    const layout = chartLayout(rect.width, rect.height || 430, settings);
+    if (settings.dragMode === "price-scale") {
+      settings.priceScale = clamp(
+        settings.dragStartScale * Math.exp((event.clientY - settings.dragStartY) / 180),
+        0.15,
+        8
+      );
+    } else {
+      const slot = layout.width / Math.max(1, settings.visible);
+      const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
+      settings.start = clamp(
+        settings.dragStartStart - movedSlots,
+        0,
+        chartMaxStart(payload.klines.length, settings.visible)
+      );
+      settings.priceOffset =
+        settings.dragStartOffset +
+        ((event.clientY - settings.dragStartY) / Math.max(1, layout.height)) * settings.dragStartSpan;
+      settings.hoverIndex = null;
+      settings.hoverXRatio = null;
+      settings.hoverYRatio = null;
+    }
+    drawChartForKey(key);
+  });
+
+  canvas.addEventListener("mouseup", () => {
+    canvas.classList.remove("is-dragging");
+    finishChartPointer(key);
+  });
+
   canvas.addEventListener("mouseleave", () => {
     const settings = state.chartState.get(key);
     if (!settings) return;
+    if (settings.dragging && settings.activePointerId !== null) return;
+    canvas.classList.remove("is-dragging");
     finishChartPointer(key);
     settings.hoverIndex = null;
     settings.hoverXRatio = null;
@@ -1392,6 +1827,8 @@ function finishChartPointer(key) {
     settings.draftDrawing = null;
   }
   settings.dragging = false;
+  settings.activePointerId = null;
+  settings.dragMode = null;
 }
 
 function chartPointFromEvent(canvas, key, event) {
@@ -1415,6 +1852,28 @@ function visibleKlines(payload, settings) {
   settings.visible = clamp(settings.visible, 1, Math.max(1, length));
   settings.start = clamp(settings.start, 0, chartMaxStart(length, settings.visible));
   return payload.klines.slice(settings.start, Math.min(length, settings.start + settings.visible));
+}
+
+function chartPriceRange(payload, settings) {
+  const data = visibleKlines(payload, settings);
+  const prices = data
+    .flatMap((item) => [item.high, item.low, settings.ma100 ? item.ma100 : null, settings.ma200 ? item.ma200 : null])
+    .filter(Number.isFinite);
+  const rawMin = Math.min(...prices);
+  const rawMax = Math.max(...prices);
+  const pad = (rawMax - rawMin || rawMax || 1) * 0.08;
+  const baseMin = rawMin - pad;
+  const baseMax = rawMax + pad;
+  const baseCenter = (baseMin + baseMax) / 2;
+  const baseSpan = Math.max(Number.EPSILON, baseMax - baseMin);
+  const span = baseSpan * settings.priceScale;
+  const center = baseCenter + settings.priceOffset;
+  return {
+    baseCenter,
+    baseSpan,
+    min: center - span / 2,
+    max: center + span / 2
+  };
 }
 
 function chartCanvasWidth(canvas) {
@@ -1482,6 +1941,10 @@ function drawChartForKey(key) {
   const settings = state.chartState.get(key);
   const canvas = document.querySelector(`.kline-canvas[data-key="${CSS.escape(key)}"]`);
   if (!payload || !settings || !canvas) return;
+  canvas.dataset.viewportStart = String(settings.start);
+  canvas.dataset.viewportVisible = String(settings.visible);
+  canvas.dataset.priceScale = String(settings.priceScale);
+  canvas.dataset.priceOffset = String(settings.priceOffset);
 
   const parentWidth = chartCanvasWidth(canvas);
   const cssHeight = 430;
@@ -1517,14 +1980,9 @@ function drawChartForKey(key) {
   if (settings.volume) ctx.strokeRect(plotLeft, volumeTop, width, volumeHeight);
   ctx.restore();
 
-  const prices = data
-    .flatMap((item) => [item.high, item.low, settings.ma100 ? item.ma100 : null, settings.ma200 ? item.ma200 : null])
-    .filter(Number.isFinite);
-  const minPrice = Math.min(...prices);
-  const maxPrice = Math.max(...prices);
-  const pad = (maxPrice - minPrice || maxPrice || 1) * 0.08;
-  const priceMin = minPrice - pad;
-  const priceMax = maxPrice + pad;
+  const priceRange = chartPriceRange(payload, settings);
+  const priceMin = priceRange.min;
+  const priceMax = priceRange.max;
   const y = (price) => plotTop + ((priceMax - price) / (priceMax - priceMin)) * height;
   const slot = width / Math.max(1, settings.visible);
   const candleWidth = Math.max(2, Math.min(14, slot * 0.64));
@@ -1694,11 +2152,11 @@ function drawChartForKey(key) {
   ctx.fillText(rangeLabel, Math.max(plotLeft + 190, plotRight - rangeWidth), cssHeight - 12);
 }
 
-for (const input of document.querySelectorAll(".filter-menu input[type='checkbox']")) {
+for (const input of document.querySelectorAll(".filter-menu input[data-filter]")) {
   input.addEventListener("change", () => setFilter(input.dataset.filter, input.dataset.value, input.checked));
 }
 
-for (const button of document.querySelectorAll(".page-size .page-size-btn")) {
+for (const button of document.querySelectorAll("[data-size]")) {
   button.addEventListener("click", () => {
     state.pageSize = Number(button.dataset.size);
     state.page = 1;
@@ -1711,6 +2169,7 @@ for (const button of document.querySelectorAll("[data-heat-chain]")) {
   button.addEventListener("click", async () => {
     state.hotRankChain = button.dataset.heatChain ?? "all";
     state.hotRankPage = 1;
+    clearTimeout(state.hotRankRefreshTimer);
     await loadHotRank();
   });
 }
@@ -1748,6 +2207,45 @@ document.querySelectorAll("[data-io-window]").forEach((btn) => {
   });
 });
 
+document.querySelectorAll("[data-io-sort]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.ioSort = btn.dataset.ioSort;
+    document.querySelectorAll("[data-io-sort]").forEach((item) => item.classList.toggle("active", item === btn));
+    loadIOMonitoring();
+  });
+});
+
+document.querySelectorAll("[data-trigger-filter]").forEach((input) => {
+  input.addEventListener("change", () => {
+    if (input.checked) state.triggerTypes.add(input.dataset.value);
+    else state.triggerTypes.delete(input.dataset.value);
+    state.triggerHistoryPage = 1;
+    state.selectedTriggerIds.clear();
+    loadTriggerHistory();
+  });
+});
+
+$("#selectAllTrigger")?.addEventListener("change", (event) => {
+  const checked = event.currentTarget.checked;
+  state.triggerHistory.forEach((item) => {
+    if (checked) state.selectedTriggerIds.add(item.id);
+    else state.selectedTriggerIds.delete(item.id);
+  });
+  renderTriggerHistory();
+});
+
+$("#deleteSelectedTriggerBtn")?.addEventListener("click", async () => {
+  const ids = Array.from(state.selectedTriggerIds);
+  if (!ids.length) return;
+  await api("/api/trigger-history", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids })
+  });
+  state.selectedTriggerIds.clear();
+  await loadTriggerHistory();
+});
+
 $("#refreshFundingBtn")?.addEventListener("click", () => loadFundingRateTokens());
 $("#refreshIoBtn")?.addEventListener("click", () => loadIOMonitoring());
 $("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
@@ -1767,13 +2265,12 @@ document.addEventListener("click", async (e) => {
   const deleteBtn = e.target.closest("[data-delete-trigger]");
   if (deleteBtn) {
     const id = deleteBtn.dataset.deleteTrigger;
-    if (confirm("确定要删除这条记录吗？")) {
-      try {
-        await api(`/api/trigger-history/${id}`, { method: "DELETE" });
-        await loadTriggerHistory();
-      } catch (error) {
-        console.error("delete trigger history failed", error);
-      }
+    try {
+      await api(`/api/trigger-history/${id}`, { method: "DELETE" });
+      state.selectedTriggerIds.delete(Number(id));
+      await loadTriggerHistory();
+    } catch (error) {
+      console.error("delete trigger history failed", error);
     }
   }
 });
@@ -1803,6 +2300,22 @@ $("#nextTriggerPageBtn")?.addEventListener("click", () => {
 
 $("#refreshHotRankBtn")?.addEventListener("click", () => loadHotRank());
 $("#refreshWatchBtn")?.addEventListener("click", () => loadWatchlist());
+$("#refreshUnlockBtn")?.addEventListener("click", async () => {
+  const button = $("#refreshUnlockBtn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "查询中";
+  }
+  try {
+    await api("/api/watchlist/unlock/refresh", { method: "POST" });
+    await loadWatchlist();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "刷新解锁日期";
+    }
+  }
+});
 
 $("#prevPageBtn")?.addEventListener("click", async () => {
   state.page -= 1;
@@ -1832,8 +2345,23 @@ for (const anchor of document.querySelectorAll('a[href^="#"]')) {
 
 window.addEventListener("hashchange", () => setPage(pageFromHash()));
 
+$("#mobilePageSelect")?.addEventListener("change", (event) => {
+  const page = event.currentTarget.value;
+  const hashes = {
+    signals: "#signalsPage",
+    heat: "#heatPage",
+    watch: "#watchPage",
+    funding: "#fundingPage",
+    io: "#ioPage",
+    "trigger-history": "#triggerHistoryPage"
+  };
+  window.location.hash = hashes[page] ?? "#signalsPage";
+});
+
 window.addEventListener("resize", () => {
-  if (state.expandedKey) drawChartForKey(state.expandedKey);
+  for (const canvas of document.querySelectorAll(".kline-canvas[data-key]")) {
+    drawChartForKey(canvas.dataset.key);
+  }
 });
 
 updateFilterControls();
