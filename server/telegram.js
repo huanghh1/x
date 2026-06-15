@@ -299,6 +299,50 @@ export async function sendOpenInterestSpikeTelegram(item, context = {}) {
   return { skipped: false, result };
 }
 
+export async function sendStandaloneOpenInterestSpikeTelegram(item) {
+  if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
+  if (!config.telegram.botToken || !config.telegram.chatId) {
+    return { skipped: true, reason: "Telegram missing config" };
+  }
+  if (!config.openInterestMonitor.standaloneAlertEnabled) {
+    return { skipped: true, reason: "Standalone OI alert disabled" };
+  }
+
+  const hitIntervals = [];
+  if (item.change5mPct !== null && item.change5mPct >= config.openInterestMonitor.spike5mPct) {
+    hitIntervals.push(`5分钟: ${formatOiChange(item.change5mPct)}`);
+  }
+  if (item.change15mPct !== null && item.change15mPct >= config.openInterestMonitor.spike15mPct) {
+    hitIntervals.push(`15分钟: ${formatOiChange(item.change15mPct)}`);
+  }
+  if (item.change1hPct !== null && item.change1hPct >= config.openInterestMonitor.spike1hPct) {
+    hitIntervals.push(`1小时: ${formatOiChange(item.change1hPct)}`);
+  }
+  if (item.change4hPct !== null && item.change4hPct >= config.openInterestMonitor.spike4hPct) {
+    hitIntervals.push(`4小时: ${formatOiChange(item.change4hPct)}`);
+  }
+  if (item.change1dPct !== null && item.change1dPct >= config.openInterestMonitor.spike1dPct) {
+    hitIntervals.push(`1天: ${formatOiChange(item.change1dPct)}`);
+  }
+
+  const text = [
+    "<b>🚨 [OI持仓量暴涨警报]</b>",
+    `交易对：${telegramTokenLine(item.symbol)}`,
+    hitIntervals.length ? `触发区间：\n${hitIntervals.map((t) => `  • ${escapeHtml(t)}`).join("\n")}` : null,
+    `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b> (阈值: ${config.openInterestMonitor.spike5mPct}%)`,
+    `15分钟变化：<b>${escapeHtml(formatOiChange(item.change15mPct))}</b> (阈值: ${config.openInterestMonitor.spike15mPct}%)`,
+    `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b> (阈值: ${config.openInterestMonitor.spike1hPct}%)`,
+    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b> (阈值: ${config.openInterestMonitor.spike4hPct}%)`,
+    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b> (阈值: ${config.openInterestMonitor.spike1dPct}%)`,
+    `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
+    `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`,
+    "提示：检测到持仓量异常增长，请密切关注市场动态。不构成投资建议。"
+  ].filter(Boolean).join("\n");
+
+  const result = await postTelegram(text, signalReplyMarkup(item, "oi"));
+  return { skipped: false, result };
+}
+
 export function telegramSearchLinks(symbol) {
   return signalLinks({ symbol });
 }
