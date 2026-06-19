@@ -4,6 +4,7 @@ import {
   getMaintenanceState,
   getSignalCorrelationContext,
   listOneHourFundingIntervals,
+  markFundingIntervalAlertConfirmed,
   listPendingFundingIntervalAlerts,
   markFundingIntervalAlertSent,
   markFundingIntervalsMissingFromSnapshot,
@@ -33,6 +34,10 @@ const fundingMonitorState = {
 
 function isoNow() {
   return new Date().toISOString();
+}
+
+export function hasReliableFundingIntervalSnapshot(fundingInfo, currentRates) {
+  return Array.isArray(fundingInfo) && Array.isArray(currentRates) && (fundingInfo.length > 0 || currentRates.length > 0);
 }
 
 function scheduleNext(delayMs) {
@@ -91,6 +96,27 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
       fetchFundingInfo(),
       fetchCurrentFundingRates()
     ]);
+    if (!hasReliableFundingIntervalSnapshot(fundingInfo, currentRates)) {
+      const result = {
+        ok: false,
+        skipped: true,
+        reason: "Empty Binance funding snapshot",
+        baselineOnly,
+        seenCount: 0,
+        missingCount: 0,
+        pendingCount: 0,
+        sentSymbols: [],
+        skippedAlerts: []
+      };
+      fundingMonitorState.lastError = result.reason;
+      fundingMonitorState.lastSeenCount = 0;
+      fundingMonitorState.lastMissingCount = 0;
+      fundingMonitorState.lastPendingCount = 0;
+      fundingMonitorState.lastAlertedSymbols = [];
+      fundingMonitorState.lastSkippedAlerts = ["Empty Binance funding snapshot"];
+      await markMaintenanceState(CHECK_TASK, JSON.stringify(result));
+      return result;
+    }
     const currentRateBySymbol = new Map(currentRates.map((item) => [item.symbol, item]));
     const items = fundingInfo.map((item) => ({
       ...item,
@@ -126,6 +152,7 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
         .filter((item) => Number(item.fundingIntervalHours) === Number(config.fundingMonitor.targetIntervalHours))
         .map((item) => item.symbol);
       await markFundingIntervalAlertSent(baselineTargetSymbols);
+      await markFundingIntervalAlertConfirmed(baselineTargetSymbols);
       await markMaintenanceState(
         BASELINE_TASK,
         `baseline seen=${snapshot.seenCount}, suppressedTarget=${baselineTargetSymbols.length}`

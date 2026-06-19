@@ -21,6 +21,35 @@ test("signal priority follows the complete funding, OI, heat, multi-cycle order"
   assert.deepEqual(priorities, [0, 2, 4, 6, 24, SIGNAL_PRIORITY.LEVEL1, SIGNAL_PRIORITY.LEVEL2]);
 });
 
+test("all source-mask combinations are ranked and labelled deterministically", () => {
+  const sourceLabels = [
+    [8, "资金费"],
+    [4, "OI"],
+    [2, "热度"],
+    [1, "多周期"]
+  ];
+
+  for (const alertLevel of ["LEVEL1", "LEVEL2"]) {
+    for (let mask = 1; mask <= 15; mask += 1) {
+      const profile = resolveSignalProfile({
+        fundingOneHour: Boolean(mask & 8),
+        oiSpike: Boolean(mask & 4),
+        hotRank: Boolean(mask & 2),
+        multiCycleCount: mask & 1 ? 3 : 0,
+        alertLevel
+      });
+      const expectedSources = sourceLabels.filter(([bit]) => mask & bit).map(([, label]) => label);
+      const expectedLevelLabel = alertLevel === "LEVEL1" ? "一级警报" : "二级警报";
+
+      assert.equal(profile.key, `COMBO_${mask}_${alertLevel}`);
+      assert.equal(profile.sourceMask, mask);
+      assert.deepEqual(profile.sources, expectedSources);
+      assert.equal(profile.label, `${expectedSources.join(" + ")} · ${expectedLevelLabel}`);
+      assert.equal(profile.priority, (15 - mask) * 2 + (alertLevel === "LEVEL2" ? 1 : 0));
+    }
+  }
+});
+
 test("an OI spike can participate in page combinations", () => {
   const profile = resolveSignalProfile({
     oiSpike: true,

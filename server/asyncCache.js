@@ -67,10 +67,20 @@ export function createAsyncCache({
     await Promise.all(workers);
   }
 
+  function invalidate(key) {
+    return entries.delete(key);
+  }
+
+  function clear() {
+    entries.clear();
+  }
+
   return {
     get,
     refresh,
     refreshAll,
+    invalidate,
+    clear,
     size: () => entries.size
   };
 }

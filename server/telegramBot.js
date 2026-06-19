@@ -10,6 +10,7 @@ import {
   getSignalGroupsPage,
   listOneHourFundingIntervals,
   listOpenInterestMonitor,
+  markFundingIntervalAlertConfirmed,
   listWatchlist
 } from "./db.js";
 import { resolveSignalProfile } from "./signalPriority.js";
@@ -41,6 +42,8 @@ const botStatus = {
   lockPath,
   conflictCount: 0
 };
+const OI_TIME_WINDOWS = new Set(["5m", "15m", "1h", "4h", "1d"]);
+const OI_SORTS = new Set(["asc", "desc"]);
 
 export function getTelegramBotState() {
   return { ...botStatus };
@@ -73,20 +76,91 @@ function clampPage(page, total, pageSize) {
 }
 
 async function sendOrEditMessage({ chatId, messageId = null, text, replyMarkup }) {
+  const chunks = splitTelegramText(text);
   const payload = {
     chat_id: chatId,
-    text,
+    text: chunks[0],
     parse_mode: "HTML",
     disable_web_page_preview: true,
-    reply_markup: replyMarkup
+    reply_markup: chunks.length === 1 ? replyMarkup : undefined
   };
-  if (!messageId) return telegramApi("sendMessage", payload);
+  if (!messageId) {
+    const first = await telegramApi("sendMessage", payload);
+    for (const [index, chunk] of chunks.slice(1).entries()) {
+      await telegramApi("sendMessage", {
+        chat_id: chatId,
+        text: chunk,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: index === chunks.length - 2 ? replyMarkup : undefined
+      });
+    }
+    return first;
+  }
   try {
-    return await telegramApi("editMessageText", { ...payload, message_id: messageId });
+    const edited = await telegramApi("editMessageText", { ...payload, message_id: messageId });
+    for (const [index, chunk] of chunks.slice(1).entries()) {
+      await telegramApi("sendMessage", {
+        chat_id: chatId,
+        text: chunk,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_markup: index === chunks.length - 2 ? replyMarkup : undefined
+      });
+    }
+    return edited;
   } catch (error) {
     if (error instanceof Error && error.message.includes("message is not modified")) return null;
+    if (error instanceof Error && /message to edit not found|message can't be edited|message identifier is not specified/i.test(error.message)) {
+      return sendOrEditMessage({ chatId, text, replyMarkup });
+    }
     throw error;
   }
+}
+
+function splitLongTelegramBlock(block, maxLength) {
+  if (block.length <= maxLength) return [block];
+  const chunks = [];
+  let current = "";
+  for (const line of block.split("\n")) {
+    if (line.length > maxLength) {
+      if (current) chunks.push(current);
+      for (let index = 0; index < line.length; index += maxLength) {
+        chunks.push(line.slice(index, index + maxLength));
+      }
+      current = "";
+      continue;
+    }
+    const next = current ? `${current}\n${line}` : line;
+    if (next.length <= maxLength) {
+      current = next;
+      continue;
+    }
+    if (current) chunks.push(current);
+    current = line;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+export function splitTelegramText(text, maxLength = 3900) {
+  const source = String(text ?? "");
+  if (source.length <= maxLength) return [source];
+  const chunks = [];
+  let current = "";
+  for (const block of source.split(/\n\n/)) {
+    for (const part of splitLongTelegramBlock(block, maxLength)) {
+      const next = current ? `${current}\n\n${part}` : part;
+      if (next.length <= maxLength) {
+        current = next;
+        continue;
+      }
+      if (current) chunks.push(current);
+      current = part;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.length ? chunks : [source.slice(0, maxLength)];
 }
 
 function isAllowedChat(chatId) {
@@ -145,6 +219,16 @@ function releasePollingLock() {
 
 function navButtonText(label, key, active) {
   return active === key ? `【${label}】` : label;
+}
+
+function normalizeOiTimeWindow(timeWindow) {
+  const value = String(timeWindow ?? "");
+  return OI_TIME_WINDOWS.has(value) ? value : "5m";
+}
+
+function normalizeOiSort(sort) {
+  const value = String(sort ?? "");
+  return OI_SORTS.has(value) ? value : "desc";
 }
 
 export function signalKeyboard(active = null) {
@@ -340,8 +424,13 @@ async function sendHeat(chatId, messageId = null) {
   const payload = await menuCache.get("heat", () => getHotRank({ chain: "all", limit: 30 }));
   const visibleTokens = (payload.tokens ?? []).slice(0, 12);
   const rows = visibleTokens.map((token) =>
-    `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 综合 ${escapeHtml(token.heat)} · 广场 ${escapeHtml(token.binanceHeat ?? "--")} · 推特 ${escapeHtml(token.twitterHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
+    `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 热度 ${escapeHtml(token.heat)} · 币安 ${escapeHtml(token.binanceHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
   );
+  const flags = [
+    payload.stale ? "使用上次缓存" : null,
+    !payload.stale && payload.partial ? "部分链失败" : null,
+    Array.isArray(payload.errors) && payload.errors.length ? `错误 ${payload.errors.length} 条` : null
+  ].filter(Boolean);
   const keyboard = appendMainNavigation(
     { inline_keyboard: tokenOperationRows(visibleTokens.map((token) => token.symbol)) },
     "heat"
@@ -349,7 +438,11 @@ async function sendHeat(chatId, messageId = null) {
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: [`<b>综合热度排行 TOP ${rows.length}</b>`, `来源：${escapeHtml(payload.source)}`, ...rows].join("\n"),
+    text: [
+      rows.length ? `<b>综合热度排行 TOP ${rows.length}</b>` : "<b>综合热度排行</b>",
+      `来源：${escapeHtml(payload.source || "Binance Web3 Social Hype")}${flags.length ? ` · ${escapeHtml(flags.join(" · "))}` : ""}`,
+      rows.length ? rows.join("\n") : "暂无热度数据。"
+    ].join("\n"),
     replyMarkup: keyboard
   });
 }
@@ -396,15 +489,17 @@ async function sendFunding(chatId, messageId = null) {
 }
 
 export function oiFilterKeyboard({ timeWindow = "5m", sort = "desc", symbols = [] } = {}) {
+  const safeTimeWindow = normalizeOiTimeWindow(timeWindow);
+  const safeSort = normalizeOiSort(sort);
   const keyboard = {
     inline_keyboard: [
       ["5m", "15m", "1h", "4h", "1d"].map((window) => ({
-        text: window === timeWindow ? `✓ ${window}` : window,
-        callback_data: `oi:${window}:${sort}`
+        text: window === safeTimeWindow ? `✓ ${window}` : window,
+        callback_data: `oi:${window}:${safeSort}`
       })),
       [
-        { text: sort === "desc" ? "✓ 从高到低" : "从高到低", callback_data: `oi:${timeWindow}:desc` },
-        { text: sort === "asc" ? "✓ 从低到高" : "从低到高", callback_data: `oi:${timeWindow}:asc` }
+        { text: safeSort === "desc" ? "✓ 从高到低" : "从高到低", callback_data: `oi:${safeTimeWindow}:desc` },
+        { text: safeSort === "asc" ? "✓ 从低到高" : "从低到高", callback_data: `oi:${safeTimeWindow}:asc` }
       ],
       ...tokenOperationRows(symbols)
     ]
@@ -413,8 +508,10 @@ export function oiFilterKeyboard({ timeWindow = "5m", sort = "desc", symbols = [
 }
 
 async function sendOI(chatId, timeWindow = "5m", sort = "desc", messageId = null) {
-  const items = await menuCache.get(`oi:${timeWindow}:${sort}`, () =>
-    listOpenInterestMonitor({ timeWindow, sort, limit: 20 })
+  const safeTimeWindow = normalizeOiTimeWindow(timeWindow);
+  const safeSort = normalizeOiSort(sort);
+  const items = await menuCache.get(`oi:${safeTimeWindow}:${safeSort}`, () =>
+    listOpenInterestMonitor({ timeWindow: safeTimeWindow, sort: safeSort, limit: 20 })
   );
   const rows = items.slice(0, 20).map((item, index) => {
     const intervals = item.signalIntervals ?? [];
@@ -423,21 +520,30 @@ async function sendOI(chatId, timeWindow = "5m", sort = "desc", messageId = null
       item.fundingOneHour ? "1h资金费率" : null,
       intervals.length ? `均线 ${intervals.join(" / ")}` : null
     ].filter(Boolean);
-    return `${index + 1}. ${telegramTokenLine(item.symbol)} · ${escapeHtml(timeWindow)} ${escapeHtml(
+    return `${index + 1}. ${telegramTokenLine(item.symbol)} · ${escapeHtml(safeTimeWindow)} ${escapeHtml(
       item.changePercent === null ? "--" : `${Number(item.changePercent).toFixed(2)}%`
     )} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
   });
   const keyboard = oiFilterKeyboard({
-    timeWindow,
-    sort,
+    timeWindow: safeTimeWindow,
+    sort: safeSort,
     symbols: items.slice(0, 20).map((item) => item.symbol)
   });
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: rows.length ? [`<b>OI监控 · ${escapeHtml(timeWindow)}</b>`, ...rows].join("\n") : "<b>OI监控</b>\n暂无 OI 数据。",
+    text: rows.length ? [`<b>OI监控 · ${escapeHtml(safeTimeWindow)}</b>`, ...rows].join("\n") : "<b>OI监控</b>\n暂无 OI 数据。",
     replyMarkup: keyboard
   });
+}
+
+async function answerCallback(callbackId, payload = {}) {
+  if (!callbackId) return;
+  try {
+    await telegramApi("answerCallbackQuery", { callback_query_id: callbackId, ...payload });
+  } catch (error) {
+    console.error("telegram callback acknowledgement failed:", error instanceof Error ? error.message : error);
+  }
 }
 
 async function handleMessage(message) {
@@ -461,20 +567,28 @@ async function handleMessage(message) {
 async function handleCallback(callback) {
   const chatId = callback?.message?.chat?.id;
   if (!isAllowedChat(chatId)) {
-    await telegramApi("answerCallbackQuery", {
-      callback_query_id: callback.id,
-      text: "这个聊天没有授权使用此 bot。"
-    });
+    await answerCallback(callback?.id, { text: "这个聊天没有授权使用此 bot。" });
     return;
   }
   const data = String(callback.data ?? "");
-  await telegramApi("answerCallbackQuery", { callback_query_id: callback.id });
+  if (!data.startsWith("funding_confirm:")) {
+    void answerCallback(callback.id);
+  }
   try {
     if (data === "noop") return;
     const messageId = callback?.message?.message_id ?? null;
     if (data === "heat") return sendHeat(chatId, messageId);
     if (data === "watch") return sendWatch(chatId, messageId);
     if (data === "funding") return sendFunding(chatId, messageId);
+    if (data.startsWith("funding_confirm:")) {
+      const [, symbol] = data.split(":");
+      const updated = await markFundingIntervalAlertConfirmed(symbol);
+      menuCache.invalidate("funding");
+      void answerCallback(callback.id, {
+        text: updated ? `${symbol} 已确认，停止重复推送。` : `${symbol} 当前无需确认。`
+      });
+      return sendFunding(chatId, messageId);
+    }
     if (data === "signals") return sendSignals(chatId, "LEVEL1", "15m", 1, messageId);
     if (data.startsWith("hotma:")) {
       const [, page] = data.split(":");

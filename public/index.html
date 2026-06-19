@@ -74,7 +74,7 @@
           <div class="section-head">
             <div>
               <h2 id="heatRankTitle">综合热度排行</h2>
-              <p>结合币安广场与推特热度，按链展示，并排除市值前 10、稳定币和代币化股票。</p>
+              <p>基于币安 Web3 热度按链展示，并排除市值前 10、稳定币和代币化股票。</p>
             </div>
             <div class="table-actions">
               <button class="page-size-btn active" type="button" data-heat-chain="all">全部</button>
@@ -173,6 +173,18 @@
                   <button id="nextPageBtn" class="ghost-button" type="button">下一页</button>
                 </div>
               </div>
+
+              <div class="multi-history-panel" aria-labelledby="multiHistoryTitle">
+                <div class="section-head compact">
+                  <div>
+                    <h3 id="multiHistoryTitle">多周期历史</h3>
+                    <p>记录最近同时触发多个周期的均线组合。</p>
+                  </div>
+                </div>
+                <div id="multiHistoryRows" class="multi-history-list">
+                  <div class="heat-empty">等待多周期历史数据。</div>
+                </div>
+              </div>
             </section>
         </section>
 
@@ -201,11 +213,12 @@
             </div>
             <div class="table-actions">
               <button id="refreshFundingBtn" class="ghost-button" type="button">刷新资金费率</button>
+              <button id="scanFundingBtn" class="ghost-button" type="button">立即扫描</button>
             </div>
           </div>
 
           <div id="fundingRateRows">
-            <div class="heat-empty">当前没有1小时资金费率的代币。</div>
+            <div class="heat-empty">当前没有 1 小时结算周期的代币。</div>
           </div>
           <div id="fundingStatus" class="heat-rank-status">按最近变化时间排序</div>
         </section>
@@ -238,6 +251,20 @@
 
           <div id="ioRows">
             <div class="heat-empty">暂无 OI 数据。</div>
+          </div>
+          <div class="pagination-bar" aria-label="OI pagination">
+            <span id="ioPaginationSummary">--</span>
+            <div class="page-size">
+              <span>每页</span>
+              <button class="page-size-btn active" type="button" data-io-pagesize="20">20</button>
+              <button class="page-size-btn" type="button" data-io-pagesize="50">50</button>
+              <button class="page-size-btn" type="button" data-io-pagesize="100">100</button>
+            </div>
+            <div class="page-buttons">
+              <button id="prevIoPageBtn" class="ghost-button" type="button">上一页</button>
+              <strong id="ioPageIndicator">1 / 1</strong>
+              <button id="nextIoPageBtn" class="ghost-button" type="button">下一页</button>
+            </div>
           </div>
         </section>
 
@@ -312,6 +339,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260614-4" type="module"></script>
+    <script src="/app.js?v=20260620-1" type="module"></script>
   </body>
 </html>

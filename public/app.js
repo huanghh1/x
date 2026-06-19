@@ -8,6 +8,25 @@ const LABELS = {
   interval: { "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d" }
 };
 
+const SIGNAL_PROFILE_COLORS = {
+  MA: { text: "#7a2148", border: "#f3b5cf", bg: "#fff0f6" },
+  1: { text: "#6842ad", border: "#cbbbf2", bg: "#f7f2ff" },
+  2: { text: "#8a5405", border: "#f1c27a", bg: "#fff4e4" },
+  3: { text: "#8c3f76", border: "#ddb1d3", bg: "#fff2fb" },
+  4: { text: "#176da3", border: "#afd9f7", bg: "#eef8ff" },
+  5: { text: "#335f96", border: "#b5c9ec", bg: "#eff5ff" },
+  6: { text: "#26706a", border: "#acdcd6", bg: "#ecfbf8" },
+  7: { text: "#4b698d", border: "#bfd1e7", bg: "#f0f6ff" },
+  8: { text: "#b8185d", border: "#f0a8cb", bg: "#fff0f7" },
+  9: { text: "#8c356d", border: "#e4afd2", bg: "#fff1fa" },
+  10: { text: "#a64720", border: "#ecb197", bg: "#fff1eb" },
+  11: { text: "#754f96", border: "#d1b6e8", bg: "#f8f1ff" },
+  12: { text: "#17736f", border: "#a9ddd7", bg: "#effbf8" },
+  13: { text: "#4d6b8f", border: "#bfd0e6", bg: "#f1f6ff" },
+  14: { text: "#9d3c37", border: "#e5aaa7", bg: "#fff1f0" },
+  15: { text: "#211721", border: "#d8ccd4", bg: "#f8f3f6" }
+};
+
 const state = {
   categories: new Set(ALL_CATEGORIES),
   levels: new Set(["LEVEL1", "LEVEL2"]),
@@ -32,6 +51,7 @@ const state = {
   hotRankChain: "all",
   hotRank: [],
   hotRankSource: "",
+  hotRankLoadedChain: "",
   hotRankFetchedAt: null,
   hotRankPartial: false,
   hotRankStale: false,
@@ -48,7 +68,16 @@ const state = {
   fundingTokens: [],
   fundingExpandedSymbol: null,
   fundingInterval: "15m",
+  fundingLoading: false,
+  fundingError: "",
+  fundingScanning: false,
   ioData: [],
+  ioPage: 1,
+  ioPageSize: 20,
+  ioTotal: 0,
+  ioLoading: false,
+  ioError: "",
+  ioRequestId: 0,
   ioWindow: "5m",
   ioSort: "desc",
   ioExpandedSymbol: null,
@@ -117,7 +146,13 @@ function formatPercent(value) {
 function formatFundingPercent(value) {
   const number = Number(value);
   if (value === null || value === undefined || !Number.isFinite(number)) return "--";
-  return `${(number * 100).toFixed(4)}%`;
+  return `${number > 0 ? "+" : ""}${(number * 100).toFixed(4)}%`;
+}
+
+function fundingRateTone(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "is-neutral";
+  return number > 0 ? "is-positive" : "is-negative";
 }
 
 function cssVar(name, fallback) {
@@ -151,6 +186,34 @@ function formatTime(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function cssEscape(value) {
+  const text = String(value ?? "");
+  return window.CSS?.escape ? CSS.escape(text) : text.replace(/["\\]/g, "\\$&");
+}
+
+function watchOperationError(action, error) {
+  return `${action}失败：${error instanceof Error ? error.message : String(error)}`;
+}
+
+function watchUnlockLabel(item) {
+  if (item.unlockStatus === "available") return formatTime(item.nextUnlockAt);
+  if (item.unlockStatus === "none") return "暂无未来解锁";
+  if (item.unlockStatus === "undated") return "日期未公布";
+  if (item.unlockStatus === "unconfigured") return "未配置";
+  if (item.unlockStatus === "error") return "查询失败";
+  return "--";
+}
+
+function watchUnlockTitle(item) {
+  const parts = [];
+  if (item.unlockProvider) parts.push(`来源：${item.unlockProvider}`);
+  if (item.unlockPercent !== null && item.unlockPercent !== undefined) parts.push(`比例：${formatPercent(item.unlockPercent)}`);
+  if (item.unlockAmount !== null && item.unlockAmount !== undefined) parts.push(`数量：${formatCompactNumber(item.unlockAmount)}`);
+  if (item.unlockCheckedAt) parts.push(`核对：${formatTime(item.unlockCheckedAt)}`);
+  if (item.unlockError) parts.push(`错误：${item.unlockError}`);
+  return parts.join("\n");
+}
+
 function levelBadge(level) {
   if (level === "LEVEL1") return '<span class="level-badge level1">一级警报</span>';
   if (level === "LEVEL2") return '<span class="level-badge level2">二级预警</span>';
@@ -177,9 +240,11 @@ function binanceSquareSearchUrl(symbol) {
 function signalProfile(row) {
   if (row.compositeProfile) {
     const sources = Array.isArray(row.compositeProfile.sources) ? row.compositeProfile.sources : [];
+    const sourceMask = Number(row.compositeProfile.sourceMask ?? 0);
     return {
       label: row.compositeProfile.label ?? "观察",
       priority: Number(row.compositeProfile.priority ?? 99),
+      color: signalProfileColor(sourceMask),
       classes: [
         sources.includes("资金费") ? "has-funding" : "",
         sources.includes("OI") ? "has-oi" : "",
@@ -197,7 +262,7 @@ function signalProfile(row) {
     : row.alertLevel === "LEVEL1" || row.alertLevel === "LEVEL2"
       ? row.alertLevel
       : null;
-  if (!alertLevel) return { label: "观察", priority: 99, classes: "" };
+  if (!alertLevel) return { label: "观察", priority: 99, classes: "", color: signalProfileColor(0) };
   const sourceMask = (funding ? 8 : 0) + (oi ? 4 : 0) + (hot ? 2 : 0) + (multi ? 1 : 0);
   const sources = [
     funding ? "资金费" : null,
@@ -209,6 +274,7 @@ function signalProfile(row) {
   return {
     label: sources.length ? `${sources.join(" + ")} · ${levelLabel}` : levelLabel,
     priority: sourceMask ? (15 - sourceMask) * 2 + (alertLevel === "LEVEL2" ? 1 : 0) : alertLevel === "LEVEL1" ? 30 : 31,
+    color: signalProfileColor(sourceMask),
     classes: [
       funding ? "has-funding" : "",
       oi ? "has-oi" : "",
@@ -218,12 +284,21 @@ function signalProfile(row) {
   };
 }
 
+function signalProfileColor(sourceMask) {
+  const color = SIGNAL_PROFILE_COLORS[Number(sourceMask) || "MA"] ?? SIGNAL_PROFILE_COLORS.MA;
+  return `--profile-text:${color.text};--profile-border:${color.border};--profile-bg:${color.bg}`;
+}
+
 function searchButtons(symbol) {
   const safeSymbol = escapeHtml(symbol);
   return `
     <a class="mini-link" href="${escapeHtml(binanceSquareSearchUrl(symbol))}" target="_blank" rel="noreferrer" title="在币安广场搜索 ${safeSymbol}">广场</a>
     <a class="mini-link" href="${escapeHtml(twitterSearchUrl(symbol))}" target="_blank" rel="noreferrer" title="在推特搜索 ${safeSymbol}">推特</a>
   `;
+}
+
+function copyButton(symbol, label = "复制") {
+  return `<button class="copy-symbol" type="button" data-symbol="${escapeHtml(symbol)}" title="复制交易对">${escapeHtml(label)}</button>`;
 }
 
 function watchSymbols() {
@@ -286,7 +361,17 @@ function chartElementId(key) {
 
 async function api(path, options) {
   const response = await fetch(path, options);
-  if (!response.ok) throw new Error(`${path} ${response.status}`);
+  if (!response.ok) {
+    let message = `${path} ${response.status}`;
+    try {
+      const payload = await response.clone().json();
+      if (payload?.error) message = payload.error;
+    } catch {
+      const text = await response.text().catch(() => "");
+      if (text) message = text.slice(0, 220);
+    }
+    throw new Error(message);
+  }
   return response.json();
 }
 
@@ -348,19 +433,53 @@ function twitterStatusLabel(token) {
   return `推特${token.twitterStatus}`;
 }
 
+function hotRankTotalPages() {
+  return Math.ceil(state.hotRankTotal / state.hotRankPageSize) || 1;
+}
+
+function clampHotRankPage() {
+  state.hotRankPage = clamp(state.hotRankPage, 1, hotRankTotalPages());
+}
+
+function hotRankFallbackText(symbol) {
+  return String(symbol ?? "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 2) || "--";
+}
+
+function replaceHotRankLogo(image) {
+  const fallback = document.createElement("span");
+  fallback.className = "heat-token-mark";
+  fallback.textContent = image.dataset.hotRankLogoFallback || "--";
+  image.replaceWith(fallback);
+}
+
+function bindHotRankLogoFallbacks(root) {
+  for (const image of root.querySelectorAll("img[data-hot-rank-logo-fallback]")) {
+    image.addEventListener("error", () => replaceHotRankLogo(image), { once: true });
+    if (image.complete && image.naturalWidth === 0) replaceHotRankLogo(image);
+  }
+}
+
 function renderHotRank() {
   const target = $("#hotRankRows");
   const status = $("#hotRankStatus");
   if (!target || !status) return;
 
   setText("#heatRankCount", state.hotRankTotal || "--");
+  const refreshButton = $("#refreshHotRankBtn");
+  if (refreshButton) {
+    refreshButton.disabled = state.hotRankLoading;
+    refreshButton.textContent = state.hotRankLoading ? "刷新中" : "刷新热度";
+  }
   document.querySelectorAll("[data-heat-chain]").forEach((button) => {
     button.classList.toggle("active", button.dataset.heatChain === state.hotRankChain);
   });
 
   if (state.hotRankLoading) {
     status.textContent = "正在刷新热度排行...";
-    target.innerHTML = '<div class="heat-empty">正在读取 Binance 社交热度数据。</div>';
+    target.innerHTML = '<div class="heat-empty">正在读取热度数据。</div>';
     updateHeatPagination();
     return;
   }
@@ -384,7 +503,7 @@ function renderHotRank() {
     return;
   }
 
-  // 分页显示
+  clampHotRankPage();
   const startIdx = (state.hotRankPage - 1) * state.hotRankPageSize;
   const endIdx = startIdx + state.hotRankPageSize;
   const pageData = state.hotRank.slice(startIdx, endIdx);
@@ -394,10 +513,10 @@ function renderHotRank() {
       const change = Number(token.priceChange);
       const changeClass = Number.isFinite(change) && change < 0 ? "down" : "up";
       const symbol = escapeHtml(token.symbol);
-      const twitterMeta = twitterStatusLabel(token);
+      const fallback = escapeHtml(hotRankFallbackText(token.symbol));
       const logo = token.logo
-        ? `<img src="${escapeHtml(token.logo)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('span'), { className: 'heat-token-mark', textContent: '${symbol.slice(0, 2)}' }))" />`
-        : `<span class="heat-token-mark">${symbol.slice(0, 2)}</span>`;
+        ? `<img src="${escapeHtml(token.logo)}" alt="" loading="lazy" data-hot-rank-logo-fallback="${fallback}" />`
+        : `<span class="heat-token-mark">${fallback}</span>`;
       return `
         <article class="heat-rank-row">
           <div class="heat-rank-num">#${escapeHtml(token.rank)}</div>
@@ -405,24 +524,27 @@ function renderHotRank() {
             ${logo}
             <div>
               <strong>${symbol}</strong>
-              <span>市值 ${formatCompactUsd(token.marketCap)} · 情绪 ${escapeHtml(sentimentLabel(token.sentiment))} · ${escapeHtml(twitterMeta)}</span>
+              <span>市值 ${formatCompactUsd(token.marketCap)} · 情绪 ${escapeHtml(sentimentLabel(token.sentiment))}</span>
             </div>
           </div>
           <div class="heat-chain">${escapeHtml(token.chainLabel)}</div>
           <div class="heat-score">${formatNumber(token.heat, 0)}</div>
           <div class="heat-change ${changeClass}">${formatPercent(change)}</div>
-          <div class="heat-links">${searchButtons(token.symbol)}</div>
+          <div class="heat-links">${copyButton(token.symbol)}${searchButtons(token.symbol)}</div>
           <div class="heat-summary" title="${escapeHtml(token.summary || "暂无讨论摘要")}">${escapeHtml(token.summary || "暂无讨论摘要")}</div>
         </article>
       `;
     })
     .join("");
 
+  bindCopyButtons(target);
+  bindHotRankLogoFallbacks(target);
   updateHeatPagination();
 }
 
 function updateHeatPagination() {
-  const totalPages = Math.ceil(state.hotRankTotal / state.hotRankPageSize) || 1;
+  clampHotRankPage();
+  const totalPages = hotRankTotalPages();
   const summary = state.hotRankTotal
     ? `第 ${state.hotRankPage} / ${totalPages} 页，共 ${state.hotRankTotal} 项`
     : "--";
@@ -439,23 +561,68 @@ function updateHeatPagination() {
   });
 }
 
-async function loadFundingRateTokens() {
+function updateFundingControls() {
+  const refreshButton = $("#refreshFundingBtn");
+  const scanButton = $("#scanFundingBtn");
+  if (refreshButton) {
+    refreshButton.disabled = state.fundingLoading || state.fundingScanning;
+    refreshButton.textContent = state.fundingLoading ? "读取中" : "刷新资金费率";
+  }
+  if (scanButton) {
+    scanButton.disabled = state.fundingLoading || state.fundingScanning;
+    scanButton.textContent = state.fundingScanning ? "扫描中" : "立即扫描";
+  }
+}
+
+function fundingStatusText() {
+  const positiveCount = state.fundingTokens.filter((token) => Number(token.currentFundingRate) > 0).length;
+  const negativeCount = state.fundingTokens.filter((token) => Number(token.currentFundingRate) < 0).length;
+  const neutralCount = state.fundingTokens.length - positiveCount - negativeCount;
+  const parts = [`当前共 ${state.fundingTokens.length} 个 1 小时结算周期代币`];
+  if (positiveCount || negativeCount || neutralCount) {
+    parts.push(`正费率 ${positiveCount} / 负费率 ${negativeCount} / 持平或未知 ${neutralCount}`);
+  }
+  parts.push("按最近变化时间排序");
+  return parts.join("，");
+}
+
+async function loadFundingRateTokens({ silent = false } = {}) {
+  state.fundingLoading = true;
+  state.fundingError = "";
+  updateFundingControls();
+  if (!silent) setText("#fundingStatus", "正在读取资金费率列表...");
   try {
     const payload = await api("/api/funding-rate-tokens");
     state.fundingTokens = payload.tokens || [];
-    renderFundingRateTokens();
   } catch (error) {
+    state.fundingError = error instanceof Error ? error.message : String(error);
     console.error("load funding rate tokens failed", error);
+  } finally {
+    state.fundingLoading = false;
+    updateFundingControls();
+    renderFundingRateTokens();
   }
 }
 
 function renderFundingRateTokens() {
   const target = $("#fundingRateRows");
   if (!target) return;
+  updateFundingControls();
+
+  if (state.fundingError && !state.fundingTokens.length) {
+    target.innerHTML = `<div class="heat-empty">资金费率读取失败：${escapeHtml(state.fundingError)}</div>`;
+    setText("#fundingStatus", "资金费率读取失败");
+    return;
+  }
+
+  if (state.fundingLoading && !state.fundingTokens.length) {
+    target.innerHTML = '<div class="heat-empty">正在读取资金费率列表...</div>';
+    return;
+  }
 
   if (!state.fundingTokens.length) {
-    target.innerHTML = '<div class="heat-empty">当前没有1小时资金费率的代币。</div>';
-    setText("#fundingStatus", "当前没有1小时资金费率的代币");
+    target.innerHTML = '<div class="heat-empty">当前没有 1 小时结算周期的代币。</div>';
+    setText("#fundingStatus", "当前没有 1 小时结算周期的代币");
     return;
   }
 
@@ -473,18 +640,20 @@ function renderFundingRateTokens() {
           : null
       ].filter(Boolean);
       const expanded = state.fundingExpandedSymbol === token.symbol;
+      const rateTone = fundingRateTone(token.currentFundingRate);
       return `
         <article class="funding-card">
           <div class="funding-symbol">
             <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
-            <span class="level-badge level1">1 小时结算</span>
+            <span class="level-badge level1">${escapeHtml(token.fundingIntervalHours ?? 1)} 小时结算</span>
           </div>
           <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
-          <div><span>当前资金费率</span><b class="mono">${formatFundingPercent(token.currentFundingRate)}</b></div>
+          <div><span>当前资金费率</span><b class="mono funding-rate ${rateTone}">${formatFundingPercent(token.currentFundingRate)}</b></div>
           <div><span>下次结算</span><b>${formatTime(token.nextFundingTime)}</b></div>
           <div><span>最近变化</span><b>${formatTime(token.lastChangedAt || token.lastSeenAt)}</b></div>
           <div class="heat-links">
+            ${copyButton(token.symbol)}
             ${watchButton(token.symbol, "从资金费率监控加入")}
             ${searchButtons(token.symbol)}
           </div>
@@ -494,17 +663,61 @@ function renderFundingRateTokens() {
     })
     .join("");
   bindWatchButtons(target);
+  bindCopyButtons(target);
   bindMarketChartControls(target, "funding");
-  setText("#fundingStatus", `当前共 ${state.fundingTokens.length} 个 1 小时资金费率代币，按最近变化时间排序`);
+  setText("#fundingStatus", state.fundingError ? `列表为上次成功结果，最新读取失败：${state.fundingError}` : fundingStatusText());
+}
+
+async function scanFundingIntervals() {
+  state.fundingScanning = true;
+  state.fundingError = "";
+  updateFundingControls();
+  setText("#fundingStatus", "正在触发资金费率扫描...");
+  try {
+    const result = await api("/api/funding-interval/check", { method: "POST" });
+    await loadFundingRateTokens({ silent: true });
+    if (state.fundingError) {
+      setText("#fundingStatus", `扫描已返回，但列表刷新失败：${state.fundingError}`);
+      return;
+    }
+    const suffix = result?.skipped ? `扫描跳过：${result.reason || "未知原因"}` : `扫描完成，发现 ${Number(result?.seenCount ?? 0)} 个调整周期合约`;
+    setText("#fundingStatus", `${fundingStatusText()}，${suffix}`);
+  } catch (error) {
+    state.fundingError = error instanceof Error ? error.message : String(error);
+    setText("#fundingStatus", `资金费率扫描失败：${state.fundingError}`);
+  } finally {
+    state.fundingScanning = false;
+    updateFundingControls();
+  }
 }
 
 async function loadIOMonitoring() {
+  const requestId = state.ioRequestId + 1;
+  state.ioRequestId = requestId;
+  state.ioLoading = true;
+  state.ioError = "";
+  renderIOMonitoring();
   try {
-    const payload = await api(`/api/io-monitoring?timeWindow=${encodeURIComponent(state.ioWindow)}&sort=${encodeURIComponent(state.ioSort)}`);
+    const params = new URLSearchParams({
+      timeWindow: state.ioWindow,
+      sort: state.ioSort,
+      page: String(state.ioPage),
+      pageSize: String(state.ioPageSize)
+    });
+    const payload = await api(`/api/oi-monitoring?${params.toString()}`);
+    if (requestId !== state.ioRequestId) return;
     state.ioData = payload.data || [];
-    renderIOMonitoring();
+    state.ioTotal = payload.total || 0;
+    state.ioPage = payload.page || state.ioPage;
+    state.ioPageSize = payload.pageSize || state.ioPageSize;
   } catch (error) {
+    if (requestId !== state.ioRequestId) return;
+    state.ioError = `OI 数据读取失败：${error instanceof Error ? error.message : String(error)}`;
     console.error("load io monitoring failed", error);
+  } finally {
+    if (requestId !== state.ioRequestId) return;
+    state.ioLoading = false;
+    renderIOMonitoring();
   }
 }
 
@@ -512,9 +725,26 @@ function renderIOMonitoring() {
   const target = $("#ioRows");
   if (!target) return;
 
+  updateIoControls();
+
+  if (state.ioLoading && !state.ioData.length) {
+    target.innerHTML = '<div class="heat-empty">正在读取 OI 数据。</div>';
+    setText("#ioStatus", "正在刷新 OI 监控数据...");
+    updateIoPagination();
+    return;
+  }
+
+  if (state.ioError && !state.ioData.length) {
+    target.innerHTML = `<div class="heat-empty">${escapeHtml(state.ioError)}</div>`;
+    setText("#ioStatus", state.ioError);
+    updateIoPagination();
+    return;
+  }
+
   if (!state.ioData.length) {
     target.innerHTML = '<div class="heat-empty">暂无 OI 数据。</div>';
-    setText("#ioStatus", "等待 OI 扫描数据");
+    setText("#ioStatus", "暂无 OI 扫描数据");
+    updateIoPagination();
     return;
   }
 
@@ -529,7 +759,8 @@ function renderIOMonitoring() {
             ? `均线 ${item.multiCycleCount} 周期`
             : null
       ].filter(Boolean);
-      const changeClass = Number(item.changePercent) >= 0 ? "up" : "down";
+      const change = Number(item.changePercent);
+      const changeClass = Number.isFinite(change) ? (change >= 0 ? "up" : "down") : "";
       const expanded = state.ioExpandedSymbol === item.symbol;
       return `
         <article class="io-card">
@@ -540,6 +771,7 @@ function renderIOMonitoring() {
           <div><span>同币种命中</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>更新时间</span><b>${formatTime(item.observedAt)}</b></div>
           <div class="heat-links">
+            ${copyButton(item.symbol)}
             ${watchButton(item.symbol, "从 OI 监控加入")}
             ${searchButtons(item.symbol)}
           </div>
@@ -549,8 +781,44 @@ function renderIOMonitoring() {
     })
     .join("");
   bindWatchButtons(target);
+  bindCopyButtons(target);
   bindMarketChartControls(target, "io");
-  setText("#ioStatus", `${state.ioWindow} 变化率 · ${state.ioSort === "desc" ? "从高到低" : "从低到高"} · ${state.ioData.length} 个代币`);
+  const statusParts = [
+    `${state.ioWindow} 变化率`,
+    state.ioSort === "desc" ? "从高到低" : "从低到高",
+    `${state.ioTotal} 个代币`
+  ];
+  if (state.ioLoading) statusParts.push("刷新中");
+  if (state.ioError) statusParts.push("上次刷新失败，保留当前结果");
+  setText("#ioStatus", statusParts.join(" · "));
+  updateIoPagination();
+}
+
+function updateIoControls() {
+  document.querySelectorAll("[data-io-window]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.ioWindow === state.ioWindow);
+  });
+  document.querySelectorAll("[data-io-sort]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.ioSort === state.ioSort);
+  });
+  const refresh = $("#refreshIoBtn");
+  if (refresh) {
+    refresh.disabled = state.ioLoading;
+    refresh.textContent = state.ioLoading ? "刷新中" : "刷新数据";
+  }
+}
+
+function updateIoPagination() {
+  const totalPages = Math.ceil(state.ioTotal / state.ioPageSize) || 1;
+  setText("#ioPaginationSummary", state.ioTotal ? `第 ${state.ioPage} / ${totalPages} 页，共 ${state.ioTotal} 项` : "--");
+  setText("#ioPageIndicator", `${state.ioPage} / ${totalPages}`);
+  const prev = $("#prevIoPageBtn");
+  const next = $("#nextIoPageBtn");
+  if (prev) prev.disabled = state.ioPage <= 1;
+  if (next) next.disabled = state.ioPage >= totalPages;
+  document.querySelectorAll("[data-io-pagesize]").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.ioPagesize) === state.ioPageSize);
+  });
 }
 
 function marketChartPanel(symbol, intervalCode, kind) {
@@ -596,6 +864,7 @@ function bindMarketChartControls(target, kind) {
   const symbol = kind === "funding" ? state.fundingExpandedSymbol : state.ioExpandedSymbol;
   const intervalCode = kind === "funding" ? state.fundingInterval : state.ioChartInterval;
   if (symbol) loadAndRenderChart({ symbol, intervalCode });
+  updateWatchRealtime();
 }
 
 async function loadTriggerHistory() {
@@ -632,7 +901,7 @@ function renderTriggerHistory() {
     .map((item) => `
       <tr>
         <td><input type="checkbox" data-trigger-id="${item.id}" ${state.selectedTriggerIds.has(item.id) ? "checked" : ""} /></td>
-        <td>${escapeHtml(item.symbol)}</td>
+        <td><div class="symbol-cell compact">${escapeHtml(item.symbol)} ${copyButton(item.symbol)}</div></td>
         <td>${escapeHtml(triggerTypeLabel(item.triggerType))}</td>
         <td>${escapeHtml(item.intervalsTriggered || "-")}</td>
         <td>${escapeHtml(item.signalLevel || "-")}</td>
@@ -643,6 +912,7 @@ function renderTriggerHistory() {
     .join("");
 
   bindTriggerSelection();
+  bindCopyButtons(target);
   updateTriggerHistoryPagination();
 }
 
@@ -719,6 +989,7 @@ async function loadHotRank({ silent = false } = {}) {
     state.hotRank = payload.tokens ?? [];
     state.hotRankTotal = state.hotRank.length;
     state.hotRankSource = payload.source ?? "";
+    state.hotRankLoadedChain = requestedChain;
     state.hotRankFetchedAt = payload.fetchedAt ?? new Date().toISOString();
     state.hotRankPartial = Boolean(payload.partial);
     state.hotRankStale = Boolean(payload.stale);
@@ -731,14 +1002,23 @@ async function loadHotRank({ silent = false } = {}) {
     }
   } catch (error) {
     if (controller.signal.aborted || requestId !== state.hotRankRequestId) return;
-    state.hotRank = [];
-    state.hotRankSource = "";
-    state.hotRankFetchedAt = null;
-    state.hotRankPartial = false;
-    state.hotRankStale = false;
-    state.hotRankErrors = [];
+    const message = `热度数据读取失败：${error instanceof Error ? error.message : String(error)}`;
+    if (state.hotRank.length && state.hotRankLoadedChain === requestedChain) {
+      state.hotRankPartial = true;
+      state.hotRankStale = true;
+      state.hotRankErrors = [message, ...state.hotRankErrors].slice(0, 5);
+    } else {
+      state.hotRank = [];
+      state.hotRankTotal = 0;
+      state.hotRankSource = "";
+      state.hotRankLoadedChain = "";
+      state.hotRankFetchedAt = null;
+      state.hotRankPartial = false;
+      state.hotRankStale = false;
+      state.hotRankErrors = [];
+    }
     state.hotRankTwitterPending = 0;
-    state.hotRankError = `热度数据读取失败：${error instanceof Error ? error.message : String(error)}`;
+    state.hotRankError = message;
   } finally {
     if (requestId !== state.hotRankRequestId) return;
     state.hotRankLoading = false;
@@ -821,7 +1101,7 @@ function renderSignals() {
           <td><div class="interval-stack">${intervalBadges}</div></td>
           <td>
             <div class="signal-profile-stack">
-              <span class="signal-profile priority-${profile.priority} ${profile.classes}">${escapeHtml(profile.label)}</span>
+              <span class="signal-profile priority-${profile.priority} ${profile.classes}" style="${profile.color}">${escapeHtml(profile.label)}</span>
               ${oiChangeText ? `<span class="signal-oi-change">OI暴涨 ${escapeHtml(oiChangeText)}</span>` : ""}
             </div>
           </td>
@@ -864,6 +1144,7 @@ function renderSignals() {
       });
     }
   }
+  updateWatchRealtime();
 }
 
 function renderMultiHistory() {
@@ -885,10 +1166,11 @@ function renderMultiHistory() {
         <div><span>最高等级</span><b>${escapeHtml(LABELS.level[item.bestAlertLevel] || item.bestAlertLevel || "--")}</b></div>
         <div><span>首次触发</span><b>${formatTime(item.firstTriggeredAt)}</b></div>
         <div><span>最近触发</span><b>${formatTime(item.lastTriggeredAt)}</b></div>
-        <div class="heat-links">${searchButtons(item.symbol)}</div>
+        <div class="heat-links">${copyButton(item.symbol)}${searchButtons(item.symbol)}</div>
       </article>
     `)
     .join("");
+  bindCopyButtons(target);
 }
 
 async function loadMultiHistory() {
@@ -919,7 +1201,22 @@ async function copyText(text) {
 }
 
 function bindRowClicks() {
-  for (const button of document.querySelectorAll("[data-symbol]")) {
+  bindCopyButtons();
+
+  bindWatchButtons();
+
+  for (const link of document.querySelectorAll(".signal-row .mini-link")) {
+    link.addEventListener("click", (event) => event.stopPropagation());
+  }
+
+  for (const row of document.querySelectorAll(".signal-row")) {
+    row.addEventListener("click", () => toggleRow(row.dataset.key));
+  }
+}
+
+function bindCopyButtons(root = document) {
+  for (const button of root.querySelectorAll("[data-symbol]:not([data-copy-bound])")) {
+    button.dataset.copyBound = "true";
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
       const symbol = button.dataset.symbol ?? "";
@@ -933,16 +1230,6 @@ function bindRowClicks() {
         button.textContent = "复制失败";
       }
     });
-  }
-
-  bindWatchButtons();
-
-  for (const link of document.querySelectorAll(".signal-row .mini-link")) {
-    link.addEventListener("click", (event) => event.stopPropagation());
-  }
-
-  for (const row of document.querySelectorAll(".signal-row")) {
-    row.addEventListener("click", () => toggleRow(row.dataset.key));
   }
 }
 
@@ -965,17 +1252,8 @@ function renderWatchlist() {
     const expanded = state.watchExpandedSymbol === item.symbol;
     const alertText = item.alertEnabled ? "已开启" : "已关闭";
     const safeSymbol = escapeHtml(item.symbol);
-    const unlockLabel = item.unlockStatus === "available"
-      ? formatTime(item.nextUnlockAt)
-      : item.unlockStatus === "none"
-        ? "暂无未来解锁"
-        : item.unlockStatus === "undated"
-          ? "待核验解锁日期"
-        : item.unlockStatus === "unconfigured"
-          ? "待搜索解锁日期"
-          : item.unlockStatus === "error"
-            ? "自动查询失败"
-            : "等待查询";
+    const unlockLabel = watchUnlockLabel(item);
+    const unlockTitle = watchUnlockTitle(item);
     const detail = expanded ? `
       <article class="watch-detail">
         <form class="watch-settings" data-watch-settings="${safeSymbol}">
@@ -999,7 +1277,7 @@ function renderWatchlist() {
         </form>
         <div class="watch-chart-head">
           <div class="chart-tools">
-            ${ALL_INTERVALS.map((interval) => `<button class="${state.watchInterval === interval ? "active" : ""}" type="button" data-watch-interval="${interval}">${interval}</button>`).join("")}
+            ${ALL_INTERVALS.map((interval) => `<button class="${state.watchInterval === interval ? "active" : ""}" type="button" data-watch-interval="${escapeHtml(interval)}" aria-pressed="${state.watchInterval === interval ? "true" : "false"}">${escapeHtml(interval)}</button>`).join("")}
           </div>
           <span data-watch-updated="${safeSymbol}">最新更新时间：${formatTime(item.currentCloseTime)}</span>
         </div>
@@ -1011,9 +1289,9 @@ function renderWatchlist() {
     return `
       <article class="watch-row ${expanded ? "is-expanded" : ""}">
         <div>
-          <button class="watch-symbol-button" type="button" data-edit-watch="${safeSymbol}">
+          <button class="watch-symbol-button" type="button" data-edit-watch="${safeSymbol}" aria-expanded="${expanded ? "true" : "false"}">
             <strong>${safeSymbol}</strong>
-            <span>${escapeHtml(item.categoryLabel || item.baseAsset || "--")}</span>
+            <span title="${escapeHtml(item.note || "")}">${escapeHtml(item.categoryLabel || item.baseAsset || "--")}${item.note ? ` · ${escapeHtml(item.note)}` : ""}</span>
           </button>
         </div>
         <div><span>现价</span><div class="mono" data-watch-price="${safeSymbol}">${formatNumber(item.currentPrice)}</div></div>
@@ -1022,7 +1300,7 @@ function renderWatchlist() {
         <div><span>低于提醒</span><div class="mono">${formatNumber(item.alertBelow)}</div></div>
         <div class="watch-unlock">
           <span>下次解锁</span>
-          <div title="${escapeHtml(item.unlockError || "")}">
+          <div title="${escapeHtml(unlockTitle)}">
             ${
               item.unlockSourceUrl
                 ? `<a class="unlock-value" href="${escapeHtml(item.unlockSourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(unlockLabel)}</a>`
@@ -1033,6 +1311,7 @@ function renderWatchlist() {
         <div><span>警报</span><div>${escapeHtml(alertText)}</div></div>
         <div class="watch-actions">
           ${searchButtons(item.symbol)}
+          ${copyButton(item.symbol)}
           <button class="copy-symbol" type="button" data-remove-watch="${safeSymbol}">移除</button>
         </div>
       </article>
@@ -1040,7 +1319,7 @@ function renderWatchlist() {
     `;
   }).join("");
 
-  for (const button of document.querySelectorAll("[data-edit-watch]")) {
+  for (const button of target.querySelectorAll("[data-edit-watch]")) {
     button.addEventListener("click", () => {
       const symbol = button.dataset.editWatch ?? "";
       state.watchExpandedSymbol = state.watchExpandedSymbol === symbol ? null : symbol;
@@ -1048,34 +1327,64 @@ function renderWatchlist() {
     });
   }
 
-  for (const button of document.querySelectorAll("[data-watch-interval]")) {
+  for (const button of target.querySelectorAll("[data-watch-interval]")) {
     button.addEventListener("click", () => {
       state.watchInterval = button.dataset.watchInterval ?? "15m";
       renderWatchlist();
     });
   }
 
-  for (const form of document.querySelectorAll("[data-watch-settings]")) {
+  for (const form of target.querySelectorAll("[data-watch-settings]")) {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const data = new FormData(form);
-      await addWatchItem({
-        symbol: form.dataset.watchSettings,
-        note: data.get("note") ?? "",
-        alertAbove: data.get("alertAbove") ?? "",
-        alertBelow: data.get("alertBelow") ?? "",
-        alertEnabled: data.get("alertEnabled") === "on"
-      });
+      const submit = form.querySelector('button[type="submit"]');
+      const originalText = submit?.textContent ?? "保存警报";
+      try {
+        if (submit) {
+          submit.disabled = true;
+          submit.textContent = "保存中";
+        }
+        await addWatchItem({
+          symbol: form.dataset.watchSettings,
+          note: data.get("note") ?? "",
+          alertAbove: data.get("alertAbove") ?? "",
+          alertBelow: data.get("alertBelow") ?? "",
+          alertEnabled: data.get("alertEnabled") === "on"
+        });
+      } catch (error) {
+        console.error("watchlist save failed", error);
+        if (submit) {
+          submit.disabled = false;
+          submit.textContent = watchOperationError("保存", error);
+          setTimeout(() => {
+            submit.textContent = originalText;
+          }, 1800);
+        }
+      }
     });
   }
 
-  for (const button of document.querySelectorAll("[data-remove-watch]")) {
+  for (const button of target.querySelectorAll("[data-remove-watch]")) {
     button.addEventListener("click", async () => {
-      await api(`/api/watchlist/${encodeURIComponent(button.dataset.removeWatch)}`, { method: "DELETE" });
-      if (state.watchExpandedSymbol === button.dataset.removeWatch) state.watchExpandedSymbol = null;
-      await loadWatchlist();
+      const originalText = button.textContent;
+      try {
+        button.disabled = true;
+        button.textContent = "移除中";
+        await api(`/api/watchlist/${encodeURIComponent(button.dataset.removeWatch)}`, { method: "DELETE" });
+        if (state.watchExpandedSymbol === button.dataset.removeWatch) state.watchExpandedSymbol = null;
+        await loadWatchlist();
+      } catch (error) {
+        console.error("watchlist remove failed", error);
+        button.disabled = false;
+        button.textContent = "移除失败";
+        setTimeout(() => {
+          button.textContent = originalText;
+        }, 1800);
+      }
     });
   }
+  bindCopyButtons(target);
 
   const expandedItem = state.watchlist.find((item) => item.symbol === state.watchExpandedSymbol);
   if (expandedItem) {
@@ -1096,7 +1405,12 @@ function watchlistRenderSignature(items) {
         item.categoryLabel ?? "",
         item.latestInterval ?? "",
         item.nextUnlockAt ?? "",
-        item.unlockStatus ?? ""
+        item.unlockStatus ?? "",
+        item.unlockSourceUrl ?? "",
+        item.unlockError ?? "",
+        item.unlockCheckedAt ?? "",
+        item.unlockPercent ?? "",
+        item.unlockAmount ?? ""
       ].join(":")
     )
     .join("|");
@@ -1139,6 +1453,8 @@ async function loadWatchlist({ silent = false } = {}) {
   if (!silent) renderWatchlist();
   state.watchLoadPromise = (async () => {
     let shouldRender = false;
+    const previousItems = state.watchlist;
+    const hadLoadedItems = state.watchLoaded && previousItems.length > 0;
     try {
       state.watchError = "";
       const payload = await api("/api/watchlist");
@@ -1149,10 +1465,15 @@ async function loadWatchlist({ silent = false } = {}) {
       state.watchlistRenderSignature = nextSignature;
       state.watchLoaded = true;
     } catch (error) {
-      state.watchlist = [];
-      state.watchLoaded = false;
-      state.watchError = `关注池读取失败：${error instanceof Error ? error.message : String(error)}`;
-      shouldRender = !silent || state.currentView !== "watch";
+      const preserveStaleList = silent && hadLoadedItems;
+      state.watchError = preserveStaleList ? "" : watchOperationError("关注池读取", error);
+      if (!preserveStaleList) {
+        state.watchlist = [];
+        state.watchlistRenderSignature = "";
+        state.watchLoaded = false;
+      }
+      shouldRender = !silent || !preserveStaleList;
+      console.warn("watchlist load failed", error);
     } finally {
       state.watchLoading = false;
       state.watchLoadPromise = null;
@@ -1172,7 +1493,8 @@ async function addWatchItem({ symbol, note = "", alertAbove = "", alertBelow = "
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ symbol, note, alertAbove, alertBelow, alertEnabled })
   });
-  state.watchlist = payload.items ?? [];
+  state.watchError = "";
+  state.watchlist = mergeWatchlistItems(payload.items ?? []);
   state.watchlistRenderSignature = watchlistRenderSignature(state.watchlist);
   state.watchLoaded = true;
   renderWatchlist();
@@ -1198,16 +1520,34 @@ function closeWatchRealtime() {
 }
 
 function watchRealtimeStreams() {
-  if (state.currentView !== "watch" || !state.watchlist.length) return [];
   const streams = new Set();
-  for (const item of state.watchlist) {
-    const symbol = String(item.symbol ?? "").toLowerCase();
-    if (symbol) streams.add(`${symbol}@ticker`);
+  if (state.currentView === "watch") {
+    for (const item of state.watchlist) {
+      const symbol = String(item.symbol ?? "").toLowerCase();
+      if (symbol) streams.add(`${symbol}@ticker`);
+    }
+    if (state.watchExpandedSymbol) {
+      streams.add(`${state.watchExpandedSymbol.toLowerCase()}@kline_${state.watchInterval}`);
+    }
   }
-  if (state.watchExpandedSymbol) {
-    streams.add(`${state.watchExpandedSymbol.toLowerCase()}@kline_${state.watchInterval}`);
+  const expandedCharts = [
+    state.currentView === "signals" && state.expandedKey
+      ? state.signals.find((row) => rowKey(row) === state.expandedKey)?.symbol
+      : null,
+    state.currentView === "funding" ? state.fundingExpandedSymbol : null,
+    state.currentView === "io" ? state.ioExpandedSymbol : null
+  ].filter(Boolean);
+  for (const symbol of expandedCharts) {
+    const interval =
+      state.currentView === "signals"
+        ? state.signalChartIntervals.get(symbol) ?? "15m"
+        : state.currentView === "funding"
+          ? state.fundingInterval
+          : state.ioChartInterval;
+    streams.add(`${String(symbol).toLowerCase()}@ticker`);
+    streams.add(`${String(symbol).toLowerCase()}@kline_${interval}`);
   }
-  return Array.from(streams);
+  return Array.from(streams).sort();
 }
 
 function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
@@ -1217,10 +1557,11 @@ function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
     item.currentPrice = price;
     item.currentCloseTime = eventTime;
   }
-  for (const element of document.querySelectorAll(`[data-watch-price="${CSS.escape(safeSymbol)}"]`)) {
+  const selectorSymbol = cssEscape(safeSymbol);
+  for (const element of document.querySelectorAll(`[data-watch-price="${selectorSymbol}"]`)) {
     element.textContent = formatNumber(price);
   }
-  for (const element of document.querySelectorAll(`[data-watch-updated="${CSS.escape(safeSymbol)}"]`)) {
+  for (const element of document.querySelectorAll(`[data-watch-updated="${selectorSymbol}"]`)) {
     element.textContent = `最新更新时间：${formatTime(eventTime)}`;
   }
 }
@@ -1297,19 +1638,20 @@ function handleWatchRealtimeMessage(payload) {
 }
 
 function updateWatchRealtime() {
-  if (state.currentView !== "watch" || !state.watchlist.length) {
+  const streams = watchRealtimeStreams();
+  if (!streams.length) {
     closeWatchRealtime();
     return;
   }
-  const streams = watchRealtimeStreams();
-  const signature = `local:${state.watchlist.map((item) => item.symbol).join("/")}:${state.watchExpandedSymbol ?? ""}:${state.watchInterval}`;
-  if (state.watchRealtimeSocket && state.watchRealtimeSignature === signature) return;
-  if (state.watchRealtimeSource && state.watchRealtimeSignature === signature) return;
-  closeWatchRealtime();
-  state.watchRealtimeSignature = signature;
   if ("EventSource" in window) {
+    const signature = "sse:watch-realtime";
+    if (state.watchRealtimeSource && state.watchRealtimeSignature === signature) return;
+    closeWatchRealtime();
+    state.watchRealtimeSignature = signature;
     const source = new EventSource("/api/watchlist/events");
     state.watchRealtimeSource = source;
+    source.addEventListener("ready", () => {});
+    source.addEventListener("ping", () => {});
     source.onmessage = (event) => {
       try {
         handleWatchRealtimeMessage(JSON.parse(event.data));
@@ -1318,14 +1660,17 @@ function updateWatchRealtime() {
       }
     };
     source.onerror = () => {
-      if (state.currentView !== "watch") return;
+      if (!watchRealtimeStreams().length) return;
       source.close();
       state.watchRealtimeSource = null;
       state.watchRealtimeReconnectTimer = setTimeout(updateWatchRealtime, 3000);
     };
     return;
   }
-  if (!streams.length) return;
+  const signature = `ws:${streams.join("/")}`;
+  if (state.watchRealtimeSocket && state.watchRealtimeSignature === signature) return;
+  closeWatchRealtime();
+  state.watchRealtimeSignature = signature;
   const fallbackSignature = streams.join("/");
   const url = `wss://fstream.binance.com/market/stream?streams=${fallbackSignature}`;
   const socket = new WebSocket(url);
@@ -1338,7 +1683,7 @@ function updateWatchRealtime() {
     }
   };
   socket.onclose = () => {
-    if (state.currentView !== "watch") return;
+    if (!watchRealtimeStreams().length) return;
     state.watchRealtimeReconnectTimer = setTimeout(() => {
       state.watchRealtimeSocket = null;
       updateWatchRealtime();
@@ -1387,7 +1732,7 @@ function setPage(page) {
   if (mobileSelect) mobileSelect.value = page;
   if (page === "heat") loadHotRank({ silent: true });
   if (page === "watch") loadWatchlist();
-  else closeWatchRealtime();
+  else updateWatchRealtime();
   if (page === "funding") loadFundingRateTokens();
   if (page === "io") loadIOMonitoring();
   if (page === "trigger-history") loadTriggerHistory();
@@ -1415,6 +1760,7 @@ async function loadSignalsPage() {
   state.signals = response.signals;
   state.totalSignals = response.total;
   state.page = response.page;
+  state.pageSize = response.pageSize ?? state.pageSize;
   const totalPages = Math.max(1, Math.ceil(state.totalSignals / state.pageSize));
   if (state.page > totalPages) {
     state.page = totalPages;
@@ -1510,8 +1856,9 @@ function chartRightSpaceSlots(visible) {
 }
 
 function chartMaxStart(length, visible) {
+  if (length <= 0) return 0;
   const rightSpace = chartRightSpaceSlots(visible);
-  return Math.max(0, length + rightSpace - visible);
+  return Math.max(0, Math.min(length - 1, length + rightSpace - visible));
 }
 
 function chartLayout(width, height, settings) {
@@ -2160,7 +2507,7 @@ for (const button of document.querySelectorAll("[data-size]")) {
   button.addEventListener("click", () => {
     state.pageSize = Number(button.dataset.size);
     state.page = 1;
-    document.querySelectorAll(".page-size .page-size-btn").forEach((item) => item.classList.toggle("active", item === button));
+    document.querySelectorAll("[data-size]").forEach((item) => item.classList.toggle("active", item === button));
     refreshAll({ keepPage: true });
   });
 }
@@ -2170,6 +2517,7 @@ for (const button of document.querySelectorAll("[data-heat-chain]")) {
     state.hotRankChain = button.dataset.heatChain ?? "all";
     state.hotRankPage = 1;
     clearTimeout(state.hotRankRefreshTimer);
+    document.querySelectorAll("[data-heat-chain]").forEach((item) => item.classList.toggle("active", item === button));
     await loadHotRank();
   });
 }
@@ -2178,6 +2526,7 @@ for (const button of document.querySelectorAll("[data-heat-pagesize]")) {
   button.addEventListener("click", () => {
     state.hotRankPageSize = Number(button.dataset.heatPagesize);
     state.hotRankPage = 1;
+    document.querySelectorAll("[data-heat-pagesize]").forEach((item) => item.classList.toggle("active", item === button));
     renderHotRank();
   });
 }
@@ -2200,6 +2549,7 @@ $("#nextHeatPageBtn")?.addEventListener("click", async () => {
 document.querySelectorAll("[data-io-window]").forEach((btn) => {
   btn.addEventListener("click", () => {
     state.ioWindow = btn.dataset.ioWindow;
+    state.ioPage = 1;
     document.querySelectorAll("[data-io-window]").forEach((b) => {
       b.classList.toggle("active", b === btn);
     });
@@ -2210,9 +2560,34 @@ document.querySelectorAll("[data-io-window]").forEach((btn) => {
 document.querySelectorAll("[data-io-sort]").forEach((btn) => {
   btn.addEventListener("click", () => {
     state.ioSort = btn.dataset.ioSort;
+    state.ioPage = 1;
     document.querySelectorAll("[data-io-sort]").forEach((item) => item.classList.toggle("active", item === btn));
     loadIOMonitoring();
   });
+});
+
+document.querySelectorAll("[data-io-pagesize]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.ioPageSize = Number(btn.dataset.ioPagesize);
+    state.ioPage = 1;
+    document.querySelectorAll("[data-io-pagesize]").forEach((item) => item.classList.toggle("active", item === btn));
+    loadIOMonitoring();
+  });
+});
+
+$("#prevIoPageBtn")?.addEventListener("click", () => {
+  if (state.ioPage > 1) {
+    state.ioPage -= 1;
+    loadIOMonitoring();
+  }
+});
+
+$("#nextIoPageBtn")?.addEventListener("click", () => {
+  const totalPages = Math.ceil(state.ioTotal / state.ioPageSize) || 1;
+  if (state.ioPage < totalPages) {
+    state.ioPage += 1;
+    loadIOMonitoring();
+  }
 });
 
 document.querySelectorAll("[data-trigger-filter]").forEach((input) => {
@@ -2247,6 +2622,7 @@ $("#deleteSelectedTriggerBtn")?.addEventListener("click", async () => {
 });
 
 $("#refreshFundingBtn")?.addEventListener("click", () => loadFundingRateTokens());
+$("#scanFundingBtn")?.addEventListener("click", () => scanFundingIntervals());
 $("#refreshIoBtn")?.addEventListener("click", () => loadIOMonitoring());
 $("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
 $("#clearTriggerHistoryBtn")?.addEventListener("click", async () => {
@@ -2279,6 +2655,7 @@ document.querySelectorAll("[data-trigger-pagesize]").forEach((btn) => {
   btn.addEventListener("click", () => {
     state.triggerHistoryPageSize = Number(btn.dataset.triggerPagesize);
     state.triggerHistoryPage = 1;
+    document.querySelectorAll("[data-trigger-pagesize]").forEach((item) => item.classList.toggle("active", item === btn));
     loadTriggerHistory();
   });
 });
@@ -2299,20 +2676,44 @@ $("#nextTriggerPageBtn")?.addEventListener("click", () => {
 });
 
 $("#refreshHotRankBtn")?.addEventListener("click", () => loadHotRank());
-$("#refreshWatchBtn")?.addEventListener("click", () => loadWatchlist());
+$("#refreshWatchBtn")?.addEventListener("click", async () => {
+  const button = $("#refreshWatchBtn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "刷新中";
+  }
+  try {
+    await loadWatchlist();
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "刷新关注池";
+    }
+  }
+});
 $("#refreshUnlockBtn")?.addEventListener("click", async () => {
   const button = $("#refreshUnlockBtn");
   if (button) {
     button.disabled = true;
     button.textContent = "查询中";
   }
+  let failed = false;
   try {
     await api("/api/watchlist/unlock/refresh", { method: "POST" });
     await loadWatchlist();
+  } catch (error) {
+    failed = true;
+    console.error("watchlist unlock refresh failed", error);
+    if (button) {
+      button.textContent = "刷新失败";
+      setTimeout(() => {
+        if (!button.disabled) button.textContent = "刷新解锁日期";
+      }, 1800);
+    }
   } finally {
     if (button) {
       button.disabled = false;
-      button.textContent = "刷新解锁日期";
+      if (!failed) button.textContent = "刷新解锁日期";
     }
   }
 });
@@ -2368,7 +2769,7 @@ updateFilterControls();
 setPage(pageFromHash());
 void bootstrap();
 await refreshAll({ keepPage: false });
-loadHotRank();
+if (state.currentView !== "heat" || (!state.hotRankLoading && !state.hotRankFetchedAt)) loadHotRank();
 loadWatchlist();
 setInterval(() => loadHotRank({ silent: true }), 5 * 60 * 1000);
 setInterval(() => {

@@ -48,3 +48,19 @@ test("async cache returns stale data immediately while refreshing", async () => 
   await cache.refresh("menu");
   assert.equal(await cache.get("menu", loader), "new");
 });
+
+test("async cache can invalidate one key without clearing others", async () => {
+  let loads = 0;
+  const cache = createAsyncCache();
+  const loader = async () => {
+    loads += 1;
+    return `value-${loads}`;
+  };
+
+  assert.equal(await cache.get("funding", loader), "value-1");
+  assert.equal(await cache.get("oi", loader), "value-2");
+  assert.equal(cache.invalidate("funding"), true);
+
+  assert.equal(await cache.get("funding", loader), "value-3");
+  assert.equal(await cache.get("oi", loader), "value-2");
+});

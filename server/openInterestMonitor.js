@@ -18,6 +18,7 @@ const WINDOW_MS = {
   "4h": 4 * 60 * 60 * 1000,
   "1d": 24 * 60 * 60 * 1000
 };
+const HISTORY_PERIOD_MS = 5 * 60 * 1000;
 
 let timer = null;
 
@@ -39,16 +40,18 @@ function percentChange(current, previous) {
   return Number((((current - previous) / previous) * 100).toFixed(8));
 }
 
-function baselineAt(rows, targetTime) {
+function baselineAt(rows, targetTime, maxLagMs = HISTORY_PERIOD_MS) {
   let match = null;
   for (const row of rows) {
     if (row.timestamp > targetTime) break;
     match = row;
   }
+  if (!match) return null;
+  if (targetTime - match.timestamp >= maxLagMs) return null;
   return match;
 }
 
-function buildSnapshot(symbol, rows) {
+export function buildOpenInterestSnapshot(symbol, rows) {
   const latest = rows.at(-1);
   if (!latest) return null;
   const changes = {};
@@ -75,7 +78,7 @@ async function scanToken(token) {
     period: "5m",
     limit: config.openInterestMonitor.historyLimit
   });
-  const snapshot = buildSnapshot(token.symbol, rows);
+  const snapshot = buildOpenInterestSnapshot(token.symbol, rows);
   if (!snapshot || (snapshot.change5mPct === null && snapshot.change1hPct === null)) {
     return { updated: false, spike: false, alerted: false };
   }

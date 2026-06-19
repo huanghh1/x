@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   formatHotMaSignalTelegram,
+  telegramApi,
   telegramTokenCopyButton,
   telegramTokenLine
 } from "./telegram.js";
-import { oiFilterKeyboard, signalKeyboard, signalRowText } from "./telegramBot.js";
+import { oiFilterKeyboard, signalKeyboard, signalRowText, splitTelegramText } from "./telegramBot.js";
 
 test("Telegram token line keeps Twitter and Binance Square inside the card body", () => {
   const line = telegramTokenLine("ZESTUSDT");
@@ -91,4 +92,36 @@ test("Telegram OI controls mark the selected window and sort order", () => {
 
   assert.equal(keyboard.inline_keyboard[0][2].text, "✓ 1h");
   assert.equal(keyboard.inline_keyboard[1][1].text, "✓ 从低到高");
+});
+
+test("Telegram OI controls fall back to safe defaults for invalid callback data", () => {
+  const keyboard = oiFilterKeyboard({ timeWindow: "bad", sort: "sideways" });
+
+  assert.equal(keyboard.inline_keyboard[0][0].text, "✓ 5m");
+  assert.equal(keyboard.inline_keyboard[1][0].text, "✓ 从高到低");
+  assert.equal(keyboard.inline_keyboard[0][1].callback_data, "oi:15m:desc");
+});
+
+test("Telegram text splitter prefers line boundaries", () => {
+  assert.deepEqual(
+    splitTelegramText("line-one\nline-two\nline-three", 17),
+    ["line-one\nline-two", "line-three"]
+  );
+});
+
+test("Telegram API rejects malformed success responses", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ result: 123 })
+  });
+
+  await assert.rejects(
+    telegramApi("sendMessage", { chat_id: "1", text: "hello", timeout: "bad" }),
+    /response was not ok/
+  );
 });

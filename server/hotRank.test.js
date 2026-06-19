@@ -138,3 +138,64 @@ test("a failed chain never falls back to another chain's cached ranking", async 
     Object.assign(config.hotRank, originalHotRank);
   }
 });
+
+test("stale hot rank fallback is not capped by an earlier small request", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTwitterEnabled = config.twitter.heatEnabled;
+  const originalHotRank = { ...config.hotRank };
+  config.twitter.heatEnabled = false;
+  config.hotRank.marketCapTopCacheMs = 60_000;
+  config.hotRank.marketCapTopTimeoutMs = 1_000;
+  let upstreamBroken = false;
+
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("api.coingecko.com")) {
+      return jsonResponse(
+        ["BTC", "ETH", "USDT", "BNB", "USDC", "XRP", "SOL", "TRX", "DOGE", "ADA"].map((symbol) => ({
+          symbol
+        }))
+      );
+    }
+    if (target.includes("web3.binance.com")) {
+      if (upstreamBroken) return jsonResponse({ data: { message: "maintenance" } });
+      return jsonResponse({
+        data: {
+          leaderBoardList: Array.from({ length: 8 }, (_, index) => ({
+            metaInfo: { symbol: `HOT${index + 1}`, chainId: "56", contractAddress: `0x${index + 1}` },
+            marketInfo: { marketCap: 100 + index },
+            socialHypeInfo: { socialHype: 1000 - index }
+          }))
+        }
+      });
+    }
+    throw new Error(`unexpected URL ${target}`);
+  };
+
+  try {
+    const module = await import(`./hotRank.js?stale-limit-test=${Date.now()}`);
+    const small = await module.getHotRank({ chain: "bsc", limit: 5, timeRange: 111 });
+    assert.equal(small.tokens.length, 5);
+
+    upstreamBroken = true;
+    const stale = await module.getHotRank({ chain: "bsc", limit: 8, timeRange: 222 });
+    assert.equal(stale.stale, true);
+    assert.equal(stale.partial, true);
+    assert.equal(stale.tokens.length, 8);
+    assert.deepEqual(stale.tokens.map((token) => token.symbol), [
+      "HOT1",
+      "HOT2",
+      "HOT3",
+      "HOT4",
+      "HOT5",
+      "HOT6",
+      "HOT7",
+      "HOT8"
+    ]);
+    assert.match(stale.errors[0], /invalid leaderboard payload/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.twitter.heatEnabled = originalTwitterEnabled;
+    Object.assign(config.hotRank, originalHotRank);
+  }
+});

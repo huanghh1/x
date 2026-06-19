@@ -141,7 +141,8 @@ export const config = {
     historyLimit: Math.max(289, Math.min(500, numberEnv("OPEN_INTEREST_HISTORY_LIMIT", 289))),
     spike5mPct: numberEnv("OPEN_INTEREST_SPIKE_5M_PCT", 5),
     spike1hPct: numberEnv("OPEN_INTEREST_SPIKE_1H_PCT", 10),
-    alertCooldownMs: numberEnv("OPEN_INTEREST_ALERT_COOLDOWN_MS", 30 * 60 * 1000)
+    alertCooldownMs: numberEnv("OPEN_INTEREST_ALERT_COOLDOWN_MS", 30 * 60 * 1000),
+    standaloneAlertEnabled: boolEnv("OPEN_INTEREST_STANDALONE_ALERT_ENABLED", false)
   },
   signal: {
     nearThresholdPct: numberEnv("MA_NEAR_THRESHOLD_PCT", 1)
@@ -152,7 +153,7 @@ export const config = {
   twitter: {
     token: process.env.TWITTER_TOKEN?.trim() ?? process.env.OPENNEWS_TOKEN?.trim() ?? "",
     tokens: twitterTokenPool,
-    heatEnabled: boolEnv("TWITTER_HEAT_ENABLED", Boolean(process.env.OPENNEWS_TOKENS || process.env.TWITTER_TOKENS || process.env.TWITTER_TOKEN || process.env.OPENNEWS_TOKEN)),
+    heatEnabled: false,
     tokenCooldownMs: numberEnv("TWITTER_TOKEN_COOLDOWN_MS", 10 * 60 * 1000),
     heatCacheMs: numberEnv("TWITTER_HEAT_CACHE_MS", 30 * 60 * 1000),
     failureCacheMs: numberEnv("TWITTER_HEAT_FAILURE_CACHE_MS", 2 * 60 * 1000),
@@ -176,7 +177,8 @@ export const config = {
     bearerToken: process.env.TOKEN_UNLOCK_BEARER_TOKEN?.trim() || "",
     mobulaApiKey: process.env.MOBULA_API_KEY?.trim() || "",
     cacheMs: numberEnv("TOKEN_UNLOCK_CACHE_MS", 24 * 60 * 60 * 1000),
-    scanIntervalMs: numberEnv("TOKEN_UNLOCK_SCAN_MS", 6 * 60 * 60 * 1000),
+    retryCacheMs: numberEnv("TOKEN_UNLOCK_RETRY_CACHE_MS", 60 * 60 * 1000),
+    scanIntervalMs: numberEnv("TOKEN_UNLOCK_SCAN_MS", 60 * 60 * 1000),
     requestTimeoutMs: numberEnv("TOKEN_UNLOCK_REQUEST_TIMEOUT_MS", 15_000)
   },
   telegram: {

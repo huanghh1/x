@@ -209,6 +209,10 @@ async function recomputeAndNotifyToken(token) {
   const newLevel1Signals = computedSignals.filter(
     ({ previous, signal }) => signal.alertLevel === "LEVEL1" && previous?.alert_level !== "LEVEL1"
   );
+  const newAlertSignals = computedSignals.filter(
+    ({ previous, signal }) =>
+      ["LEVEL1", "LEVEL2"].includes(signal.alertLevel) && previous?.alert_level !== signal.alertLevel
+  );
   const triggerEvents = [];
   if (newLevel1Signals.length) {
     triggerEvents.push({
@@ -257,25 +261,30 @@ async function recomputeAndNotifyToken(token) {
   telegramContext.oiChange1hPct = correlation.oiChange1hPct;
   telegramContext.alertLevel = bestAlertLevel;
   telegramContext.profile = profile;
-  if (hotRankActive) {
-    const hotSignals = newLevel1Signals;
-    if (hotSignals.length) {
-      triggerEvents.push({
-        eventKey: `hot-ma:${token.symbol}:${hotSignals.map(({ intervalCode }) => intervalCode).join("-")}:${latestSignalTime}`,
-        symbol: token.symbol,
-        triggerType: "COMPOSITE",
-        intervals: telegramContext.multiCycleIntervals.join(","),
-        signalLevel: "LEVEL1",
-        triggerTime: latestSignalTime,
-        details: {
-          sources: ["HOT_RANK", "MA"],
-          multiCycleCount: multiCycleSignals.length,
-          fundingOneHour: correlation.fundingOneHour,
-          priority: profile.priority,
-          profile: profile.label
-        }
-      });
-    }
+  const compositeChanged = newAlertSignals.length > 0 || (multiCycleSignals.length >= 3 && previousMultiCycleCount < 3);
+  if (profile.sourceMask > 1 && compositeChanged) {
+    triggerEvents.push({
+      eventKey: `combo:${token.symbol}:${profile.key}:${telegramContext.multiCycleIntervals.join("-")}:${latestSignalTime}`,
+      symbol: token.symbol,
+      triggerType: "COMPOSITE",
+      intervals: telegramContext.multiCycleIntervals.join(","),
+      signalLevel: bestAlertLevel,
+      triggerTime: latestSignalTime,
+      details: {
+        sources: [
+          "MA",
+          correlation.fundingOneHour ? "FUNDING_RATE" : null,
+          correlation.oiSpike ? "OI_SPIKE" : null,
+          hotRankActive ? "HOT_RANK" : null,
+          profile.multi ? "MULTI_CYCLE" : null
+        ].filter(Boolean),
+        newlyTriggeredIntervals: newAlertSignals.map(({ intervalCode }) => intervalCode),
+        multiCycleCount: multiCycleSignals.length,
+        sourceMask: profile.sourceMask,
+        priority: profile.priority,
+        profile: profile.label
+      }
+    });
   }
   await recordTriggerHistoryBatch(triggerEvents);
 

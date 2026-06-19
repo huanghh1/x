@@ -159,7 +159,8 @@ export async function refreshTokenUnlock(symbol, baseAsset, { force = false } = 
   const cached = await getTokenUnlockCache(symbol);
   if (!force && cached?.expiresAt && new Date(cached.expiresAt).getTime() > Date.now()) return cached;
   const checkedAt = new Date();
-  const expiresAt = new Date(checkedAt.getTime() + config.unlock.cacheMs);
+  const expiresAtForStatus = (status) =>
+    new Date(checkedAt.getTime() + (status === "available" ? config.unlock.cacheMs : config.unlock.retryCacheMs));
 
   try {
     const result = await fetchUnlockSource(symbol, baseAsset);
@@ -169,7 +170,7 @@ export async function refreshTokenUnlock(symbol, baseAsset, { force = false } = 
         baseAsset,
         ...result,
         checkedAt,
-        expiresAt
+        expiresAt: expiresAtForStatus(result.status)
       });
     }
     const releases = releaseRows(result.payload)
@@ -188,7 +189,7 @@ export async function refreshTokenUnlock(symbol, baseAsset, { force = false } = 
       unlockPercent: next?.percent ?? null,
       rawPayload: result.payload,
       checkedAt,
-      expiresAt
+      expiresAt: expiresAtForStatus(next ? "available" : "none")
     });
   } catch (error) {
     if (cached && ["available", "none", "undated"].includes(cached.status)) return cached;
@@ -199,7 +200,7 @@ export async function refreshTokenUnlock(symbol, baseAsset, { force = false } = 
       status: "error",
       error: error instanceof Error ? error.message : String(error),
       checkedAt,
-      expiresAt
+      expiresAt: expiresAtForStatus("error")
     });
   }
 }

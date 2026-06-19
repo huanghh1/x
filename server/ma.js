@@ -11,15 +11,34 @@ function round(value) {
   return Number(value.toFixed(12));
 }
 
-export function calculateSignal({ intervalCode, closes }) {
-  const clean = closes.filter((item) => Number.isFinite(item.close));
+function normalizeCloses(closes) {
+  if (!Array.isArray(closes)) return [];
+  return closes
+    .map((item, index) => {
+      const close = Number(item?.close);
+      const closeTime = Number(item?.closeTime);
+      return {
+        close,
+        closeTime: Number.isFinite(closeTime) ? closeTime : null,
+        index
+      };
+    })
+    .filter((item) => Number.isFinite(item.close) && item.close > 0)
+    .sort((a, b) => {
+      if (a.closeTime !== null && b.closeTime !== null) return a.closeTime - b.closeTime;
+      return a.index - b.index;
+    });
+}
+
+export function calculateSignal({ intervalCode, closes = [] }) {
+  const clean = normalizeCloses(closes);
   const latest = clean[clean.length - 1];
   const signalTime = latest?.closeTime ?? Date.now();
   const ma100 = clean.length >= 100 ? average(clean.slice(-100).map((item) => item.close)) : null;
   const ma200 = clean.length >= 200 ? average(clean.slice(-200).map((item) => item.close)) : null;
   const currentPrice = latest?.close ?? null;
 
-  if (!currentPrice || ma100 === null || ma200 === null) {
+  if (currentPrice === null || ma100 === null || ma200 === null) {
     return {
       intervalCode,
       ma100: round(ma100),
@@ -29,7 +48,7 @@ export function calculateSignal({ intervalCode, closes }) {
       proximityPct: null,
       signalWeight: null,
       signalStatus: "样本不足",
-      note: `本周期缓存 ${clean.length} 根K线，MA200需要至少200根。`,
+      note: `本周期缓存 ${clean.length} 根有效K线，MA200需要至少200根。`,
       signalTime
     };
   }
@@ -59,6 +78,7 @@ export function calculateSignal({ intervalCode, closes }) {
 
   if (proximityPct <= nearThresholdPct) {
     const nearLine = distanceToMa100 <= distanceToMa200 ? "MA100" : "MA200";
+    const side = currentPrice > upper ? "上方" : "下方";
     return {
       intervalCode,
       ma100: round(ma100),
@@ -68,7 +88,7 @@ export function calculateSignal({ intervalCode, closes }) {
       proximityPct: round(proximityPct),
       signalWeight: round(Math.max(0, nearThresholdPct - proximityPct)),
       signalStatus: "二级预警",
-      note: `当前价格靠近 ${nearLine}，距离约 ${proximityPct.toFixed(3)}%。`,
+      note: `当前价格在双均线${side}靠近 ${nearLine}，距离约 ${proximityPct.toFixed(3)}%。`,
       signalTime
     };
   }

@@ -1,0 +1,44 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  normalizeWatchlistAlertPrice,
+  normalizeWatchlistPayload
+} from "./db.js";
+
+test("watchlist alert prices accept empty values and positive numbers", () => {
+  assert.equal(normalizeWatchlistAlertPrice("", "alertAbove"), null);
+  assert.equal(normalizeWatchlistAlertPrice(null, "alertBelow"), null);
+  assert.equal(normalizeWatchlistAlertPrice("12.34", "alertAbove"), 12.34);
+});
+
+test("watchlist payload sanitizes symbol, note, and alert enabled flag", () => {
+  const payload = normalizeWatchlistPayload({
+    symbol: " eth-usdt ",
+    note: "x".repeat(300),
+    alertAbove: "3000",
+    alertBelow: "2000",
+    alertEnabled: "0"
+  });
+
+  assert.equal(payload.symbol, "ETHUSDT");
+  assert.equal(payload.baseAsset, "ETH");
+  assert.equal(payload.note.length, 255);
+  assert.equal(payload.alertAbove, 3000);
+  assert.equal(payload.alertBelow, 2000);
+  assert.equal(payload.alertEnabled, 0);
+});
+
+test("watchlist payload rejects invalid alert ranges", () => {
+  assert.throws(
+    () => normalizeWatchlistPayload({ symbol: "BTCUSDT", alertAbove: "nope" }),
+    /alertAbove must be a positive number/
+  );
+  assert.throws(
+    () => normalizeWatchlistPayload({ symbol: "BTCUSDT", alertBelow: "0" }),
+    /alertBelow must be a positive number/
+  );
+  assert.throws(
+    () => normalizeWatchlistPayload({ symbol: "BTCUSDT", alertAbove: "10", alertBelow: "20" }),
+    /alertAbove must be greater than alertBelow/
+  );
+});

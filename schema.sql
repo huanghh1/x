@@ -121,7 +121,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uk_watch_symbol (symbol),
-  KEY idx_watch_enabled (alert_enabled, updated_at)
+  KEY idx_watch_enabled (alert_enabled, updated_at),
+  KEY idx_watch_updated (updated_at, symbol)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS hot_ma_signal_alert (
@@ -162,11 +163,15 @@ CREATE TABLE IF NOT EXISTS funding_interval_state (
   last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_changed_at DATETIME(3) NULL,
   one_hour_alerted_at DATETIME(3) NULL,
+  one_hour_confirmed_at DATETIME(3) NULL,
+  next_one_hour_alert_at DATETIME(3) NULL,
+  one_hour_alert_count INT UNSIGNED NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol),
   KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
-  KEY idx_funding_last_changed (last_changed_at)
+  KEY idx_funding_last_changed (last_changed_at),
+  KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 触发历史记录表
@@ -223,6 +228,7 @@ CREATE TABLE IF NOT EXISTS hot_rank_snapshot (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uk_hot_snapshot (symbol, chain_label, snapshot_time),
+  KEY idx_hot_snapshot_time (snapshot_time),
   KEY idx_hot_snapshot_chain_time (chain_label, snapshot_time, rank_value),
   KEY idx_hot_snapshot_symbol_time (symbol, snapshot_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

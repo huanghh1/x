@@ -369,8 +369,15 @@ async function requestHotRankChain(chainId, { targetLanguage, socialLanguage, ti
       throw new Error(`Binance social hype ${chainId} HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`);
     }
     const json = await response.json();
+    if (json?.success === false || json?.ok === false) {
+      const message = String(json?.message ?? json?.error ?? json?.description ?? "upstream rejected request");
+      throw new Error(`Binance social hype ${chainId}: ${message}`);
+    }
     const list = json?.data?.leaderBoardList ?? json?.data?.list ?? json?.data ?? [];
-    if (!Array.isArray(list)) return [];
+    if (!Array.isArray(list)) {
+      const message = String(json?.message ?? json?.error ?? json?.description ?? "invalid leaderboard payload");
+      throw new Error(`Binance social hype ${chainId}: ${message}`);
+    }
     return list.map((item) => normalizeHotToken(item, chainId)).filter(Boolean);
   } finally {
     clearTimeout(timer);
@@ -435,6 +442,30 @@ async function getTopMarketCapSymbols() {
 
 function materializeHotRank(basePayload, safeLimit) {
   const binanceTokens = (basePayload.binanceTokens ?? []).slice(0, safeLimit);
+  if (!config.twitter.heatEnabled || !twitterTokens().length) {
+    const tokens = binanceTokens.map((token, index) => ({
+      ...token,
+      binanceHeat: token.heat,
+      twitterHeat: null,
+      twitterStatus: "disabled",
+      twitterTweetCount: 0,
+      rank: index + 1
+    }));
+    return {
+      ok: true,
+      source: "Binance Web3 Social Hype",
+      twitterEnabled: false,
+      twitterPendingCount: 0,
+      chain: basePayload.chain,
+      chains: basePayload.chains,
+      fetchedAt: basePayload.fetchedAt,
+      partial: basePayload.partial,
+      stale: basePayload.stale,
+      errors: basePayload.errors,
+      filters: basePayload.filters,
+      tokens
+    };
+  }
   scheduleTwitterRefresh(binanceTokens);
   const twitterResults = binanceTokens.map((token) =>
     getCachedTwitterHeat(token.symbol) ?? { heat: null, status: "pending_refresh", tweetCount: 0 }
@@ -501,7 +532,6 @@ async function fetchHotRankBase({ normalizedChain, safeLimit, targetLanguage, so
     .flatMap((result) => (result.status === "fulfilled" ? result.value : []))
     .sort((a, b) => b.heat - a.heat);
   const filtered = filterEligibleHotTokens(rawTokens, topMarketCap.symbols);
-  const binanceTokens = filtered.tokens.slice(0, safeLimit);
   const errors = results
     .filter((result) => result.status === "rejected")
     .map((result) => (result.reason instanceof Error ? result.reason.message : String(result.reason)));
@@ -533,7 +563,7 @@ async function fetchHotRankBase({ normalizedChain, safeLimit, targetLanguage, so
     stale: false,
     errors,
     filters,
-    binanceTokens
+    binanceTokens: filtered.tokens
   };
   if (rawTokens.length) lastHotRankPayloadByChain.set(normalizedChain, basePayload);
   return basePayload;

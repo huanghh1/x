@@ -86,6 +86,17 @@ function signalReplyMarkup(token = null, active = "signals") {
   };
 }
 
+function fundingAlertReplyMarkup(item) {
+  const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  const markup = signalReplyMarkup(item, "funding");
+  if (symbol) {
+    markup.inline_keyboard.unshift([
+      { text: `确认 ${symbol} 1h资金费率`, callback_data: `funding_confirm:${symbol}` }
+    ]);
+  }
+  return markup;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -97,14 +108,43 @@ function retryableTelegramError(error) {
     /fetch failed|aborted|timeout|socket|TLS|ECONNRESET|UND_ERR_SOCKET/i.test(message);
 }
 
+function telegramRequestTimeoutMs(payload) {
+  const baseTimeoutMs = Math.max(1000, Number(config.telegram.timeoutMs) || 12000);
+  const pollingTimeout = Number(payload?.timeout ?? 0);
+  const pollingTimeoutMs = Number.isFinite(pollingTimeout) && pollingTimeout > 0
+    ? pollingTimeout * 1000
+    : 0;
+  return Math.max(baseTimeoutMs, pollingTimeoutMs ? pollingTimeoutMs + 8000 : 0);
+}
+
+async function parseTelegramResponse(method, response) {
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok || !data || data.ok !== true) {
+    const description = data?.description ??
+      (data ? `Telegram ${method} response was not ok` : `Telegram ${method} returned invalid JSON`);
+    const error = new Error(description);
+    error.status = response.status;
+    const retryAfter = Number(data?.parameters?.retry_after ?? 0);
+    error.retryAfter = Number.isFinite(retryAfter) ? retryAfter : 0;
+    throw error;
+  }
+
+  return data.result;
+}
+
 export async function telegramApi(method, payload) {
   let lastError = null;
   for (let attempt = 0; attempt < config.telegram.retries; attempt += 1) {
     const controller = new AbortController();
-    const pollingTimeoutMs = Number(payload?.timeout ?? 0) * 1000;
     const timer = setTimeout(
       () => controller.abort(),
-      Math.max(config.telegram.timeoutMs, pollingTimeoutMs + 8000)
+      telegramRequestTimeoutMs(payload)
     );
     try {
       const response = await fetch(`https://api.telegram.org/bot${config.telegram.botToken}/${method}`, {
@@ -113,14 +153,7 @@ export async function telegramApi(method, payload) {
         signal: controller.signal,
         body: JSON.stringify(payload)
       });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || data.ok === false) {
-        const error = new Error(data.description ?? `Telegram ${method} HTTP ${response.status}`);
-        error.status = response.status;
-        error.retryAfter = Number(data?.parameters?.retry_after ?? 0);
-        throw error;
-      }
-      return data.result;
+      return await parseTelegramResponse(method, response);
     } catch (error) {
       const cause = error?.cause?.message ? `: ${error.cause.message}` : "";
       lastError = error instanceof Error && error.message === "fetch failed"
@@ -244,13 +277,14 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
     oiSpike: context.oiSpike,
     alertLevel: context.alertLevel
   });
-  if (!profile.sourceMask) return { skipped: true, reason: "No MA alert for funding combination" };
+  const label = profile.sourceMask ? profile.label : "资金费率独立警报";
   const intervals = Array.isArray(context.intervals) ? context.intervals : [];
   const text = [
-    `<b>[${escapeHtml(profile.label)}]</b>`,
+    `<b>[${escapeHtml(label)}]</b>`,
     `交易对：${telegramTokenLine(item.symbol)}`,
     `结算周期：<b>${escapeHtml(changeText)}</b>`,
     `当前资金费率：<b>${escapeHtml(formatFundingRate(item.currentFundingRate))}</b>`,
+    Number(item.oneHourAlertCount ?? 0) > 0 ? `重复提醒：第 ${escapeHtml(Number(item.oneHourAlertCount) + 1)} 次，确认后停止循环推送` : "确认状态：待确认，5分钟后仍未确认会重复推送",
     item.nextFundingTime ? `下次结算：${escapeHtml(new Date(Number(item.nextFundingTime)).toLocaleString("zh-CN", { hour12: false }))}` : null,
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
     context.oiSpike
@@ -260,7 +294,7 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
     "提示：这是 Binance USDⓈ-M fundingInfo 公开数据监控，不构成投资建议。"
   ].filter(Boolean).join("\n");
 
-  const result = await postTelegram(text, signalReplyMarkup(item, "funding"));
+  const result = await postTelegram(text, fundingAlertReplyMarkup(item));
   return { skipped: false, result };
 }
 
@@ -312,17 +346,8 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
   if (item.change5mPct !== null && item.change5mPct >= config.openInterestMonitor.spike5mPct) {
     hitIntervals.push(`5分钟: ${formatOiChange(item.change5mPct)}`);
   }
-  if (item.change15mPct !== null && item.change15mPct >= config.openInterestMonitor.spike15mPct) {
-    hitIntervals.push(`15分钟: ${formatOiChange(item.change15mPct)}`);
-  }
   if (item.change1hPct !== null && item.change1hPct >= config.openInterestMonitor.spike1hPct) {
     hitIntervals.push(`1小时: ${formatOiChange(item.change1hPct)}`);
-  }
-  if (item.change4hPct !== null && item.change4hPct >= config.openInterestMonitor.spike4hPct) {
-    hitIntervals.push(`4小时: ${formatOiChange(item.change4hPct)}`);
-  }
-  if (item.change1dPct !== null && item.change1dPct >= config.openInterestMonitor.spike1dPct) {
-    hitIntervals.push(`1天: ${formatOiChange(item.change1dPct)}`);
   }
 
   const text = [
@@ -330,10 +355,10 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
     `交易对：${telegramTokenLine(item.symbol)}`,
     hitIntervals.length ? `触发区间：\n${hitIntervals.map((t) => `  • ${escapeHtml(t)}`).join("\n")}` : null,
     `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b> (阈值: ${config.openInterestMonitor.spike5mPct}%)`,
-    `15分钟变化：<b>${escapeHtml(formatOiChange(item.change15mPct))}</b> (阈值: ${config.openInterestMonitor.spike15mPct}%)`,
     `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b> (阈值: ${config.openInterestMonitor.spike1hPct}%)`,
-    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b> (阈值: ${config.openInterestMonitor.spike4hPct}%)`,
-    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b> (阈值: ${config.openInterestMonitor.spike1dPct}%)`,
+    `15分钟变化：<b>${escapeHtml(formatOiChange(item.change15mPct))}</b>`,
+    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b>`,
+    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b>`,
     `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
     `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`,
     "提示：检测到持仓量异常增长，请密切关注市场动态。不构成投资建议。"

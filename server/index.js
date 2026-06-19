@@ -17,9 +17,10 @@ import {
   getOverview,
   getSignals,
   getSignalsPage,
+  getKlineAuditReport,
   klineStats,
   listOneHourFundingIntervals,
-  listOpenInterestMonitor,
+  listOpenInterestMonitorPage,
   listTriggerHistory,
   listWatchlistTokens,
   listWatchlist,
@@ -96,6 +97,15 @@ app.post("/api/kline-audit", async (_request, response) => {
     body: "{}",
     timeoutMs: 60_000
   }));
+});
+
+app.get("/api/kline-health", async (_request, response) => {
+  try {
+    response.json({ ok: true, ...(await getKlineAuditReport(config.crawler.retentionLimits)) });
+  } catch (error) {
+    console.error("get kline health failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.get("/api/overview", async (_request, response) => {
@@ -205,11 +215,18 @@ app.get("/api/watchlist", async (_request, response) => {
 });
 
 app.get("/api/watchlist/events", async (request, response) => {
-  const upstream = await fetch(serviceUrl("realtime", "/internal/events"), {
-    headers: config.service.internalToken ? { "X-Internal-Service-Token": config.service.internalToken } : {}
-  });
+  let upstream;
+  try {
+    upstream = await fetch(serviceUrl("realtime", "/internal/events"), {
+      headers: config.service.internalToken ? { "X-Internal-Service-Token": config.service.internalToken } : {}
+    });
+  } catch (error) {
+    console.error("watchlist events upstream failed", error);
+    response.status(503).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
   if (!upstream.ok || !upstream.body) {
-    response.status(503).end();
+    response.status(503).json({ ok: false, error: `realtime service HTTP ${upstream.status}` });
     return;
   }
   response.writeHead(200, {
@@ -219,6 +236,10 @@ app.get("/api/watchlist/events", async (request, response) => {
     "X-Accel-Buffering": "no"
   });
   const stream = Readable.fromWeb(upstream.body);
+  stream.on("error", (error) => {
+    console.error("watchlist events stream failed", error);
+    if (!response.destroyed) response.end();
+  });
   stream.pipe(response);
   request.on("close", () => stream.destroy());
 });
@@ -444,7 +465,7 @@ app.get("/api/funding-rate-tokens", async (_request, response) => {
   }
 });
 
-app.get("/api/io-monitoring", async (request, response) => {
+async function handleOpenInterestMonitoring(request, response) {
   try {
     const timeWindow = ["5m", "15m", "1h", "4h", "1d"].includes(request.query.timeWindow)
       ? request.query.timeWindow
@@ -453,16 +474,24 @@ app.get("/api/io-monitoring", async (request, response) => {
     const scheduler = await requestService("scheduler", "/internal/health").catch(() => null);
     response.json({
       ok: true,
-      data: await listOpenInterestMonitor({ timeWindow, sort }),
+      ...(await listOpenInterestMonitorPage({
+        timeWindow,
+        sort,
+        page: request.query.page,
+        pageSize: request.query.pageSize
+      })),
       timeWindow,
       sort,
       monitor: scheduler?.openInterestMonitor ?? null
     });
   } catch (error) {
-    console.error("get io monitoring failed", error);
+    console.error("get oi monitoring failed", error);
     response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
-});
+}
+
+app.get("/api/oi-monitoring", handleOpenInterestMonitoring);
+app.get("/api/io-monitoring", handleOpenInterestMonitoring);
 
 app.use((_request, response) => {
   response.sendFile(path.resolve(__dirname, "../public/index.html"));

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import {
   listWatchlist,
-  listWatchlistTokens,
+  listRealtimeKlineTokens,
   markWatchlistAlertSent,
   refreshTokenFetchState,
   selectClosePrices,
@@ -68,7 +68,7 @@ function klineToDbRow(kline) {
 }
 
 async function syncWatchlistState() {
-  const [items, tokens] = await Promise.all([listWatchlist(), listWatchlistTokens()]);
+  const [items, tokens] = await Promise.all([listWatchlist(), listRealtimeKlineTokens()]);
   state.watchItems = new Map(items.map((item) => [sanitizeSymbol(item.symbol), item]));
   state.tokenRows = new Map(tokens.map((token) => [sanitizeSymbol(token.symbol), token]));
   return { items, tokens };
@@ -76,7 +76,7 @@ async function syncWatchlistState() {
 
 function buildStreams() {
   const streams = [];
-  for (const symbol of state.watchItems.keys()) {
+  for (const symbol of state.tokenRows.keys()) {
     const lower = symbol.toLowerCase();
     streams.push(`${lower}@ticker`);
     for (const interval of INTERVALS) {

@@ -4,6 +4,53 @@ import { evaluateOpenInterestSpike } from "./openInterestSpike.js";
 import { resolveBestAlertLevel, resolveSignalProfile } from "./signalPriority.js";
 
 let pool;
+let databaseInitPromise;
+
+function escapeIdentifier(value) {
+  return mysql.escapeId(String(value));
+}
+
+async function getColumn(tableName, columnName) {
+  const [rows] = await pool.query(
+    `SELECT COLUMN_TYPE AS columnType
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA=DATABASE()
+       AND TABLE_NAME=:tableName
+       AND COLUMN_NAME=:columnName
+     LIMIT 1`,
+    { tableName, columnName }
+  );
+  return rows[0] ?? null;
+}
+
+async function columnExists(tableName, columnName) {
+  return Boolean(await getColumn(tableName, columnName));
+}
+
+async function tableExists(tableName) {
+  const [rows] = await pool.query(
+    `SELECT 1
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA=DATABASE()
+       AND TABLE_NAME=:tableName
+     LIMIT 1`,
+    { tableName }
+  );
+  return rows.length > 0;
+}
+
+async function indexExists(tableName, indexName) {
+  const [rows] = await pool.query(
+    `SELECT 1
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA=DATABASE()
+       AND TABLE_NAME=:tableName
+       AND INDEX_NAME=:indexName
+     LIMIT 1`,
+    { tableName, indexName }
+  );
+  return rows.length > 0;
+}
 
 const TABLE_SQL = [
   `CREATE TABLE IF NOT EXISTS token_list (
@@ -32,6 +79,7 @@ const TABLE_SQL = [
     UNIQUE KEY uk_token_symbol (symbol),
     KEY idx_token_category_status (category_type, fetch_status),
     KEY idx_token_status (fetch_status, updated_at),
+    KEY idx_token_base_active (base_asset, is_active, updated_at),
     KEY idx_token_inactive_since (is_active, inactive_since)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS kline_cache (
@@ -52,6 +100,7 @@ const TABLE_SQL = [
     PRIMARY KEY (id),
     UNIQUE KEY uk_kline_symbol_interval_time (symbol, interval_code, open_time),
     KEY idx_kline_token_interval_time (token_id, interval_code, open_time),
+    KEY idx_kline_symbol_interval_close (symbol, interval_code, close_time),
     CONSTRAINT fk_kline_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS signal_result (
@@ -76,6 +125,8 @@ const TABLE_SQL = [
     UNIQUE KEY uk_signal_symbol_interval (symbol, interval_code),
     KEY idx_signal_category_level (category_type, alert_level, signal_weight),
     KEY idx_signal_time (signal_time),
+    KEY idx_signal_filter_page (category_type, alert_level, interval_code, updated_at, symbol),
+    KEY idx_signal_symbol_time (symbol, signal_time),
     CONSTRAINT fk_signal_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS maintenance_state (
@@ -95,7 +146,9 @@ const TABLE_SQL = [
     last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     notified_at DATETIME(3) NULL,
     PRIMARY KEY (symbol),
-    KEY idx_hot_rank_last_seen (last_seen_at)
+    KEY idx_hot_rank_last_seen (last_seen_at),
+    KEY idx_hot_base_seen (base_asset, last_seen_at, last_seen_rank),
+    KEY idx_hot_chain_seen (chain_label, last_seen_at, last_seen_rank)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS watchlist (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -112,7 +165,8 @@ const TABLE_SQL = [
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uk_watch_symbol (symbol),
-    KEY idx_watch_enabled (alert_enabled, updated_at)
+    KEY idx_watch_enabled (alert_enabled, updated_at),
+    KEY idx_watch_updated (updated_at, symbol)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS hot_ma_signal_alert (
     symbol VARCHAR(32) NOT NULL,
@@ -150,11 +204,15 @@ const TABLE_SQL = [
     last_seen_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     last_changed_at DATETIME(3) NULL,
     one_hour_alerted_at DATETIME(3) NULL,
+    one_hour_confirmed_at DATETIME(3) NULL,
+    next_one_hour_alert_at DATETIME(3) NULL,
+    one_hour_alert_count INT UNSIGNED NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol),
     KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
-    KEY idx_funding_last_changed (last_changed_at)
+    KEY idx_funding_last_changed (last_changed_at),
+    KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS signal_trigger_history (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -169,8 +227,10 @@ const TABLE_SQL = [
     PRIMARY KEY (id),
     UNIQUE KEY uk_trigger_event (event_key),
     KEY idx_trigger_time (trigger_time),
+    KEY idx_trigger_time_id (trigger_time, id),
     KEY idx_trigger_symbol_time (symbol, trigger_time),
-    KEY idx_trigger_type_time (trigger_type, trigger_time)
+    KEY idx_trigger_type_time (trigger_type, trigger_time),
+    KEY idx_trigger_type_time_id (trigger_type, trigger_time, id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS open_interest_monitor (
     symbol VARCHAR(32) NOT NULL,
@@ -187,7 +247,11 @@ const TABLE_SQL = [
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol),
     KEY idx_oi_observed (observed_at),
-    KEY idx_oi_5m (change_5m_pct, observed_at)
+    KEY idx_oi_5m (change_5m_pct, observed_at),
+    KEY idx_oi_15m (change_15m_pct, observed_at),
+    KEY idx_oi_1h (change_1h_pct, observed_at),
+    KEY idx_oi_4h (change_4h_pct, observed_at),
+    KEY idx_oi_1d (change_1d_pct, observed_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS hot_rank_snapshot (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -200,6 +264,7 @@ const TABLE_SQL = [
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uk_hot_snapshot (symbol, chain_label, snapshot_time),
+    KEY idx_hot_snapshot_time (snapshot_time),
     KEY idx_hot_snapshot_chain_time (chain_label, snapshot_time, rank_value),
     KEY idx_hot_snapshot_symbol_time (symbol, snapshot_time)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -225,6 +290,16 @@ const TABLE_SQL = [
 ];
 
 export async function ensureDatabase() {
+  if (pool) return;
+  if (!databaseInitPromise) {
+    databaseInitPromise = initializeDatabase().finally(() => {
+      databaseInitPromise = null;
+    });
+  }
+  await databaseInitPromise;
+}
+
+async function initializeDatabase() {
   const admin = await mysql.createConnection({
     host: config.mysql.host,
     port: config.mysql.port,
@@ -232,12 +307,15 @@ export async function ensureDatabase() {
     password: config.mysql.password,
     charset: "utf8mb4"
   });
-  await admin.query(
-    `CREATE DATABASE IF NOT EXISTS \`${config.mysql.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
-  );
-  await admin.end();
+  try {
+    await admin.query(
+      `CREATE DATABASE IF NOT EXISTS ${escapeIdentifier(config.mysql.database)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
+    );
+  } finally {
+    await admin.end();
+  }
 
-  pool = mysql.createPool({
+  const nextPool = mysql.createPool({
     host: config.mysql.host,
     port: config.mysql.port,
     user: config.mysql.user,
@@ -254,45 +332,50 @@ export async function ensureDatabase() {
     namedPlaceholders: true,
     charset: "utf8mb4"
   });
+  pool = nextPool;
 
-  const migrationConnection = await pool.getConnection();
-  const lockName = `${config.mysql.database}:schema_migration`;
   try {
-    const [lockRows] = await migrationConnection.query("SELECT GET_LOCK(?, 60) AS acquired", [lockName]);
-    if (Number(lockRows[0]?.acquired) !== 1) throw new Error("Timed out waiting for database schema lock");
-    for (const sql of TABLE_SQL) {
-      await migrationConnection.query(sql);
+    const migrationConnection = await pool.getConnection();
+    const lockName = `${config.mysql.database}:schema_migration`;
+    try {
+      const [lockRows] = await migrationConnection.query("SELECT GET_LOCK(?, 60) AS acquired", [lockName]);
+      if (Number(lockRows[0]?.acquired) !== 1) throw new Error("Timed out waiting for database schema lock");
+      for (const sql of TABLE_SQL) {
+        await migrationConnection.query(sql);
+      }
+      await ensureTokenListPolicyColumn();
+      await ensureTokenListActiveColumn();
+      await ensureTokenListInactiveSinceColumn();
+      await ensureWatchlistRealtimeColumns();
+      await ensureFundingRateColumns();
+      await ensureFundingAlertConfirmationColumns();
+      await ensureTokenUnlockStatusSchema();
+      await ensureTriggerHistorySchema();
+      await ensurePerformanceIndexes();
+      await deactivateExcludedTokens();
+    } finally {
+      await migrationConnection.query("SELECT RELEASE_LOCK(?)", [lockName]).catch(() => {});
+      migrationConnection.release();
     }
-    await ensureTokenListPolicyColumn();
-    await ensureTokenListActiveColumn();
-    await ensureTokenListInactiveSinceColumn();
-    await ensureWatchlistRealtimeColumns();
-    await ensureFundingRateColumns();
-    await ensureTokenUnlockStatusSchema();
-    await ensureTriggerHistorySchema();
-    await ensurePerformanceIndexes();
-    await deactivateExcludedTokens();
-  } finally {
-    await migrationConnection.query("SELECT RELEASE_LOCK(?)", [lockName]).catch(() => {});
-    migrationConnection.release();
+  } catch (error) {
+    pool = undefined;
+    await nextPool.end().catch(() => {});
+    throw error;
   }
 }
 
 async function ensureTokenListPolicyColumn() {
-  const [columns] = await pool.query("SHOW COLUMNS FROM token_list LIKE 'cache_policy_key'");
-  if (columns.length > 0) return;
+  if (await columnExists("token_list", "cache_policy_key")) return;
   await pool.query("ALTER TABLE token_list ADD COLUMN cache_policy_key VARCHAR(160) NULL AFTER cache_completed_at");
 }
 
 async function ensureTokenListActiveColumn() {
-  const [columns] = await pool.query("SHOW COLUMNS FROM token_list LIKE 'is_active'");
-  if (columns.length > 0) return;
+  if (await columnExists("token_list", "is_active")) return;
   await pool.query("ALTER TABLE token_list ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER is_alpha");
 }
 
 async function ensureTokenListInactiveSinceColumn() {
-  const [columns] = await pool.query("SHOW COLUMNS FROM token_list LIKE 'inactive_since'");
-  if (columns.length === 0) {
+  if (!(await columnExists("token_list", "inactive_since"))) {
     await pool.query("ALTER TABLE token_list ADD COLUMN inactive_since DATETIME(3) NULL AFTER is_active");
   }
   await pool.query(
@@ -301,79 +384,90 @@ async function ensureTokenListInactiveSinceColumn() {
 }
 
 async function ensureWatchlistRealtimeColumns() {
-  const [priceColumns] = await pool.query("SHOW COLUMNS FROM watchlist LIKE 'current_price'");
-  if (priceColumns.length === 0) {
+  if (!(await columnExists("watchlist", "current_price"))) {
     await pool.query("ALTER TABLE watchlist ADD COLUMN current_price DECIMAL(32,12) NULL AFTER alert_enabled");
   }
-  const [timeColumns] = await pool.query("SHOW COLUMNS FROM watchlist LIKE 'current_price_time'");
-  if (timeColumns.length === 0) {
+  if (!(await columnExists("watchlist", "current_price_time"))) {
     await pool.query("ALTER TABLE watchlist ADD COLUMN current_price_time DATETIME(3) NULL AFTER current_price");
   }
 }
 
 async function ensureFundingRateColumns() {
-  const [rateColumns] = await pool.query("SHOW COLUMNS FROM funding_interval_state LIKE 'current_funding_rate'");
-  if (rateColumns.length === 0) {
+  if (!(await columnExists("funding_interval_state", "current_funding_rate"))) {
     await pool.query(
       "ALTER TABLE funding_interval_state ADD COLUMN current_funding_rate DECIMAL(18,10) NULL AFTER adjusted_funding_rate_floor"
     );
   }
-  const [timeColumns] = await pool.query("SHOW COLUMNS FROM funding_interval_state LIKE 'next_funding_time'");
-  if (timeColumns.length === 0) {
+  if (!(await columnExists("funding_interval_state", "next_funding_time"))) {
     await pool.query(
       "ALTER TABLE funding_interval_state ADD COLUMN next_funding_time BIGINT UNSIGNED NULL AFTER current_funding_rate"
     );
   }
 }
 
+async function ensureFundingAlertConfirmationColumns() {
+  const columns = [
+    ["one_hour_confirmed_at", "ALTER TABLE funding_interval_state ADD COLUMN one_hour_confirmed_at DATETIME(3) NULL AFTER one_hour_alerted_at"],
+    ["next_one_hour_alert_at", "ALTER TABLE funding_interval_state ADD COLUMN next_one_hour_alert_at DATETIME(3) NULL AFTER one_hour_confirmed_at"],
+    ["one_hour_alert_count", "ALTER TABLE funding_interval_state ADD COLUMN one_hour_alert_count INT UNSIGNED NOT NULL DEFAULT 0 AFTER next_one_hour_alert_at"]
+  ];
+  for (const [column, sql] of columns) {
+    if (!(await columnExists("funding_interval_state", column))) await pool.query(sql);
+  }
+}
+
 async function ensureTokenUnlockStatusSchema() {
-  const [columns] = await pool.query("SHOW COLUMNS FROM token_unlock_cache LIKE 'status'");
-  const type = String(columns[0]?.Type ?? "");
+  const statusColumn = await getColumn("token_unlock_cache", "status");
+  if (!statusColumn) {
+    const afterSourceUrl = await columnExists("token_unlock_cache", "source_url") ? " AFTER source_url" : "";
+    await pool.query(
+      `ALTER TABLE token_unlock_cache ADD COLUMN status ENUM('available','none','undated','unconfigured','error') NOT NULL DEFAULT 'unconfigured'${afterSourceUrl}`
+    );
+  }
+  const type = String((statusColumn ?? await getColumn("token_unlock_cache", "status"))?.columnType ?? "");
   if (type && !type.includes("'undated'")) {
     await pool.query(
       "ALTER TABLE token_unlock_cache MODIFY status ENUM('available','none','undated','unconfigured','error') NOT NULL DEFAULT 'unconfigured'"
     );
   }
+  if (!(await columnExists("token_unlock_cache", "error_message"))) {
+    await pool.query("ALTER TABLE token_unlock_cache ADD COLUMN error_message VARCHAR(500) NULL AFTER status");
+  }
+  if (!(await columnExists("token_unlock_cache", "raw_payload"))) {
+    await pool.query("ALTER TABLE token_unlock_cache ADD COLUMN raw_payload JSON NULL AFTER error_message");
+  }
 }
 
 async function ensureTriggerHistorySchema() {
-  const [tables] = await pool.query("SHOW TABLES LIKE 'signal_trigger_history'");
-  if (tables.length === 0) return;
-  const [eventKeyColumns] = await pool.query("SHOW COLUMNS FROM signal_trigger_history LIKE 'event_key'");
-  if (eventKeyColumns.length === 0) {
+  if (!(await tableExists("signal_trigger_history"))) return;
+  if (!(await columnExists("signal_trigger_history", "event_key"))) {
     await pool.query("ALTER TABLE signal_trigger_history ADD COLUMN event_key VARCHAR(191) NULL AFTER id");
     await pool.query("UPDATE signal_trigger_history SET event_key=CONCAT('legacy:', id) WHERE event_key IS NULL");
     await pool.query("ALTER TABLE signal_trigger_history MODIFY event_key VARCHAR(191) NOT NULL");
   }
-  const [triggerTypeColumns] = await pool.query("SHOW COLUMNS FROM signal_trigger_history LIKE 'trigger_type'");
-  const triggerType = String(triggerTypeColumns[0]?.Type ?? "");
-  if (triggerType.includes("IO_SPIKE") && !triggerType.includes("OI_SPIKE")) {
-    await pool.query(
-      "ALTER TABLE signal_trigger_history MODIFY trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','IO_SPIKE','OI_SPIKE','COMPOSITE') NOT NULL"
-    );
+  const triggerType = String((await getColumn("signal_trigger_history", "trigger_type"))?.columnType ?? "");
+  if (triggerType.includes("IO_SPIKE")) {
+    if (!triggerType.includes("OI_SPIKE")) {
+      await pool.query(
+        "ALTER TABLE signal_trigger_history MODIFY trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','IO_SPIKE','OI_SPIKE','COMPOSITE') NOT NULL"
+      );
+    }
     await pool.query("UPDATE signal_trigger_history SET trigger_type='OI_SPIKE' WHERE trigger_type='IO_SPIKE'");
   }
-  if (triggerType && (!triggerType.includes("OI_SPIKE") || triggerType.includes("IO_SPIKE"))) {
+  const currentTriggerType = String((await getColumn("signal_trigger_history", "trigger_type"))?.columnType ?? "");
+  if (currentTriggerType && (!currentTriggerType.includes("OI_SPIKE") || currentTriggerType.includes("IO_SPIKE"))) {
     await pool.query(
       "ALTER TABLE signal_trigger_history MODIFY trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','OI_SPIKE','COMPOSITE') NOT NULL"
     );
   }
-  const [indexes] = await pool.query("SHOW INDEX FROM signal_trigger_history WHERE Key_name='uk_trigger_event'");
-  if (indexes.length === 0) {
+  if (!(await indexExists("signal_trigger_history", "uk_trigger_event"))) {
     await pool.query("ALTER TABLE signal_trigger_history ADD UNIQUE KEY uk_trigger_event (event_key)");
   }
 }
 
 async function ensureIndex(tableName, indexName, definition) {
-  const [rows] = await pool.query(
-    `SELECT 1
-     FROM information_schema.STATISTICS
-     WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=:tableName AND INDEX_NAME=:indexName
-     LIMIT 1`,
-    { tableName, indexName }
-  );
-  if (rows.length > 0) return;
-  await pool.query(`ALTER TABLE \`${tableName}\` ADD INDEX \`${indexName}\` ${definition}`);
+  if (await indexExists(tableName, indexName)) return;
+  await pool.query(`ALTER TABLE ${escapeIdentifier(tableName)} ADD INDEX ${escapeIdentifier(indexName)} ${definition}`);
 }
 
 async function ensurePerformanceIndexes() {
@@ -400,6 +494,7 @@ async function ensurePerformanceIndexes() {
   await ensureIndex("signal_trigger_history", "idx_trigger_time_id", "(trigger_time, id)");
   await ensureIndex("signal_trigger_history", "idx_trigger_type_time_id", "(trigger_type, trigger_time, id)");
   await ensureIndex("kline_cache", "idx_kline_symbol_interval_close", "(symbol, interval_code, close_time)");
+  await ensureIndex("hot_rank_snapshot", "idx_hot_snapshot_time", "(snapshot_time)");
 }
 
 const EXCLUDED_BASE_ASSETS = [
@@ -916,6 +1011,9 @@ export async function recordFundingIntervalSnapshot(items) {
       previous_funding_interval_hours=IF(funding_interval_hours <> VALUES(funding_interval_hours), funding_interval_hours, previous_funding_interval_hours),
       last_changed_at=IF(funding_interval_hours <> VALUES(funding_interval_hours), NOW(3), last_changed_at),
       one_hour_alerted_at=IF(VALUES(funding_interval_hours) <> 1 AND funding_interval_hours <> VALUES(funding_interval_hours), NULL, one_hour_alerted_at),
+      one_hour_confirmed_at=IF(funding_interval_hours <> VALUES(funding_interval_hours), NULL, one_hour_confirmed_at),
+      next_one_hour_alert_at=IF(funding_interval_hours <> VALUES(funding_interval_hours), NULL, next_one_hour_alert_at),
+      one_hour_alert_count=IF(funding_interval_hours <> VALUES(funding_interval_hours), 0, one_hour_alert_count),
       funding_interval_hours=VALUES(funding_interval_hours),
       adjusted_funding_rate_cap=VALUES(adjusted_funding_rate_cap),
       adjusted_funding_rate_floor=VALUES(adjusted_funding_rate_floor),
@@ -943,6 +1041,9 @@ export async function markFundingIntervalsMissingFromSnapshot(symbols, defaultIn
      SET previous_funding_interval_hours=IF(funding_interval_hours <> :defaultIntervalHours, funding_interval_hours, previous_funding_interval_hours),
          last_changed_at=IF(funding_interval_hours <> :defaultIntervalHours, NOW(3), last_changed_at),
          one_hour_alerted_at=IF(funding_interval_hours = 1 AND :defaultIntervalHours <> 1, NULL, one_hour_alerted_at),
+         one_hour_confirmed_at=IF(funding_interval_hours <> :defaultIntervalHours, NULL, one_hour_confirmed_at),
+         next_one_hour_alert_at=IF(funding_interval_hours <> :defaultIntervalHours, NULL, next_one_hour_alert_at),
+         one_hour_alert_count=IF(funding_interval_hours <> :defaultIntervalHours, 0, one_hour_alert_count),
          funding_interval_hours=:defaultIntervalHours,
          source_present=0
      WHERE ${whereSql}`,
@@ -966,11 +1067,20 @@ export async function listPendingFundingIntervalAlerts(targetIntervalHours = 1, 
       source_present AS sourcePresent,
       first_seen_at AS firstSeenAt,
       last_seen_at AS lastSeenAt,
-      last_changed_at AS lastChangedAt
+      last_changed_at AS lastChangedAt,
+      one_hour_alerted_at AS oneHourAlertedAt,
+      one_hour_confirmed_at AS oneHourConfirmedAt,
+      next_one_hour_alert_at AS nextOneHourAlertAt,
+      one_hour_alert_count AS oneHourAlertCount
      FROM funding_interval_state
      WHERE funding_interval_hours=:targetIntervalHours
        AND source_present=1
-       AND one_hour_alerted_at IS NULL
+       AND one_hour_confirmed_at IS NULL
+       AND (
+         one_hour_alerted_at IS NULL
+         OR next_one_hour_alert_at IS NULL
+         OR next_one_hour_alert_at <= NOW(3)
+       )
      ORDER BY COALESCE(last_changed_at, first_seen_at) ASC, symbol ASC
      LIMIT :limit`,
     { targetIntervalHours: safeTarget, limit: safeLimit }
@@ -996,16 +1106,40 @@ export async function listPendingFundingIntervalAlerts(targetIntervalHours = 1, 
         : Number(row.currentFundingRate),
     nextFundingTime: row.nextFundingTime === null || row.nextFundingTime === undefined ? null : Number(row.nextFundingTime),
     disclaimer: Boolean(row.disclaimer),
-    sourcePresent: Boolean(row.sourcePresent)
+    sourcePresent: Boolean(row.sourcePresent),
+    oneHourAlertedAt: row.oneHourAlertedAt ?? null,
+    oneHourConfirmedAt: row.oneHourConfirmedAt ?? null,
+    nextOneHourAlertAt: row.nextOneHourAlertAt ?? null,
+    oneHourAlertCount: Number(row.oneHourAlertCount ?? 0)
   }));
 }
 
-export async function markFundingIntervalAlertSent(symbols) {
-  const safeSymbols = (symbols ?? []).map(sanitizeDbSymbol).filter(Boolean);
+export async function markFundingIntervalAlertSent(symbols, repeatAfterMs = 5 * 60 * 1000) {
+  const safeSymbols = (Array.isArray(symbols) ? symbols : [symbols]).map(sanitizeDbSymbol).filter(Boolean);
+  if (!safeSymbols.length) return 0;
+  const repeatSeconds = Math.max(60, Math.floor((Number(repeatAfterMs) || 5 * 60 * 1000) / 1000));
+  const [result] = await getPool().query(
+    `UPDATE funding_interval_state
+     SET one_hour_alerted_at=NOW(3),
+         next_one_hour_alert_at=DATE_ADD(NOW(3), INTERVAL :repeatSeconds SECOND),
+         one_hour_alert_count=one_hour_alert_count+1
+     WHERE symbol IN (:symbols)`,
+    { symbols: safeSymbols, repeatSeconds }
+  );
+  return result.affectedRows ?? 0;
+}
+
+export async function markFundingIntervalAlertConfirmed(symbols) {
+  const safeSymbols = (Array.isArray(symbols) ? symbols : [symbols]).map(sanitizeDbSymbol).filter(Boolean);
   if (!safeSymbols.length) return 0;
   const [result] = await getPool().query(
-    "UPDATE funding_interval_state SET one_hour_alerted_at=NOW(3) WHERE symbol IN (?)",
-    [safeSymbols]
+    `UPDATE funding_interval_state
+     SET one_hour_confirmed_at=NOW(3),
+         next_one_hour_alert_at=NULL
+     WHERE symbol IN (:symbols)
+       AND funding_interval_hours=1
+       AND source_present=1`,
+    { symbols: safeSymbols }
   );
   return result.affectedRows ?? 0;
 }
@@ -1386,6 +1520,94 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
   }));
 }
 
+export async function listOpenInterestMonitorPage({
+  timeWindow = "5m",
+  sort = "desc",
+  page = 1,
+  pageSize = 20
+} = {}) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const safePageSize = Math.max(1, Math.min(100, Number(pageSize) || 20));
+  const column = oiChangeColumn(timeWindow);
+  const direction = sort === "asc" ? "ASC" : "DESC";
+  const [countRows] = await getPool().query(
+    `SELECT COUNT(*) AS total
+     FROM open_interest_monitor oi
+     JOIN token_list t ON t.symbol=oi.symbol AND t.is_active=1
+     WHERE oi.${column} IS NOT NULL`
+  );
+  const total = Number(countRows[0]?.total ?? 0);
+  const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+  const effectivePage = Math.min(safePage, totalPages);
+  const params = {
+    activeSeconds: hotRankActiveSeconds(),
+    pageSize: safePageSize,
+    offset: (effectivePage - 1) * safePageSize
+  };
+  const [rows] = await getPool().query(
+    `SELECT oi.symbol,
+      oi.current_open_interest AS currentOpenInterest,
+      oi.current_open_interest_value AS currentOpenInterestValue,
+      oi.${column} AS changePercent,
+      oi.change_5m_pct AS change5mPct,
+      oi.change_15m_pct AS change15mPct,
+      oi.change_1h_pct AS change1hPct,
+      oi.change_4h_pct AS change4hPct,
+      oi.change_1d_pct AS change1dPct,
+      oi.observed_at AS observedAt,
+      oi.last_spike_alert_at AS lastSpikeAlertAt,
+      EXISTS(
+        SELECT 1 FROM hot_rank_seen h
+        WHERE ${hotRankTokenMatchSql("h", "t")}
+          AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
+      ) AS hotRankHit,
+      EXISTS(
+        SELECT 1 FROM funding_interval_state f
+        WHERE f.symbol=oi.symbol
+          AND f.funding_interval_hours=1
+          AND f.source_present=1
+      ) AS fundingOneHour,
+      (
+        SELECT COUNT(DISTINCT s.interval_code)
+        FROM signal_result s
+        WHERE s.symbol=oi.symbol AND s.alert_level IN ('LEVEL1','LEVEL2')
+      ) AS multiCycleCount,
+      (
+        SELECT GROUP_CONCAT(s.interval_code ORDER BY FIELD(s.interval_code, '15m','1h','4h','1d') SEPARATOR ',')
+        FROM signal_result s
+        WHERE s.symbol=oi.symbol AND s.alert_level IN ('LEVEL1','LEVEL2')
+      ) AS signalIntervals
+     FROM open_interest_monitor oi
+     JOIN token_list t ON t.symbol=oi.symbol AND t.is_active=1
+     WHERE oi.${column} IS NOT NULL
+     ORDER BY oi.${column} ${direction}, oi.observed_at DESC, oi.symbol
+     LIMIT :pageSize OFFSET :offset`,
+    params
+  );
+  return {
+    data: rows.map((row) => ({
+      ...row,
+      currentOpenInterest: row.currentOpenInterest === null ? null : Number(row.currentOpenInterest),
+      currentOpenInterestValue: row.currentOpenInterestValue === null ? null : Number(row.currentOpenInterestValue),
+      changePercent: row.changePercent === null ? null : Number(row.changePercent),
+      change5mPct: row.change5mPct === null ? null : Number(row.change5mPct),
+      change15mPct: row.change15mPct === null ? null : Number(row.change15mPct),
+      change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
+      change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
+      change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
+      hotRankHit: Boolean(row.hotRankHit),
+      fundingOneHour: Boolean(row.fundingOneHour),
+      multiCycleCount: Number(row.multiCycleCount ?? 0),
+      signalIntervals: String(row.signalIntervals ?? "")
+        .split(",")
+        .filter(Boolean)
+    })),
+    total,
+    page: effectivePage,
+    pageSize: safePageSize
+  };
+}
+
 export async function getOpenInterestMonitorItem(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return null;
@@ -1675,6 +1897,24 @@ function hotRankTokenMatchSql(hotAlias, tokenAlias) {
   )`;
 }
 
+function hotRankHitSql(tokenAlias, activeSecondsParam = "hotRankActiveSeconds") {
+  return `EXISTS(
+    SELECT 1
+    FROM hot_rank_seen h
+    WHERE ${hotRankTokenMatchSql("h", tokenAlias)}
+      AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :${activeSecondsParam} SECOND)
+  )`;
+}
+
+function hotRankValueSql(tokenAlias, expression, activeSecondsParam = "hotRankActiveSeconds") {
+  return `(
+    SELECT ${expression}
+    FROM hot_rank_seen h
+    WHERE ${hotRankTokenMatchSql("h", tokenAlias)}
+      AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :${activeSecondsParam} SECOND)
+  )`;
+}
+
 function hotRankSignalMatchSql(hotAlias, signalAlias) {
   const baseAsset = `REPLACE(${signalAlias}.symbol, 'USDT', '')`;
   return `(
@@ -1719,9 +1959,6 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
           GROUP BY s2.symbol
         ) mp ON mp.symbol=s.symbol`
       : "LEFT JOIN (SELECT NULL AS symbol, 0 AS multiMatchCount, 3 AS multiBestLevelRank, 0 AS multiBestWeight, NULL AS multiLatestUpdatedAt) mp ON mp.symbol=s.symbol";
-  const hotJoinSql = `LEFT JOIN hot_rank_seen h
-    ON ${hotRankTokenMatchSql("h", "t")}
-   AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)`;
 
   const whereSql = `s.category_type IN (${quotedList(safeCategories)})
     AND s.alert_level IN (${quotedList(safeLevels)})
@@ -1732,11 +1969,7 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
     `SELECT COUNT(*) AS total
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
-     ${multiJoinSql}
-     ${hotJoinSql}
      WHERE ${whereSql}`
-    ,
-    { multiRequired, hotRankActiveSeconds: hotRankActiveSeconds() }
   );
 
   const [rows] = await getPool().query(
@@ -1746,15 +1979,14 @@ export async function getSignalsPage({ categories, levels, intervals, page = 1, 
       s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt,
       COALESCE(mp.multiMatchCount, 0) AS multiMatchCount,
       :multiRequired AS multiMatchRequired,
-      IF(h.symbol IS NULL, 0, 1) AS hotRankHit,
-      h.last_seen_rank AS hotRank
+      IF(${hotRankHitSql("t")}, 1, 0) AS hotRankHit,
+      ${hotRankValueSql("t", "MIN(h.last_seen_rank)")} AS hotRank
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
      ${multiJoinSql}
-     ${hotJoinSql}
      WHERE ${whereSql}
      ORDER BY
-      IF(h.symbol IS NOT NULL AND s.alert_level IN ('LEVEL1','LEVEL2'), 0, 1),
+      IF(hotRankHit=1 AND s.alert_level IN ('LEVEL1','LEVEL2'), 0, 1),
       IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiBestLevelRank, 3), CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 WHEN 'NONE' THEN 2 ELSE 3 END),
       IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, 0, 1),
       IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiMatchCount, 0), 0) DESC,
@@ -1791,14 +2023,21 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     AND s.alert_level IN (${quotedList(safeLevels)})
     AND s.interval_code IN (${quotedList(safeIntervals)})
     AND t.is_active=1`;
-  const multiJoinSql = `LEFT JOIN (
-    SELECT symbol,
-      COUNT(DISTINCT interval_code) AS multiMatchCount,
-      MIN(CASE alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 ELSE 2 END) AS bestAlertRank
-    FROM signal_result
-    WHERE alert_level IN ('LEVEL1','LEVEL2')
-    GROUP BY symbol
-  ) mp ON mp.symbol=s.symbol`;
+  const alarmLevels = safeLevels.filter((level) => ["LEVEL1", "LEVEL2"].includes(level));
+  const multiJoinSql = alarmLevels.length
+    ? `LEFT JOIN (
+      SELECT s2.symbol,
+        COUNT(DISTINCT s2.interval_code) AS multiMatchCount,
+        MIN(CASE s2.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 ELSE 2 END) AS bestAlertRank
+      FROM signal_result s2
+      JOIN token_list t2 ON t2.id=s2.token_id
+      WHERE s2.category_type IN (${quotedList(safeCategories)})
+        AND s2.alert_level IN (${quotedList(alarmLevels)})
+        AND s2.interval_code IN (${quotedList(safeIntervals)})
+        AND t2.is_active=1
+      GROUP BY s2.symbol
+    ) mp ON mp.symbol=s.symbol`
+    : "LEFT JOIN (SELECT NULL AS symbol, 0 AS multiMatchCount, 2 AS bestAlertRank) mp ON mp.symbol=s.symbol";
   const fundingBitSql =
     "IF(EXISTS(SELECT 1 FROM funding_interval_state f WHERE f.symbol=s.symbol AND f.funding_interval_hours=1 AND f.source_present=1), 8, 0)";
   const oiBitSql =
@@ -1884,15 +2123,19 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
      JOIN token_list t ON t.id=s.token_id
      WHERE s.symbol IN (${quotedList(symbols)})
        AND t.is_active=1
+       AND s.category_type IN (${quotedList(safeCategories)})
+       AND s.alert_level IN (${quotedList(safeLevels)})
+       AND s.interval_code IN (${quotedList(safeIntervals)})
      ORDER BY FIELD(s.interval_code, '15m', '1h', '4h', '1d')`
   );
   const [hotRows] = await getPool().query(
-    `SELECT DISTINCT t.symbol, h.last_seen_rank AS hotRank
+    `SELECT t.symbol, MIN(h.last_seen_rank) AS hotRank
      FROM hot_rank_seen h
      JOIN token_list t ON ${hotRankTokenMatchSql("h", "t")}
      WHERE t.symbol IN (${quotedList(symbols)})
        AND t.is_active=1
-       AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)`,
+       AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
+     GROUP BY t.symbol`,
     { activeSeconds: hotRankActiveSeconds() }
   );
   const [oiRows] = await getPool().query(
@@ -1922,9 +2165,7 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
   const symbolOrder = new Map(symbols.map((symbol, index) => [symbol, index]));
   const signals = symbols.map((symbol) => {
     const details = rowsBySymbol.get(symbol) ?? [];
-    const matchingDetails = details.filter(
-      (row) => safeLevels.includes(row.alertLevel) && safeIntervals.includes(row.intervalCode)
-    );
+    const matchingDetails = details;
     const representative =
       matchingDetails.find((row) => row.alertLevel === "LEVEL1") ??
       matchingDetails.find((row) => row.alertLevel === "LEVEL2") ??
@@ -2079,7 +2320,7 @@ export async function getHotMaSignalsPage({ categories = "A,B", levels = "LEVEL1
     AND s.alert_level IN (${quotedList(safeLevels)})
     AND s.interval_code IN (${quotedList(safeIntervals)})
     AND t.is_active=1
-    AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)`;
+    AND ${hotRankHitSql("t")}`;
 
   const params = {
     hotRankActiveSeconds: hotRankActiveSeconds(),
@@ -2090,7 +2331,6 @@ export async function getHotMaSignalsPage({ categories = "A,B", levels = "LEVEL1
     `SELECT COUNT(*) AS total
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
-     JOIN hot_rank_seen h ON ${hotRankTokenMatchSql("h", "t")}
      WHERE ${whereSql}`,
     params
   );
@@ -2099,14 +2339,14 @@ export async function getHotMaSignalsPage({ categories = "A,B", levels = "LEVEL1
       s.interval_code AS intervalCode, s.alert_level AS alertLevel, s.ma100, s.ma200,
       s.current_price AS currentPrice, s.proximity_pct AS proximityPct, s.signal_weight AS signalWeight,
       s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt,
-      h.last_seen_rank AS hotRank, h.last_seen_at AS hotRankLastSeenAt
+      ${hotRankValueSql("t", "MIN(h.last_seen_rank)")} AS hotRank,
+      ${hotRankValueSql("t", "MAX(h.last_seen_at)")} AS hotRankLastSeenAt
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
-     JOIN hot_rank_seen h ON ${hotRankTokenMatchSql("h", "t")}
      WHERE ${whereSql}
      ORDER BY
       CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 ELSE 2 END,
-      h.last_seen_rank ASC,
+      hotRank ASC,
       s.signal_weight DESC,
       s.updated_at DESC
      LIMIT :pageSize OFFSET :offset`,
@@ -2282,18 +2522,82 @@ function baseAssetFromSymbol(symbol) {
   return sanitizeDbSymbol(symbol).replace(/USDT$/, "");
 }
 
+export function normalizeWatchlistAlertPrice(value, fieldName) {
+  if (value === "" || value === null || value === undefined) return null;
+  const price = Number(value);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`${fieldName} must be a positive number`);
+  }
+  return price;
+}
+
+export function normalizeWatchlistPayload({ symbol, note = "", alertAbove = null, alertBelow = null, alertEnabled = true } = {}) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  if (!safeSymbol) throw new Error("symbol is required");
+  const above = normalizeWatchlistAlertPrice(alertAbove, "alertAbove");
+  const below = normalizeWatchlistAlertPrice(alertBelow, "alertBelow");
+  if (above !== null && below !== null && above <= below) {
+    throw new Error("alertAbove must be greater than alertBelow");
+  }
+  const enabled = alertEnabled === false || alertEnabled === "false" || alertEnabled === 0 || alertEnabled === "0" ? 0 : 1;
+  return {
+    symbol: safeSymbol,
+    baseAsset: baseAssetFromSymbol(safeSymbol),
+    note: String(note ?? "").slice(0, 255),
+    alertAbove: above,
+    alertBelow: below,
+    alertEnabled: enabled
+  };
+}
+
+function normalizeHotRankToken(token) {
+  const symbol = sanitizeDbSymbol(token?.symbol);
+  const baseAsset = baseAssetFromSymbol(symbol);
+  if (!symbol || !baseAsset) return null;
+  const rank = Math.max(1, Number(token?.rank) || 0);
+  const heat = Number(token?.heat);
+  return {
+    symbol,
+    baseAsset,
+    chainLabel: String(token?.chainLabel ?? "").slice(0, 32),
+    rank,
+    heat: Number.isFinite(heat) ? heat : null
+  };
+}
+
+function preferHotRankToken(current, candidate) {
+  if (!current) return candidate;
+  if (candidate.rank !== current.rank) return candidate.rank < current.rank ? candidate : current;
+  if ((candidate.heat ?? -Infinity) !== (current.heat ?? -Infinity)) {
+    return (candidate.heat ?? -Infinity) > (current.heat ?? -Infinity) ? candidate : current;
+  }
+  return candidate.chainLabel.localeCompare(current.chainLabel) < 0 ? candidate : current;
+}
+
+export function normalizeHotRankSeenTokens(tokens) {
+  const bySymbol = new Map();
+  for (const token of tokens ?? []) {
+    const normalized = normalizeHotRankToken(token);
+    if (!normalized) continue;
+    bySymbol.set(normalized.symbol, preferHotRankToken(bySymbol.get(normalized.symbol), normalized));
+  }
+  return Array.from(bySymbol.values()).sort((a, b) => a.rank - b.rank || a.symbol.localeCompare(b.symbol));
+}
+
+function normalizeHotRankSnapshotTokens(tokens) {
+  const byKey = new Map();
+  for (const token of tokens ?? []) {
+    const normalized = normalizeHotRankToken(token);
+    if (!normalized) continue;
+    const key = `${normalized.symbol}\0${normalized.chainLabel}`;
+    byKey.set(key, preferHotRankToken(byKey.get(key), normalized));
+  }
+  return Array.from(byKey.values()).sort((a, b) => a.rank - b.rank || a.symbol.localeCompare(b.symbol));
+}
+
 export async function recordHotRankSnapshot(tokens) {
-  const tokenBySymbol = new Map(
-    (tokens ?? []).map((token) => [sanitizeDbSymbol(token.symbol), token])
-  );
-  const normalized = (tokens ?? [])
-    .map((token) => ({
-      symbol: sanitizeDbSymbol(token.symbol),
-      baseAsset: baseAssetFromSymbol(token.symbol),
-      chainLabel: String(token.chainLabel ?? "").slice(0, 32),
-      rank: Math.max(1, Number(token.rank) || 0)
-    }))
-    .filter((token) => token.symbol && token.baseAsset);
+  const normalized = normalizeHotRankSeenTokens(tokens);
+  const snapshotTokens = normalizeHotRankSnapshotTokens(tokens);
   if (!normalized.length) return [];
 
   const [existingRows] = await getPool().query("SELECT symbol FROM hot_rank_seen WHERE symbol IN (?)", [
@@ -2304,14 +2608,12 @@ export async function recordHotRankSnapshot(tokens) {
 
   const rows = normalized.map((token) => [token.symbol, token.baseAsset, token.chainLabel, token.rank, token.rank]);
   const snapshotTime = new Date(Math.floor(Date.now() / (5 * 60 * 1000)) * 5 * 60 * 1000);
-  const snapshotRows = normalized.map((token) => [
+  const snapshotRows = snapshotTokens.map((token) => [
     token.symbol,
     token.baseAsset,
     token.chainLabel,
     token.rank,
-    Number.isFinite(Number(tokenBySymbol.get(token.symbol)?.heat))
-      ? Number(tokenBySymbol.get(token.symbol)?.heat)
-      : null,
+    token.heat,
     snapshotTime
   ]);
   await Promise.all([
@@ -2412,6 +2714,67 @@ export async function listWatchlistTokens() {
   return rows;
 }
 
+export async function listRealtimeKlineTokens() {
+  const [rows] = await getPool().query(
+    `SELECT DISTINCT t.*
+     FROM token_list t
+     WHERE t.is_active=1
+       AND (
+         EXISTS(SELECT 1 FROM watchlist w WHERE w.symbol=t.symbol)
+         OR EXISTS(
+           SELECT 1 FROM funding_interval_state f
+           WHERE f.symbol=t.symbol
+             AND f.funding_interval_hours=1
+             AND f.source_present=1
+             AND f.one_hour_confirmed_at IS NULL
+         )
+         OR EXISTS(
+           SELECT 1
+           FROM signal_result s
+           LEFT JOIN (
+             SELECT symbol, COUNT(DISTINCT interval_code) AS multiMatchCount
+             FROM signal_result
+             WHERE alert_level IN ('LEVEL1','LEVEL2')
+             GROUP BY symbol
+           ) mp ON mp.symbol=s.symbol
+           WHERE s.symbol=t.symbol
+             AND s.alert_level IN ('LEVEL1','LEVEL2')
+             AND (
+               COALESCE(mp.multiMatchCount, 0) >= 3
+               OR EXISTS(
+                 SELECT 1 FROM funding_interval_state f
+                 WHERE f.symbol=s.symbol
+                   AND f.funding_interval_hours=1
+                   AND f.source_present=1
+               )
+               OR EXISTS(
+                 SELECT 1 FROM open_interest_monitor oi
+                 WHERE oi.symbol=s.symbol
+                   AND oi.observed_at >= DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND)
+                   AND (
+                     oi.change_5m_pct >= :oiSpike5mPct
+                     OR oi.change_1h_pct >= :oiSpike1hPct
+                   )
+               )
+               OR EXISTS(
+                 SELECT 1 FROM hot_rank_seen h
+                 WHERE ${hotRankTokenMatchSql("h", "t")}
+                   AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)
+               )
+             )
+         )
+       )
+     ORDER BY t.symbol`,
+    {
+      oiActiveSeconds: openInterestActiveSeconds(),
+      oiSpike5mPct: config.openInterestMonitor.spike5mPct,
+      oiSpike1hPct: config.openInterestMonitor.spike1hPct,
+      hotRankActiveSeconds: hotRankActiveSeconds()
+    }
+  );
+  return rows;
+}
+
 export async function listWatchlistUnlockTargets({ expiredOnly = false } = {}) {
   const [rows] = await getPool().query(
     `SELECT w.symbol, w.base_asset AS baseAsset
@@ -2499,12 +2862,7 @@ export async function upsertTokenUnlockCache(item) {
 }
 
 export async function upsertWatchlistItem({ symbol, note = "", alertAbove = null, alertBelow = null, alertEnabled = true }) {
-  const safeSymbol = sanitizeDbSymbol(symbol);
-  if (!safeSymbol) throw new Error("symbol is required");
-  const baseAsset = baseAssetFromSymbol(safeSymbol);
-  const above = alertAbove === "" || alertAbove === null || alertAbove === undefined ? null : Number(alertAbove);
-  const below = alertBelow === "" || alertBelow === null || alertBelow === undefined ? null : Number(alertBelow);
-  const enabled = alertEnabled === false || alertEnabled === "false" || alertEnabled === 0 || alertEnabled === "0" ? 0 : 1;
+  const normalized = normalizeWatchlistPayload({ symbol, note, alertAbove, alertBelow, alertEnabled });
   await getPool().query(
     `INSERT INTO watchlist (symbol, base_asset, note, alert_above, alert_below, alert_enabled)
      VALUES (:symbol, :baseAsset, :note, :alertAbove, :alertBelow, :alertEnabled)
@@ -2515,12 +2873,12 @@ export async function upsertWatchlistItem({ symbol, note = "", alertAbove = null
       alert_enabled=VALUES(alert_enabled),
       updated_at=NOW()`,
     {
-      symbol: safeSymbol,
-      baseAsset,
-      note: String(note ?? "").slice(0, 255),
-      alertAbove: Number.isFinite(above) ? above : null,
-      alertBelow: Number.isFinite(below) ? below : null,
-      alertEnabled: enabled
+      symbol: normalized.symbol,
+      baseAsset: normalized.baseAsset,
+      note: normalized.note,
+      alertAbove: normalized.alertAbove,
+      alertBelow: normalized.alertBelow,
+      alertEnabled: normalized.alertEnabled
     }
   );
   return listWatchlist();
