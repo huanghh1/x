@@ -281,7 +281,6 @@ h1 {
 }
 
 .pool-switch,
-.notice,
 .stat-strip,
 .section {
   border: 1px solid var(--color-line);
@@ -354,14 +353,6 @@ h1 {
   color: var(--color-accent);
   background: var(--color-accent-soft);
   font-size: 12px;
-}
-
-.notice {
-  margin-top: var(--space-4);
-  padding: var(--space-5) var(--space-6);
-  color: var(--color-muted);
-  font-size: 16px;
-  line-height: 1.7;
 }
 
 .stat-strip {
@@ -1711,7 +1702,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   overflow-wrap: anywhere;
 }
 .lead { max-width: 680px; margin: 0; color: var(--ink-muted); font-size: clamp(16px, 2vw, 20px); line-height: 1.65; }
-.pool-switch, .section, .stat-strip, .notice {
+.pool-switch, .section, .stat-strip {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--surface-panel);
@@ -1725,7 +1716,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .pool-item:last-child { border-right: 0; }
 .pool-item span { display: block; margin-bottom: 8px; color: var(--ink-muted); font-size: 12px; }
 .pool-item b { color: var(--ink-strong); font-family: var(--font-mono); font-size: 22px; }
-.notice { padding: 14px 18px; color: var(--ink-muted); box-shadow: none; }
 .stat-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; }
 .stat-strip article { padding: var(--space-5); border-right: 1px solid var(--line); }
 .stat-strip article:last-child { border-right: 0; }
@@ -2013,7 +2003,6 @@ body {
 .pool-switch,
 .section,
 .stat-strip,
-.notice,
 .table-card,
 .chart-shell {
   border-color: var(--line);
@@ -2146,13 +2135,17 @@ table,
   align-items: flex-start;
   gap: 4px;
   flex-direction: column;
+  min-width: 0;
+  max-width: 360px;
 }
 
 .signal-oi-change {
   color: #2878ad;
   font-family: var(--font-mono);
   font-size: 10px;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 .level1,
@@ -2210,6 +2203,10 @@ main,
   border-color: var(--profile-border, #f3b5cf);
   color: var(--profile-text, #7a2148);
   background: var(--profile-bg, #fff0f6);
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 .signal-profile.has-funding,

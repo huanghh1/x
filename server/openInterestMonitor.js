@@ -3,7 +3,7 @@ import { config } from "./config.js";
 import {
   getOpenInterestMonitorItem,
   getSignalCorrelationContext,
-  listActiveTokenSymbols,
+  listOpenInterestScanTokens,
   markOpenInterestSpikeAlertSent,
   recordTriggerHistory,
   upsertOpenInterestSnapshot
@@ -22,6 +22,7 @@ const HISTORY_PERIOD_MS = 5 * 60 * 1000;
 
 let timer = null;
 const retryQueue = new Set();
+const alertQueue = new Set();
 
 const monitorState = {
   running: false,
@@ -40,7 +41,8 @@ const monitorState = {
   errors: [],
   failedSymbols: [],
   retryPendingCount: 0,
-  lastRetryMode: false
+  lastRetryMode: false,
+  alertPendingCount: 0
 };
 
 function percentChange(current, previous) {
@@ -127,13 +129,33 @@ async function scanToken(token) {
   if (Date.now() - lastAlertAt < config.openInterestMonitor.alertCooldownMs) {
     return { updated: true, spike: true, alerted: false };
   }
-  let result = await sendOpenInterestSpikeTelegram(snapshot, context);
-  if (result.skipped) {
-    result = await sendStandaloneOpenInterestSpikeTelegram(snapshot);
-  }
-  if (result.skipped) return { updated: true, spike: true, alerted: false };
-  await markOpenInterestSpikeAlertSent(token.symbol);
-  return { updated: true, spike: true, alerted: true };
+  if (alertQueue.has(token.symbol)) return { updated: true, spike: true, alerted: false, alertQueued: true };
+  queueOpenInterestAlert(snapshot, context);
+  return { updated: true, spike: true, alerted: true, alertQueued: true };
+}
+
+function queueOpenInterestAlert(snapshot, context) {
+  alertQueue.add(snapshot.symbol);
+  monitorState.alertPendingCount = alertQueue.size;
+  void (async () => {
+    try {
+      let result = await sendOpenInterestSpikeTelegram(snapshot, context);
+      if (result.skipped) {
+        result = await sendStandaloneOpenInterestSpikeTelegram(snapshot);
+      }
+      if (!result.skipped) {
+        await markOpenInterestSpikeAlertSent(snapshot.symbol);
+      }
+    } catch (error) {
+      const message = `${snapshot.symbol}: Telegram OI alert failed: ${error instanceof Error ? error.message : String(error)}`;
+      monitorState.errors = [message, ...monitorState.errors].slice(0, 30);
+      monitorState.lastError = message;
+      console.error(message);
+    } finally {
+      alertQueue.delete(snapshot.symbol);
+      monitorState.alertPendingCount = alertQueue.size;
+    }
+  })();
 }
 
 function scheduleNext(delayMs) {
@@ -186,6 +208,7 @@ function selectScanBatch(tokens) {
   }
   const limit = Math.min(tokens.length, config.openInterestMonitor.requestLimitPerWindow);
   const tokenBySymbol = new Map(tokens.map((token) => [token.symbol, token]));
+  const retryLimit = Math.max(1, Math.min(limit, Math.ceil(limit / 2)));
   const retryBatch = [];
   for (const symbol of retryQueue) {
     const token = tokenBySymbol.get(symbol);
@@ -195,9 +218,9 @@ function selectScanBatch(tokens) {
     }
     retryBatch.push(token);
     retryQueue.delete(symbol);
-    if (retryBatch.length >= limit) break;
+    if (retryBatch.length >= retryLimit) break;
   }
-  if (retryBatch.length) {
+  if (retryBatch.length >= limit) {
     return {
       batch: retryBatch,
       startOffset: 0,
@@ -205,18 +228,26 @@ function selectScanBatch(tokens) {
       retryMode: true
     };
   }
+  const retrySymbols = new Set(retryBatch.map((token) => token.symbol));
   if (tokens.length <= limit) {
     monitorState.scanCursor = 0;
-    return { batch: tokens, startOffset: 0, deferredCount: 0, retryMode: false };
+    const batch = [...retryBatch, ...tokens.filter((token) => !retrySymbols.has(token.symbol))].slice(0, limit);
+    return { batch, startOffset: 0, deferredCount: Math.max(0, tokens.length - batch.length), retryMode: retryBatch.length > 0 };
   }
-  const startOffset = monitorState.scanCursor % tokens.length;
-  const batch = Array.from({ length: limit }, (_, index) => tokens[(startOffset + index) % tokens.length]);
-  monitorState.scanCursor = (startOffset + limit) % tokens.length;
+  const normalLimit = limit - retryBatch.length;
+  const normalBatch = [];
+  for (const token of tokens) {
+    if (!retrySymbols.has(token.symbol)) normalBatch.push(token);
+    if (normalBatch.length >= normalLimit) break;
+  }
+  const batch = [...retryBatch, ...normalBatch];
+  const startOffset = 0;
+  monitorState.scanCursor = (monitorState.scanCursor + normalLimit) % tokens.length;
   return {
     batch,
     startOffset,
     deferredCount: tokens.length - batch.length,
-    retryMode: false
+    retryMode: retryBatch.length > 0
   };
 }
 
@@ -234,9 +265,10 @@ export async function runOpenInterestCheck({ force = false } = {}) {
   monitorState.failedSymbols = [];
   monitorState.retryPendingCount = retryQueue.size;
   monitorState.lastRetryMode = false;
+  monitorState.alertPendingCount = alertQueue.size;
 
   try {
-    const tokens = await listActiveTokenSymbols();
+    const tokens = await listOpenInterestScanTokens();
     const { batch: scanTokens, startOffset, deferredCount, retryMode } = selectScanBatch(tokens);
     let cursor = 0;
     let updatedCount = 0;
@@ -282,6 +314,7 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     monitorState.failedSymbols = failedSymbols.slice(0, 100);
     monitorState.retryPendingCount = retryQueue.size;
     monitorState.lastRetryMode = Boolean(retryMode);
+    monitorState.alertPendingCount = alertQueue.size;
     return {
       ok: true,
       totalTokenCount: tokens.length,

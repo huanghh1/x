@@ -38,9 +38,7 @@
     <div class="shell">
       <header class="site-header">
         <section id="top" class="hero">
-          <p class="eyebrow">◇ 公开研究，不构成投资建议</p>
           <h1>币安二级信号监控台</h1>
-          <p class="lead">均线、热度、资金费率和 OI 组合信号集中观察。只记录可核验数据，不替任何人下判断。</p>
         </section>
 
         <div class="pool-switch" aria-label="signal pool navigation">
@@ -56,8 +54,6 @@
             <div class="pool-item"><span>数据库状态</span><b id="dbBadge">检查中</b></div>
           </nav>
         </div>
-
-        <div class="notice">公开测试提醒：这里只做 Binance 公开数据、热度与信号状态观察，不构成投资建议。数据可能延迟、缺失或误判，请自行复核。</div>
       </header>
 
       <main>
@@ -221,9 +217,6 @@
               <h2 id="ioTitle">OI 持仓量监控</h2>
               <p>监控 Open Interest 在 5分钟、15分钟、1小时、4小时和1天内的变化；达到 5分钟 2%、1小时 10%、4小时 20% 或 1天 40% 才接入均线组合。</p>
             </div>
-            <div class="table-actions">
-              <button id="refreshIoBtn" class="ghost-button" type="button">刷新数据</button>
-            </div>
           </div>
 
           <div class="io-controls">
@@ -237,6 +230,8 @@
             <div class="table-actions" aria-label="OI排序">
               <button class="page-size-btn active" type="button" data-io-sort="desc">从高到低</button>
               <button class="page-size-btn" type="button" data-io-sort="asc">从低到高</button>
+              <button id="scanIoBtn" class="ghost-button" type="button">立即扫描</button>
+              <button id="refreshIoBtn" class="ghost-button" type="button">刷新数据</button>
             </div>
           </div>
           <div class="heat-rank-status" id="ioStatus">等待首次扫描</div>
@@ -327,6 +322,9 @@
               <p>集中查看 API、crawler、realtime、scheduler 的当前错误状态和最近 PM2 错误日志。</p>
             </div>
             <div class="table-actions">
+              <span id="selectedRuntimeLogCount" class="selection-count">已选 0 条</span>
+              <button id="deleteSelectedRuntimeLogsBtn" class="ghost-button" type="button" disabled>删除所选</button>
+              <button id="clearRuntimeLogsBtn" class="ghost-button danger" type="button">一键清空</button>
               <span id="runtimeLogsStatus" class="selection-count">等待刷新</span>
               <button id="refreshRuntimeLogsBtn" class="ghost-button" type="button">刷新日志</button>
             </div>
@@ -340,6 +338,7 @@
             <table>
               <thead>
                 <tr>
+                  <th><input type="checkbox" id="selectAllRuntimeLogs" /></th>
                   <th>来源</th>
                   <th>分类</th>
                   <th>级别</th>
@@ -349,7 +348,7 @@
                 </tr>
               </thead>
               <tbody id="runtimeLogRows">
-                <tr><td colspan="6" class="empty">等待日志数据</td></tr>
+                <tr><td colspan="7" class="empty">等待日志数据</td></tr>
               </tbody>
             </table>
           </div>

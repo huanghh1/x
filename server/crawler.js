@@ -10,6 +10,7 @@ import {
   listKlineGaps,
   markHotMaSignalAlertSent,
   klineStats,
+  markKlineAvailabilityStart,
   markTokenFetching,
   markTokenPartial,
   queueActiveTokensForKlineAudit,
@@ -350,6 +351,7 @@ async function fetchToken(token, workerId) {
   await refreshTokenFetchState(token.id);
   if (crawlerState.running) {
     await recomputeAndNotifyToken(token);
+    crawlerState.lastError = null;
     crawlerState.lastAction = `${token.symbol} 四周期缓存与信号计算完成`;
   }
 }
@@ -368,12 +370,14 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
   let gapRows = 0;
   let recentRows = 0;
   let repairedGapCount = 0;
+  let attemptedHistoricalCoverage = false;
 
   if (!hasEnoughCoverage && shouldContinue()) {
     const startTime = targetStartTime;
     const endTime = stats.minOpenTime === null
       ? targetEndTime
       : Math.min(targetEndTime, stats.minOpenTime - intervalMs(intervalCode));
+    attemptedHistoricalCoverage = true;
     coverageRows = await fetchKlineRange({
       token,
       intervalCode,
@@ -403,6 +407,14 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
   }
 
   const latestStats = await klineStats(token.symbol, intervalCode);
+  if (
+    attemptedHistoricalCoverage &&
+    shouldContinue() &&
+    latestStats.minOpenTime !== null &&
+    latestStats.minOpenTime > targetStartTime + intervalMs(intervalCode)
+  ) {
+    await markKlineAvailabilityStart(token.symbol, intervalCode, latestStats.minOpenTime);
+  }
   const recentStartTime =
     latestStats.maxOpenTime === null
       ? targetStartTime

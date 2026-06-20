@@ -80,6 +80,8 @@ const state = {
   ioError: "",
   ioMonitor: null,
   ioRequestId: 0,
+  ioLastLoadedAt: null,
+  ioScanning: false,
   ioWindow: "5m",
   ioSort: "desc",
   ioExpandedSymbol: null,
@@ -96,7 +98,9 @@ const state = {
   runtimeServices: null,
   runtimeLogsLoading: false,
   runtimeLogsError: "",
+  runtimeLogsNotice: "",
   runtimeLogsGeneratedAt: null,
+  selectedRuntimeLogIds: new Set(),
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
   watchRealtimeSignature: "",
@@ -144,6 +148,14 @@ function formatCompactNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   return number.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 2 });
+}
+
+function formatBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "0B";
+  if (number >= 1024 * 1024) return `${(number / 1024 / 1024).toFixed(1)}MB`;
+  if (number >= 1024) return `${(number / 1024).toFixed(1)}KB`;
+  return `${number}B`;
 }
 
 function formatPercent(value) {
@@ -214,6 +226,19 @@ function formatTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--";
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatAge(value) {
+  const date = new Date(value);
+  const timestamp = date.getTime();
+  if (!Number.isFinite(timestamp)) return "--";
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 90) return `${seconds}秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 90) return `${minutes}分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}小时前`;
+  return `${Math.floor(hours / 24)}天前`;
 }
 
 function cssEscape(value) {
@@ -410,6 +435,7 @@ function chartElementId(key) {
 
 async function api(path, options) {
   const response = await fetch(path, options);
+  const contentType = response.headers.get("content-type") || "";
   if (!response.ok) {
     let message = `${path} ${response.status}`;
     try {
@@ -417,9 +443,20 @@ async function api(path, options) {
       if (payload?.error) message = payload.error;
     } catch {
       const text = await response.text().catch(() => "");
-      if (text) message = text.slice(0, 220);
+      if (text.trim().startsWith("<")) {
+        message = `${path} 接口未返回 JSON，可能服务未重启或路由不存在`;
+      } else if (text) {
+        message = text.slice(0, 220);
+      }
     }
     throw new Error(message);
+  }
+  if (!contentType.includes("application/json")) {
+    const text = await response.text().catch(() => "");
+    if (text.trim().startsWith("<")) {
+      throw new Error(`${path} 接口未返回 JSON，可能服务未重启或路由不存在`);
+    }
+    throw new Error(`${path} 接口返回格式不是 JSON`);
   }
   return response.json();
 }
@@ -696,7 +733,6 @@ function renderFundingRateTokens() {
           <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
           <div><span>当前资金费率</span><b class="mono funding-rate ${rateTone}">${formatFundingPercent(token.currentFundingRate)}</b></div>
-          <div><span>费率下限 / 上限</span><b class="mono funding-rate-band">${formatFundingBand(token.adjustedFundingRateFloor, token.adjustedFundingRateCap)}</b></div>
           <div><span>下次结算</span><b>${formatTime(token.nextFundingTime)}</b></div>
           <div><span>最近变化</span><b>${formatTime(token.lastChangedAt || token.lastSeenAt)}</b></div>
           <div class="heat-links">
@@ -760,6 +796,7 @@ async function loadIOMonitoring() {
     state.ioPage = payload.page || state.ioPage;
     state.ioPageSize = payload.pageSize || state.ioPageSize;
     state.ioMonitor = payload.monitor || null;
+    state.ioLastLoadedAt = payload.generatedAt || new Date().toISOString();
   } catch (error) {
     if (requestId !== state.ioRequestId) return;
     state.ioError = `OI 数据读取失败：${error instanceof Error ? error.message : String(error)}`;
@@ -820,7 +857,7 @@ function renderIOMonitoring() {
           <div><span>当前持仓量</span><b class="mono">${formatCompactNumber(item.currentOpenInterest)}</b></div>
           <div><span>持仓价值</span><b class="mono">${formatCompactUsd(item.currentOpenInterestValue)}</b></div>
           <div><span>同币种命中</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
-          <div><span>更新时间</span><b title="${item.isStale ? `数据已过期，年龄约 ${Math.round(Number(item.observedAgeSeconds ?? 0) / 60)} 分钟` : ""}">${formatTime(item.observedAt)}${item.isStale ? " · 过期" : ""}</b></div>
+          <div><span>更新时间</span><b data-oi-observed="${escapeHtml(item.observedAt)}" title="${item.isStale ? `数据已过期，年龄约 ${Math.round(Number(item.observedAgeSeconds ?? 0) / 60)} 分钟` : ""}">${formatTime(item.observedAt)} · ${formatAge(item.observedAt)}${item.isStale ? " · 过期" : ""}</b></div>
           <div class="heat-links">
             ${copyButton(item.symbol)}
             ${watchButton(item.symbol, "从 OI 监控加入")}
@@ -846,12 +883,31 @@ function renderIOMonitoring() {
   if (Number(state.ioMonitor?.retryPendingCount ?? 0) > 0) {
     statusParts.push(`待重试 ${state.ioMonitor.retryPendingCount}`);
   }
+  if (Number(state.ioMonitor?.alertPendingCount ?? 0) > 0) {
+    statusParts.push(`TG待发送 ${state.ioMonitor.alertPendingCount}`);
+  }
+  if (state.ioLastLoadedAt) statusParts.push(`本地读取 ${formatTime(state.ioLastLoadedAt)}`);
+  if (state.ioScanning) statusParts.push("正在触发扫描");
   if (state.ioLoading) statusParts.push("刷新中");
   if (state.ioError) statusParts.push("上次刷新失败，保留当前结果");
   if (state.ioData.some((item) => item.isStale)) statusParts.push(`本页 ${state.ioData.filter((item) => item.isStale).length} 项过期`);
   if (state.ioMonitor?.errors?.length) statusParts.push(`抓取错误 ${state.ioMonitor.errors.length} 条`);
   setText("#ioStatus", statusParts.join(" · "));
   updateIoPagination();
+}
+
+function updateOiAgeLabels() {
+  for (const element of document.querySelectorAll("[data-oi-observed]")) {
+    const observedAt = element.dataset.oiObserved;
+    const stale = element.textContent.includes("过期");
+    element.textContent = `${formatTime(observedAt)} · ${formatAge(observedAt)}${stale ? " · 过期" : ""}`;
+  }
+  if (state.currentView === "io" && state.ioLastLoadedAt) {
+    const status = $("#ioStatus");
+    if (status && !status.textContent.includes("本地读取")) {
+      renderIOMonitoring();
+    }
+  }
 }
 
 function updateIoControls() {
@@ -865,6 +921,11 @@ function updateIoControls() {
   if (refresh) {
     refresh.disabled = state.ioLoading;
     refresh.textContent = state.ioLoading ? "刷新中" : "刷新数据";
+  }
+  const scan = $("#scanIoBtn");
+  if (scan) {
+    scan.disabled = state.ioLoading || state.ioScanning;
+    scan.textContent = state.ioScanning ? "扫描中" : "立即扫描";
   }
 }
 
@@ -1081,10 +1142,70 @@ async function loadRuntimeLogs() {
     state.runtimeStateErrors = payload.stateErrors || [];
     state.runtimeServices = payload.services || null;
     state.runtimeLogsGeneratedAt = payload.generatedAt || null;
+    state.selectedRuntimeLogIds = new Set(
+      Array.from(state.selectedRuntimeLogIds).filter((id) => state.runtimeLogs.some((item) => runtimeLogId(item) === id))
+    );
   } catch (error) {
     state.runtimeLogsError = error instanceof Error ? error.message : String(error);
   } finally {
     state.runtimeLogsLoading = false;
+    renderRuntimeLogs();
+  }
+}
+
+function runtimeLogId(item) {
+  return String(item.id ?? `${item.source || "state"}:${item.service || ""}:${item.component || ""}:${item.file || ""}:${item.message || ""}`);
+}
+
+function updateRuntimeLogSelectionUi() {
+  const selectedRows = state.runtimeLogs.filter((item) => state.selectedRuntimeLogIds.has(runtimeLogId(item)));
+  const deletableRows = state.runtimeLogs.filter((item) => item.source === "pm2" && item.file);
+  const selectedDeletable = selectedRows.filter((item) => item.source === "pm2" && item.file);
+  setText("#selectedRuntimeLogCount", `已选 ${state.selectedRuntimeLogIds.size} 条，可删除 ${selectedDeletable.length} 条`);
+  const deleteButton = $("#deleteSelectedRuntimeLogsBtn");
+  if (deleteButton) deleteButton.disabled = selectedDeletable.length === 0;
+  const selectAll = $("#selectAllRuntimeLogs");
+  if (selectAll) {
+    const visibleIds = deletableRows.map(runtimeLogId);
+    selectAll.checked = visibleIds.length > 0 && visibleIds.every((id) => state.selectedRuntimeLogIds.has(id));
+    selectAll.indeterminate = visibleIds.some((id) => state.selectedRuntimeLogIds.has(id)) && !selectAll.checked;
+  }
+}
+
+function bindRuntimeLogSelection() {
+  document.querySelectorAll("[data-runtime-log-id]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = input.dataset.runtimeLogId;
+      if (input.checked) state.selectedRuntimeLogIds.add(id);
+      else state.selectedRuntimeLogIds.delete(id);
+      updateRuntimeLogSelectionUi();
+    });
+  });
+  updateRuntimeLogSelectionUi();
+}
+
+function selectedRuntimeLogFiles() {
+  return Array.from(new Set(
+    state.runtimeLogs
+      .filter((item) => state.selectedRuntimeLogIds.has(runtimeLogId(item)))
+      .filter((item) => item.source === "pm2" && item.file)
+      .map((item) => item.file)
+  ));
+}
+
+async function deleteRuntimeLogs(files = []) {
+  const body = files.length ? JSON.stringify({ files }) : "{}";
+  try {
+    const result = await api("/api/runtime-logs", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body
+    });
+    state.runtimeLogsNotice = `已清空 ${result.truncatedCount ?? 0}/${result.fileCount ?? 0} 个日志文件，释放 ${formatBytes(result.truncatedBytes)}`;
+    state.selectedRuntimeLogIds.clear();
+    await loadRuntimeLogs();
+  } catch (error) {
+    state.runtimeLogsError = `删除失败：${error instanceof Error ? error.message : String(error)}`;
     renderRuntimeLogs();
   }
 }
@@ -1110,6 +1231,7 @@ function renderRuntimeLogs() {
   const statusParts = [];
   if (state.runtimeLogsLoading) statusParts.push("刷新中");
   if (state.runtimeLogsGeneratedAt) statusParts.push(`更新时间 ${formatTime(state.runtimeLogsGeneratedAt)}`);
+  if (state.runtimeLogsNotice) statusParts.push(state.runtimeLogsNotice);
   statusParts.push(`${state.runtimeLogs.length} 条日志`);
   const categoryCounts = runtimeLogCategoryCounts(state.runtimeLogs);
   if (categoryCounts.length) {
@@ -1120,23 +1242,33 @@ function renderRuntimeLogs() {
   setText("#runtimeLogsStatus", statusParts.join(" · "));
 
   if (state.runtimeLogsLoading && !state.runtimeLogs.length) {
-    rowTarget.innerHTML = '<tr><td colspan="6" class="empty">正在读取运行日志。</td></tr>';
+    rowTarget.innerHTML = '<tr><td colspan="7" class="empty">正在读取运行日志。</td></tr>';
+    updateRuntimeLogSelectionUi();
     return;
   }
   if (state.runtimeLogsError && !state.runtimeLogs.length) {
-    rowTarget.innerHTML = `<tr><td colspan="6" class="empty">${escapeHtml(state.runtimeLogsError)}</td></tr>`;
+    rowTarget.innerHTML = `<tr><td colspan="7" class="empty">${escapeHtml(state.runtimeLogsError)}</td></tr>`;
+    updateRuntimeLogSelectionUi();
     return;
   }
   if (!state.runtimeLogs.length) {
-    rowTarget.innerHTML = '<tr><td colspan="6" class="empty">最近没有错误日志。</td></tr>';
+    rowTarget.innerHTML = '<tr><td colspan="7" class="empty">最近没有错误日志。</td></tr>';
+    updateRuntimeLogSelectionUi();
     return;
   }
 
   rowTarget.innerHTML = state.runtimeLogs
     .map((item) => {
       const detail = item.details ? `<details class="runtime-log-details"><summary>${escapeHtml(item.message || "--")}</summary><pre>${escapeHtml(item.details)}</pre></details>` : escapeHtml(item.message || "--");
+      const id = runtimeLogId(item);
+      const deletable = item.source === "pm2" && item.file;
       return `
         <tr class="${item.severity === "ERROR" ? "runtime-row-error" : ""}">
+          <td>${
+            deletable
+              ? `<input type="checkbox" data-runtime-log-id="${escapeHtml(id)}" ${state.selectedRuntimeLogIds.has(id) ? "checked" : ""} />`
+              : `<span class="runtime-not-deletable" title="当前状态错误来自服务内存状态，不能按日志文件删除">--</span>`
+          }</td>
           <td>${escapeHtml(item.source || "--")}</td>
           <td><span class="runtime-category category-${escapeHtml(item.category || "OTHER")}">${escapeHtml(item.categoryLabel || runtimeCategoryLabel(item.category))}</span></td>
           <td><span class="runtime-severity ${item.severity === "ERROR" ? "is-error" : "is-warn"}">${escapeHtml(item.severity || "WARN")}</span></td>
@@ -1147,6 +1279,7 @@ function renderRuntimeLogs() {
       `;
     })
     .join("");
+  bindRuntimeLogSelection();
 }
 
 function runtimeCategoryLabel(category) {
@@ -2188,9 +2321,6 @@ async function loadAndRenderChart(row, { force = false } = {}) {
           <button class="${settings.volume ? "active" : ""}" type="button" data-tool="volume" title="显示或隐藏成交量">成交量</button>
           <button class="${settings.ma100 ? "active" : ""}" type="button" data-tool="ma100" title="显示或隐藏 MA100">MA100</button>
           <button class="${settings.ma200 ? "active" : ""}" type="button" data-tool="ma200" title="显示或隐藏 MA200">MA200</button>
-          <button class="${settings.drawTool === "trend" ? "active" : ""}" type="button" data-tool="trend" title="绘制趋势线">趋势线</button>
-          <button class="${settings.drawTool === "hline" ? "active" : ""}" type="button" data-tool="hline" title="绘制水平线">水平线</button>
-          <button type="button" data-tool="clearDrawings" title="清除当前图表画线">清除</button>
           <a href="https://www.tradingview.com/chart/?symbol=${tvSymbol}" target="_blank" rel="noreferrer">TradingView</a>
         </div>
       </div>
@@ -2243,11 +2373,6 @@ function bindChartTools(shell, key) {
       if (!settings) return;
       const tool = button.dataset.tool;
       if (["crosshair", "volume", "ma100", "ma200"].includes(tool)) settings[tool] = !settings[tool];
-      if (tool === "trend" || tool === "hline") settings.drawTool = settings.drawTool === tool ? null : tool;
-      if (tool === "clearDrawings") {
-        settings.drawings = [];
-        settings.draftDrawing = null;
-      }
       loadAndRenderChart({ symbol: state.chartCache.get(key)?.symbol, intervalCode: state.chartCache.get(key)?.intervalCode });
     });
   }
@@ -2960,8 +3085,42 @@ $("#deleteSelectedTriggerBtn")?.addEventListener("click", async () => {
 $("#refreshFundingBtn")?.addEventListener("click", () => loadFundingRateTokens());
 $("#scanFundingBtn")?.addEventListener("click", () => scanFundingIntervals());
 $("#refreshIoBtn")?.addEventListener("click", () => loadIOMonitoring());
+$("#scanIoBtn")?.addEventListener("click", async () => {
+  state.ioScanning = true;
+  renderIOMonitoring();
+  try {
+    await api("/api/open-interest/check", { method: "POST" });
+    await loadIOMonitoring();
+  } catch (error) {
+    state.ioError = `OI 扫描失败：${error instanceof Error ? error.message : String(error)}`;
+    renderIOMonitoring();
+  } finally {
+    state.ioScanning = false;
+    renderIOMonitoring();
+  }
+});
 $("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
 $("#refreshRuntimeLogsBtn")?.addEventListener("click", () => loadRuntimeLogs());
+$("#selectAllRuntimeLogs")?.addEventListener("change", (event) => {
+  const checked = event.currentTarget.checked;
+  state.runtimeLogs.forEach((item) => {
+    if (item.source !== "pm2" || !item.file) return;
+    const id = runtimeLogId(item);
+    if (checked) state.selectedRuntimeLogIds.add(id);
+    else state.selectedRuntimeLogIds.delete(id);
+  });
+  renderRuntimeLogs();
+});
+$("#deleteSelectedRuntimeLogsBtn")?.addEventListener("click", async () => {
+  const files = selectedRuntimeLogFiles();
+  if (!files.length) return;
+  if (!confirm(`确定要清空所选 ${files.length} 个日志文件吗？`)) return;
+  await deleteRuntimeLogs(files);
+});
+$("#clearRuntimeLogsBtn")?.addEventListener("click", async () => {
+  if (!confirm("确定要清空全部 PM2 运行日志吗？")) return;
+  await deleteRuntimeLogs();
+});
 $("#clearTriggerHistoryBtn")?.addEventListener("click", async () => {
   if (!confirm("确定要清空所有历史记录吗？")) return;
   try {
@@ -3113,4 +3272,10 @@ setInterval(() => loadHotRank({ silent: true }), 5 * 60 * 1000);
 setInterval(() => {
   if (state.currentView === "watch") loadWatchlist({ silent: true });
 }, 60 * 1000);
-setInterval(() => refreshAll({ keepPage: true }), 5000);
+setInterval(() => {
+  if (state.currentView === "signals") refreshAll({ keepPage: true });
+}, 60 * 1000);
+setInterval(() => {
+  if (state.currentView === "io") loadIOMonitoring();
+}, 3 * 60 * 1000);
+setInterval(updateOiAgeLabels, 30 * 1000);

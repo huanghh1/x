@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   collectHotRankFundingSymbols,
+  isNaturalKlineHistoryShortfall,
   normalizeFundingIntervalSnapshotItems,
   normalizeHotRankSeenTokens,
   normalizeOptionalLimit
@@ -62,4 +63,34 @@ test("funding hot-rank matching handles multiplier-prefixed futures symbols", ()
   );
 
   assert.deepEqual([...matches].sort(), ["1000AEROUSDT", "ETHUSDT"]);
+});
+
+test("natural kline history shortfall is not treated as a repairable gap", () => {
+  const intervalMs = 24 * 60 * 60 * 1000;
+  const targetStartTime = Date.UTC(2020, 0, 1);
+  const firstAvailableOpenTime = Date.UTC(2024, 0, 1);
+
+  assert.equal(
+    isNaturalKlineHistoryShortfall({
+      cachedCount: 500,
+      expectedCount: 2190,
+      earliestOpenTime: firstAvailableOpenTime,
+      firstAvailableOpenTime,
+      targetStartTime,
+      intervalMsValue: intervalMs
+    }),
+    true
+  );
+
+  assert.equal(
+    isNaturalKlineHistoryShortfall({
+      cachedCount: 500,
+      expectedCount: 2190,
+      earliestOpenTime: firstAvailableOpenTime + intervalMs * 10,
+      firstAvailableOpenTime,
+      targetStartTime,
+      intervalMsValue: intervalMs
+    }),
+    false
+  );
 });

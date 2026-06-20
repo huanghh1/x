@@ -105,6 +105,17 @@ const TABLE_SQL = [
     KEY idx_kline_interval_symbol (interval_code, symbol),
     CONSTRAINT fk_kline_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS kline_availability (
+    symbol VARCHAR(32) NOT NULL,
+    interval_code ENUM('15m','1h','4h','1d') NOT NULL,
+    first_open_time BIGINT UNSIGNED NOT NULL,
+    source VARCHAR(32) NOT NULL DEFAULT 'binance',
+    last_checked_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, interval_code),
+    KEY idx_kline_availability_checked (last_checked_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS signal_result (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     token_id BIGINT UNSIGNED NOT NULL,
@@ -625,8 +636,13 @@ export async function queueSymbolsForKlineRefresh(symbols = [], reason = "K çº¿ç
          last_error=:reason
      WHERE is_active=1
        AND fetch_status<>'fetching'
-       AND symbol IN (:symbols)`,
-    { symbols: safeSymbols, reason: String(reason).slice(0, 1000) }
+       AND symbol IN (:symbols)
+       AND NOT (
+         fetch_status='partial'
+         AND last_error=:reason
+         AND updated_at > DATE_SUB(NOW(3), INTERVAL :cooldownSeconds SECOND)
+       )`,
+    { symbols: safeSymbols, reason: String(reason).slice(0, 1000), cooldownSeconds: 10 * 60 }
   );
   return Number(result.affectedRows ?? 0);
 }
@@ -684,6 +700,7 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
     if (!bySymbol.has(row.symbol)) bySymbol.set(row.symbol, new Map());
     if (row.intervalCode) bySymbol.get(row.symbol).set(row.intervalCode, row);
   }
+  const availability = await getKlineAvailabilityMap([...bySymbol.keys()]);
   const deficient = [];
   for (const [symbol, intervals] of bySymbol) {
     for (const intervalCode of ["15m", "1h", "4h", "1d"]) {
@@ -699,6 +716,15 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
       const safeIntervalMs = intervalMs(intervalCode);
       const targetEndTime = latestClosed[intervalCode] ?? latestClosedKlineOpenTime(intervalCode);
       const targetStartTime = targetEndTime - (expectedCount - 1) * safeIntervalMs;
+      const firstAvailableOpenTime = availability.get(`${symbol}|${intervalCode}`) ?? null;
+      const naturalHistoryShortfall = isNaturalKlineHistoryShortfall({
+        cachedCount,
+        expectedCount,
+        earliestOpenTime,
+        firstAvailableOpenTime,
+        targetStartTime,
+        intervalMsValue: safeIntervalMs
+      });
       const spanSlotCount =
         earliestOpenTime !== null && latestOpenTime !== null && latestOpenTime >= earliestOpenTime
           ? Math.floor((latestOpenTime - earliestOpenTime) / safeIntervalMs) + 1
@@ -707,7 +733,7 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
       const firstGap = hasSpanGap
         ? await findKlineGap(symbol, intervalCode, safeIntervalMs, Math.max(targetStartTime, earliestOpenTime), targetEndTime)
         : null;
-      if (cachedCount < expectedCount || firstGap) {
+      if ((cachedCount < expectedCount && !naturalHistoryShortfall) || firstGap) {
         deficient.push({
           symbol,
           intervalCode,
@@ -716,6 +742,8 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
           missingCount: Math.max(0, expectedCount - cachedCount),
           earliestOpenTime,
           latestOpenTime,
+          firstAvailableOpenTime,
+          naturalHistoryShortfall,
           gapStartTime: firstGap?.startTime ?? null,
           gapEndTime: firstGap?.endTime ?? null,
           gapMissingCount: firstGap?.missingCount ?? 0,
@@ -917,6 +945,88 @@ function intervalMs(intervalCode) {
 function latestClosedKlineOpenTime(intervalCode) {
   const ms = intervalMs(intervalCode);
   return Math.floor(Date.now() / ms) * ms - ms;
+}
+
+function normalizeIntervalCode(value) {
+  return ["15m", "1h", "4h", "1d"].includes(value) ? value : null;
+}
+
+export function isNaturalKlineHistoryShortfall({
+  cachedCount,
+  expectedCount,
+  earliestOpenTime,
+  firstAvailableOpenTime,
+  targetStartTime,
+  intervalMsValue
+} = {}) {
+  const safeCachedCount = Number(cachedCount);
+  const safeExpectedCount = Number(expectedCount);
+  const safeEarliestOpenTime = Number(earliestOpenTime);
+  const safeFirstAvailableOpenTime = Number(firstAvailableOpenTime);
+  const safeTargetStartTime = Number(targetStartTime);
+  const safeIntervalMs = Math.max(1, Number(intervalMsValue) || 1);
+  if (!Number.isFinite(safeCachedCount) || !Number.isFinite(safeExpectedCount)) return false;
+  if (safeCachedCount <= 0 || safeCachedCount >= safeExpectedCount) return false;
+  if (
+    !Number.isFinite(safeEarliestOpenTime) ||
+    !Number.isFinite(safeFirstAvailableOpenTime) ||
+    !Number.isFinite(safeTargetStartTime)
+  ) {
+    return false;
+  }
+  if (safeFirstAvailableOpenTime <= safeTargetStartTime + safeIntervalMs) return false;
+  return Math.abs(safeEarliestOpenTime - safeFirstAvailableOpenTime) <= safeIntervalMs;
+}
+
+export async function markKlineAvailabilityStart(symbol, intervalCode, firstOpenTime, source = "binance") {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  const safeIntervalCode = normalizeIntervalCode(intervalCode);
+  const safeFirstOpenTime = Math.max(0, Math.floor(Number(firstOpenTime) || 0));
+  if (!safeSymbol || !safeIntervalCode || !safeFirstOpenTime) return false;
+  await getPool().query(
+    `INSERT INTO kline_availability (symbol, interval_code, first_open_time, source, last_checked_at)
+     VALUES (:symbol, :intervalCode, :firstOpenTime, :source, NOW(3))
+     ON DUPLICATE KEY UPDATE
+      first_open_time=LEAST(first_open_time, VALUES(first_open_time)),
+      source=VALUES(source),
+      last_checked_at=NOW(3)`,
+    {
+      symbol: safeSymbol,
+      intervalCode: safeIntervalCode,
+      firstOpenTime: safeFirstOpenTime,
+      source: String(source || "binance").slice(0, 32)
+    }
+  );
+  return true;
+}
+
+async function getKlineAvailabilityRows(symbols = []) {
+  const safeSymbols = [...new Set((Array.isArray(symbols) ? symbols : [symbols]).map(sanitizeDbSymbol).filter(Boolean))];
+  const [rows] = safeSymbols.length
+    ? await getPool().query(
+        `SELECT symbol, interval_code AS intervalCode, first_open_time AS firstOpenTime
+         FROM kline_availability
+         WHERE symbol IN (:symbols)`,
+        { symbols: safeSymbols }
+      )
+    : await getPool().query(
+        `SELECT symbol, interval_code AS intervalCode, first_open_time AS firstOpenTime
+         FROM kline_availability`
+      );
+  return rows.map((row) => ({
+    symbol: sanitizeDbSymbol(row.symbol),
+    intervalCode: row.intervalCode,
+    firstOpenTime: Number(row.firstOpenTime)
+  }));
+}
+
+async function getKlineAvailabilityMap(symbols = []) {
+  const rows = await getKlineAvailabilityRows(symbols);
+  const map = new Map();
+  for (const row of rows) {
+    map.set(`${row.symbol}|${row.intervalCode}`, row.firstOpenTime);
+  }
+  return map;
 }
 
 export async function findKlineGap(symbol, intervalCode, intervalMsValue, startTime, endTime) {
@@ -1525,6 +1635,21 @@ export async function listActiveTokenSymbols() {
      FROM token_list
      WHERE is_active=1
      ORDER BY symbol`
+  );
+  return rows;
+}
+
+export async function listOpenInterestScanTokens() {
+  const [rows] = await getPool().query(
+    `SELECT t.id, t.symbol, t.base_asset AS baseAsset, t.category_type AS categoryType, t.category_label AS categoryLabel,
+      oi.observed_at AS observedAt
+     FROM token_list t
+     LEFT JOIN open_interest_monitor oi ON oi.symbol=t.symbol
+     WHERE t.is_active=1
+     ORDER BY
+      oi.observed_at IS NULL DESC,
+      oi.observed_at ASC,
+      t.symbol`
   );
   return rows;
 }
@@ -2827,7 +2952,17 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
   const staleBeforeOpenTime = latestExpectedOpenTime;
   const latestOpenTime = withMa.at(-1)?.openTime ?? null;
   const isStale = latestOpenTime === null || latestOpenTime < staleBeforeOpenTime;
-  const hasCoverageShortfall = withMa.length < expectedCount;
+  const availability = await getKlineAvailabilityMap([safeSymbol]);
+  const firstAvailableOpenTime = availability.get(`${safeSymbol}|${intervalCode}`) ?? null;
+  const naturalHistoryShortfall = isNaturalKlineHistoryShortfall({
+    cachedCount: withMa.length,
+    expectedCount,
+    earliestOpenTime: withMa[0]?.openTime ?? null,
+    firstAvailableOpenTime,
+    targetStartTime: latestExpectedOpenTime - (expectedCount - 1) * safeIntervalMs,
+    intervalMsValue: safeIntervalMs
+  });
+  const hasCoverageShortfall = withMa.length < expectedCount && !naturalHistoryShortfall;
   const needsRefresh = isStale || hasCoverageShortfall || gaps.length > 0;
 
   return {
@@ -2839,6 +2974,8 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
     coveragePercent: Number(Math.min(100, (withMa.length / expectedCount) * 100).toFixed(2)),
     earliestOpenTime: withMa[0]?.openTime ?? null,
     latestOpenTime,
+    firstAvailableOpenTime,
+    naturalHistoryShortfall,
     latestExpectedOpenTime,
     staleBeforeOpenTime,
     isStale,

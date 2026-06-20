@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS kline_cache (
   CONSTRAINT fk_kline_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS kline_availability (
+  symbol VARCHAR(32) NOT NULL,
+  interval_code ENUM('15m','1h','4h','1d') NOT NULL,
+  first_open_time BIGINT UNSIGNED NOT NULL,
+  source VARCHAR(32) NOT NULL DEFAULT 'binance',
+  last_checked_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (symbol, interval_code),
+  KEY idx_kline_availability_checked (last_checked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS signal_result (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   token_id BIGINT UNSIGNED NOT NULL,

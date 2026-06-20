@@ -141,7 +141,7 @@ function scheduleNextRuntimeLogCleanup() {
 export async function startMaintenanceScheduler() {
   await runWeeklyKlineCleanupIfDue({ initializeOnly: true });
   await loadRuntimeLogCleanupState();
-  scheduleNextRuntimeLogCleanup();
+  runtimeLogCleanupState.nextRunAt = null;
   const tick = async () => {
     maintenanceState.nextCheckAt = new Date(Date.now() + config.maintenance.checkIntervalMs).toISOString();
     try {

@@ -26,7 +26,7 @@ import {
   upsertWatchlistItem
 } from "./db.js";
 import { getHotRank } from "./hotRank.js";
-import { RUNTIME_ERROR_LOG_FILES, runtimeLogPath } from "./runtimeLogs.js";
+import { cleanupRuntimeLogFiles, RUNTIME_ERROR_LOG_FILES, RUNTIME_LOG_FILES, runtimeLogPath } from "./runtimeLogs.js";
 import { telegramState } from "./telegram.js";
 import { requestService, serviceStates, serviceUrl } from "./serviceClient.js";
 
@@ -282,6 +282,27 @@ app.get("/api/runtime-logs", async (request, response) => {
   }
 });
 
+app.delete("/api/runtime-logs", async (request, response) => {
+  try {
+    const requestedFiles = Array.isArray(request.body?.files)
+      ? Array.from(new Set(request.body.files.map((file) => String(file ?? "")).filter(Boolean)))
+      : [];
+    const allowed = new Map(RUNTIME_LOG_FILES.map((item) => [item.file, item]));
+    const files = requestedFiles.length
+      ? requestedFiles.map((file) => allowed.get(file)).filter(Boolean)
+      : RUNTIME_LOG_FILES;
+    if (!files.length) {
+      response.status(400).json({ ok: false, error: "no valid log files selected" });
+      return;
+    }
+    const result = await cleanupRuntimeLogFiles({ files });
+    response.json({ ok: true, ...result });
+  } catch (error) {
+    console.error("delete runtime logs failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 app.post("/api/bootstrap", async (_request, response) => {
   try {
     response.json(await requestService("crawler", "/internal/bootstrap", { method: "POST", body: "{}" }));
@@ -371,7 +392,7 @@ app.get("/api/klines", async (request, response) => {
     return;
   }
   const payload = await getKlines({ symbol, intervalCode: interval, limit });
-  if (payload.needsRefresh) {
+  if (payload.needsRefresh && shouldRequestKlineRefresh(symbol, interval, payload.refreshReason)) {
     void requestService("crawler", "/internal/kline/refresh", {
       method: "POST",
       body: JSON.stringify({ symbol, intervalCode: interval }),
@@ -387,6 +408,22 @@ app.get("/api/klines", async (request, response) => {
     tradingViewSymbol: `BINANCE:${symbol}.P`
   });
 });
+
+const klineRefreshRequests = new Map();
+
+function shouldRequestKlineRefresh(symbol, intervalCode, reason = "") {
+  const key = `${symbol}:${intervalCode}:${reason}`;
+  const now = Date.now();
+  const last = Number(klineRefreshRequests.get(key) ?? 0);
+  if (now - last < 10 * 60 * 1000) return false;
+  klineRefreshRequests.set(key, now);
+  if (klineRefreshRequests.size > 2000) {
+    for (const [entryKey, timestamp] of klineRefreshRequests) {
+      if (now - Number(timestamp) > 30 * 60 * 1000) klineRefreshRequests.delete(entryKey);
+    }
+  }
+  return true;
+}
 
 app.get("/api/hot-rank", async (request, response) => {
   try {
@@ -692,6 +729,7 @@ async function handleOpenInterestMonitoring(request, response) {
     const scheduler = await requestService("scheduler", "/internal/health").catch(() => null);
     response.json({
       ok: true,
+      generatedAt: new Date().toISOString(),
       ...(await listOpenInterestMonitorPage({
         timeWindow,
         sort,
