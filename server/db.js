@@ -1819,6 +1819,7 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
         LIMIT 1
       ) AS currentCloseTime,
       oi.observed_at AS observedAt,
+      oi.updated_at AS fetchedAt,
       oi.observed_at < DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND) AS isStale,
       TIMESTAMPDIFF(SECOND, oi.observed_at, NOW(3)) AS observedAgeSeconds,
       oi.last_spike_alert_at AS lastSpikeAlertAt,

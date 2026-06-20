@@ -228,6 +228,20 @@ function formatTime(value) {
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
+function formatCompactTime(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const time = date.toLocaleTimeString("zh-CN", { hour12: false });
+  if (sameDay) return time;
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${time.slice(0, 5)}`;
+  return `${date.getMonth() + 1}/${date.getDate()} ${time.slice(0, 5)}`;
+}
+
 function formatAge(value) {
   const date = new Date(value);
   const timestamp = date.getTime();
@@ -857,7 +871,7 @@ function renderIOMonitoring() {
           <div><span>当前持仓量</span><b class="mono">${formatCompactNumber(item.currentOpenInterest)}</b></div>
           <div><span>持仓价值</span><b class="mono">${formatCompactUsd(item.currentOpenInterestValue)}</b></div>
           <div><span>同币种命中</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
-          <div><span>更新时间</span><b data-oi-observed="${escapeHtml(item.observedAt)}" title="${item.isStale ? `数据已过期，年龄约 ${Math.round(Number(item.observedAgeSeconds ?? 0) / 60)} 分钟` : ""}">${formatTime(item.observedAt)} · ${formatAge(item.observedAt)}${item.isStale ? " · 过期" : ""}</b></div>
+          <div class="io-observed"><span>样本时间</span><b data-oi-observed="${escapeHtml(item.observedAt)}" data-oi-stale="${item.isStale ? "true" : "false"}" title="币安OI样本：${escapeHtml(formatTime(item.observedAt))}${item.fetchedAt ? `；本系统抓取：${escapeHtml(formatTime(item.fetchedAt))}` : ""}${item.isStale ? `；数据已过期，年龄约 ${Math.round(Number(item.observedAgeSeconds ?? 0) / 60)} 分钟` : ""}">${formatAge(item.observedAt)}${item.isStale ? " · 过期" : ""}</b><small>${formatCompactTime(item.observedAt)}</small></div>
           <div class="heat-links">
             ${copyButton(item.symbol)}
             ${watchButton(item.symbol, "从 OI 监控加入")}
@@ -899,8 +913,10 @@ function renderIOMonitoring() {
 function updateOiAgeLabels() {
   for (const element of document.querySelectorAll("[data-oi-observed]")) {
     const observedAt = element.dataset.oiObserved;
-    const stale = element.textContent.includes("过期");
-    element.textContent = `${formatTime(observedAt)} · ${formatAge(observedAt)}${stale ? " · 过期" : ""}`;
+    const stale = element.dataset.oiStale === "true";
+    element.textContent = `${formatAge(observedAt)}${stale ? " · 过期" : ""}`;
+    const detail = element.parentElement?.querySelector("small");
+    if (detail) detail.textContent = formatCompactTime(observedAt);
   }
   if (state.currentView === "io" && state.ioLastLoadedAt) {
     const status = $("#ioStatus");

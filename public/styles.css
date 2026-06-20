@@ -1883,6 +1883,21 @@ td.mono span { display: block; white-space: nowrap; }
 .funding-card { grid-template-columns: minmax(170px, 1.2fr) repeat(7, minmax(120px, 1fr)) auto; min-width: 1260px; }
 .io-card { grid-template-columns: minmax(170px, 1.2fr) repeat(6, minmax(120px, 1fr)) auto; min-width: 1120px; }
 .funding-symbol, .io-symbol { display: flex; align-items: center; gap: 8px; }
+.io-observed {
+  min-width: 0;
+}
+.io-observed b {
+  display: block;
+  white-space: nowrap;
+}
+.io-observed small {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
 .watch-section, #fundingPage, #ioPage { overflow-x: auto; }
 .watch-detail { padding: var(--space-5); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-raised); }
 .watch-settings { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) auto; gap: 12px; }
