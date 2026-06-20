@@ -5,40 +5,27 @@ import { Readable } from "node:stream";
 import { config } from "./config.js";
 import {
   clearTriggerHistory,
-  countActiveTokens,
   deleteTriggerHistory,
   deleteWatchlistItem,
   ensureDatabase,
-  findKlineGap,
   getKlines,
   getHotMaSignalsPage,
   getSignalGroupsPage,
   listMultiCycleHistory,
   getOverview,
   getSignals,
-  getSignalsPage,
   getKlineAuditReport,
-  klineStats,
+  getTokenUnlockCache,
   listOneHourFundingIntervals,
   listOpenInterestMonitorPage,
   listTriggerHistory,
-  listWatchlistTokens,
   listWatchlist,
-  markHotRankNotified,
-  markWatchlistAlertSent,
   pingDatabase,
-  recordHotRankSnapshot,
-  refreshTokenFetchState,
-  selectClosePrices,
-  upsertKlinePage,
-  upsertSignal,
   upsertWatchlistItem
 } from "./db.js";
-import { fetchKlinesPaged, fetchRecentKlines } from "./binance.js";
 import { getHotRank } from "./hotRank.js";
 import { telegramState } from "./telegram.js";
 import { requestService, serviceStates, serviceUrl } from "./serviceClient.js";
-import { getTokenUnlockCache } from "./db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,9 +33,6 @@ const app = express();
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.resolve(__dirname, "../public")));
-app.get("/tokens.css", (_request, response) => {
-  response.sendFile(path.resolve(__dirname, "../tokens.css"));
-});
 
 app.get("/api/health", async (_request, response) => {
   try {
