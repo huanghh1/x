@@ -8,7 +8,7 @@ import {
   recordTriggerHistory,
   upsertOpenInterestSnapshot
 } from "./db.js";
-import { sendOpenInterestSpikeTelegram } from "./telegram.js";
+import { sendOpenInterestSpikeTelegram, sendStandaloneOpenInterestSpikeTelegram } from "./telegram.js";
 import { evaluateOpenInterestSpike } from "./openInterestSpike.js";
 
 const WINDOW_MS = {
@@ -28,6 +28,10 @@ const monitorState = {
   lastSuccessAt: null,
   lastError: null,
   nextRunAt: null,
+  scanCursor: 0,
+  totalTokenCount: 0,
+  deferredCount: 0,
+  requestLimitPerWindow: config.openInterestMonitor.requestLimitPerWindow,
   scannedCount: 0,
   updatedCount: 0,
   spikeCount: 0,
@@ -79,7 +83,10 @@ async function scanToken(token) {
     limit: config.openInterestMonitor.historyLimit
   });
   const snapshot = buildOpenInterestSnapshot(token.symbol, rows);
-  if (!snapshot || (snapshot.change5mPct === null && snapshot.change1hPct === null)) {
+  if (
+    !snapshot ||
+    [snapshot.change5mPct, snapshot.change1hPct, snapshot.change4hPct, snapshot.change1dPct].every((value) => value === null)
+  ) {
     return { updated: false, spike: false, alerted: false };
   }
 
@@ -100,6 +107,8 @@ async function scanToken(token) {
       ...snapshot,
       spike5mHit: spike.hit5m,
       spike1hHit: spike.hit1h,
+      spike4hHit: spike.hit4h,
+      spike1dHit: spike.hit1d,
       ...context,
       sources: [
         "OI_SPIKE",
@@ -114,7 +123,10 @@ async function scanToken(token) {
   if (Date.now() - lastAlertAt < config.openInterestMonitor.alertCooldownMs) {
     return { updated: true, spike: true, alerted: false };
   }
-  const result = await sendOpenInterestSpikeTelegram(snapshot, context);
+  let result = await sendOpenInterestSpikeTelegram(snapshot, context);
+  if (result.skipped) {
+    result = await sendStandaloneOpenInterestSpikeTelegram(snapshot);
+  }
   if (result.skipped) return { updated: true, spike: true, alerted: false };
   await markOpenInterestSpikeAlertSent(token.symbol);
   return { updated: true, spike: true, alerted: true };
@@ -146,6 +158,9 @@ export function getOpenInterestMonitorState() {
     scanIntervalMs: config.openInterestMonitor.scanIntervalMs,
     spike5mPct: config.openInterestMonitor.spike5mPct,
     spike1hPct: config.openInterestMonitor.spike1hPct,
+    spike4hPct: config.openInterestMonitor.spike4hPct,
+    spike1dPct: config.openInterestMonitor.spike1dPct,
+    standaloneAlertEnabled: config.openInterestMonitor.standaloneAlertEnabled,
     ...monitorState
   };
 }
@@ -154,6 +169,26 @@ export function startOpenInterestMonitor() {
   if (!config.openInterestMonitor.enabled || timer) return getOpenInterestMonitorState();
   scheduleNext(config.openInterestMonitor.initialDelayMs);
   return getOpenInterestMonitorState();
+}
+
+function selectScanBatch(tokens) {
+  if (!tokens.length) {
+    monitorState.scanCursor = 0;
+    return { batch: [], startOffset: 0, deferredCount: 0 };
+  }
+  const limit = Math.min(tokens.length, config.openInterestMonitor.requestLimitPerWindow);
+  if (tokens.length <= limit) {
+    monitorState.scanCursor = 0;
+    return { batch: tokens, startOffset: 0, deferredCount: 0 };
+  }
+  const startOffset = monitorState.scanCursor % tokens.length;
+  const batch = Array.from({ length: limit }, (_, index) => tokens[(startOffset + index) % tokens.length]);
+  monitorState.scanCursor = (startOffset + limit) % tokens.length;
+  return {
+    batch,
+    startOffset,
+    deferredCount: tokens.length - batch.length
+  };
 }
 
 export async function runOpenInterestCheck({ force = false } = {}) {
@@ -170,6 +205,7 @@ export async function runOpenInterestCheck({ force = false } = {}) {
 
   try {
     const tokens = await listActiveTokenSymbols();
+    const { batch: scanTokens, startOffset, deferredCount } = selectScanBatch(tokens);
     let cursor = 0;
     let updatedCount = 0;
     let spikeCount = 0;
@@ -177,10 +213,10 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     const errors = [];
 
     const worker = async () => {
-      while (cursor < tokens.length) {
+      while (cursor < scanTokens.length) {
         const index = cursor;
         cursor += 1;
-        const token = tokens[index];
+        const token = scanTokens[index];
         try {
           const result = await scanToken(token);
           if (result.updated) updatedCount += 1;
@@ -194,20 +230,27 @@ export async function runOpenInterestCheck({ force = false } = {}) {
 
     await Promise.all(
       Array.from(
-        { length: Math.min(config.openInterestMonitor.concurrency, Math.max(1, tokens.length)) },
+        { length: Math.min(config.openInterestMonitor.concurrency, Math.max(1, scanTokens.length)) },
         () => worker()
       )
     );
 
     monitorState.lastSuccessAt = new Date().toISOString();
-    monitorState.scannedCount = tokens.length;
+    monitorState.totalTokenCount = tokens.length;
+    monitorState.deferredCount = deferredCount;
+    monitorState.requestLimitPerWindow = config.openInterestMonitor.requestLimitPerWindow;
+    monitorState.scannedCount = scanTokens.length;
     monitorState.updatedCount = updatedCount;
     monitorState.spikeCount = spikeCount;
     monitorState.alertedSymbols = alertedSymbols;
     monitorState.errors = errors.slice(0, 30);
     return {
       ok: true,
-      scannedCount: tokens.length,
+      totalTokenCount: tokens.length,
+      scannedCount: scanTokens.length,
+      deferredCount,
+      scanStartOffset: startOffset,
+      requestLimitPerWindow: config.openInterestMonitor.requestLimitPerWindow,
       updatedCount,
       spikeCount,
       alertedSymbols,

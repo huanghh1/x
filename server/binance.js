@@ -234,14 +234,14 @@ function klineRequestWeight(limit) {
   return 10;
 }
 
-function klineLimit() {
-  return Math.max(1, Math.min(1500, Math.floor(config.crawler.klineLimit)));
+function klineLimit(value = config.crawler.klineLimit) {
+  return Math.max(1, Math.min(1500, Math.floor(Number(value) || config.crawler.klineLimit)));
 }
 
-export async function fetchKlinesPaged({ symbol, intervalCode, startTime, endTime, onPage, shouldContinue }) {
+export async function fetchKlinesPaged({ symbol, intervalCode, startTime, endTime, limit: requestedLimit, onPage, shouldContinue }) {
   let cursor = startTime;
   let pageCount = 0;
-  const limit = klineLimit();
+  const limit = klineLimit(requestedLimit);
   while (cursor < endTime && (!shouldContinue || shouldContinue())) {
     const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/klines`);
     url.searchParams.set("symbol", symbol);

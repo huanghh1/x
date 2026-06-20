@@ -92,7 +92,7 @@ function intervalLookbackStart(intervalCode) {
   return Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
 }
 
-async function fetchKlineRange({ token, intervalCode, startTime, endTime, action }) {
+async function fetchKlineRange({ token, intervalCode, startTime, endTime, action, limit }) {
   if (endTime <= startTime) return 0;
   let insertedRows = 0;
   crawlerState.lastAction = action;
@@ -101,6 +101,7 @@ async function fetchKlineRange({ token, intervalCode, startTime, endTime, action
     intervalCode,
     startTime,
     endTime,
+    limit,
     onPage: async (page) => {
       const inserted = await insertKlinePage(token, intervalCode, page);
       insertedRows += inserted;
@@ -346,7 +347,7 @@ async function fetchToken(token, workerId) {
       });
     }
 
-    for (let gapPass = 0; gapPass < 3; gapPass += 1) {
+    for (let gapPass = 0; gapPass < 25; gapPass += 1) {
       const gap = await findKlineGap(token.symbol, intervalCode, intervalMs(intervalCode), targetStartTime, Date.now());
       if (!gap) break;
       await fetchKlineRange({
@@ -367,6 +368,7 @@ async function fetchToken(token, workerId) {
       intervalCode,
       startTime: recentStartTime,
       endTime: recentEndTime,
+      limit: config.crawler.incrementalKlineLimit,
       action: `${token.symbol} ${intervalCode} 补最新K线`
     });
     if (hasEnoughCoverage && insertedRecent === 0) {

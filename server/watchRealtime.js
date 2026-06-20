@@ -2,6 +2,8 @@ import { EventEmitter } from "node:events";
 import {
   listWatchlist,
   listRealtimeKlineTokens,
+  listTopFundingRealtimeTokens,
+  listTopOpenInterestRealtimeTokens,
   markWatchlistAlertSent,
   refreshTokenFetchState,
   selectClosePrices,
@@ -9,9 +11,9 @@ import {
   upsertKlinePage,
   upsertSignal
 } from "./db.js";
+import { config } from "./config.js";
 import { calculateSignal, INTERVALS } from "./ma.js";
 
-const WATCHLIST_STREAM_LIMIT = 1024;
 const WATCHLIST_SYNC_MS = 10_000;
 const RECONNECT_MS = 3_000;
 const PRICE_PERSIST_MS = 2_000;
@@ -34,6 +36,8 @@ const state = {
   rotateTimer: null,
   watchItems: new Map(),
   tokenRows: new Map(),
+  fundingTopCount: 0,
+  openInterestTopCount: 0,
   lastPricePersistedAt: new Map(),
   lastKlinePersistedAt: new Map(),
   streamCount: 0,
@@ -68,22 +72,35 @@ function klineToDbRow(kline) {
 }
 
 async function syncWatchlistState() {
-  const [items, tokens] = await Promise.all([listWatchlist(), listRealtimeKlineTokens()]);
+  const [items, tokens, fundingTopTokens, openInterestTopTokens] = await Promise.all([
+    listWatchlist(),
+    listRealtimeKlineTokens(),
+    listTopFundingRealtimeTokens(5),
+    listTopOpenInterestRealtimeTokens({ timeWindow: "5m", sort: "desc", limit: 5 })
+  ]);
+  const tokenMap = new Map();
+  for (const token of [...tokens, ...fundingTopTokens, ...openInterestTopTokens]) {
+    const symbol = sanitizeSymbol(token?.symbol);
+    if (symbol) tokenMap.set(symbol, token);
+  }
   state.watchItems = new Map(items.map((item) => [sanitizeSymbol(item.symbol), item]));
-  state.tokenRows = new Map(tokens.map((token) => [sanitizeSymbol(token.symbol), token]));
-  return { items, tokens };
+  state.tokenRows = tokenMap;
+  state.fundingTopCount = fundingTopTokens.length;
+  state.openInterestTopCount = openInterestTopTokens.length;
+  return { items, tokens: Array.from(tokenMap.values()), fundingTopTokens, openInterestTopTokens };
 }
 
 function buildStreams() {
   const streams = [];
-  for (const symbol of state.tokenRows.keys()) {
+  const symbols = Array.from(state.tokenRows.keys()).slice(0, config.realtime.tokenLimit);
+  for (const symbol of symbols) {
     const lower = symbol.toLowerCase();
     streams.push(`${lower}@ticker`);
     for (const interval of INTERVALS) {
       streams.push(`${lower}@kline_${interval}`);
     }
   }
-  return streams.slice(0, WATCHLIST_STREAM_LIMIT);
+  return streams.slice(0, config.realtime.streamLimit);
 }
 
 function closeSocket() {
@@ -285,7 +302,11 @@ export function getWatchlistRealtimeState() {
     running: state.running,
     connected: Boolean(state.socket && state.connectedAt),
     streamCount: state.streamCount,
+    streamLimit: config.realtime.streamLimit,
+    tokenLimit: config.realtime.tokenLimit,
     watchCount: state.watchItems.size,
+    fundingTopCount: state.fundingTopCount,
+    openInterestTopCount: state.openInterestTopCount,
     connectedAt: state.connectedAt,
     lastMessageAt: state.lastMessageAt,
     lastError: state.lastError,

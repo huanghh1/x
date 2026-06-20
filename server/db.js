@@ -612,24 +612,41 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
     if (row.intervalCode) bySymbol.get(row.symbol).set(row.intervalCode, row);
   }
   const deficient = [];
+  const now = Date.now();
   for (const [symbol, intervals] of bySymbol) {
     for (const intervalCode of ["15m", "1h", "4h", "1d"]) {
       const row = intervals.get(intervalCode);
       const cachedCount = Number(row?.cachedCount ?? 0);
       const expectedCount = Math.max(200, Number(retentionLimits[intervalCode]) || 200);
-      if (cachedCount < expectedCount) {
+      const earliestOpenTime = row?.earliestOpenTime === null || row?.earliestOpenTime === undefined
+        ? null
+        : Number(row.earliestOpenTime);
+      const latestOpenTime = row?.latestOpenTime === null || row?.latestOpenTime === undefined
+        ? null
+        : Number(row.latestOpenTime);
+      const safeIntervalMs = intervalMs(intervalCode);
+      const targetStartTime = now - (expectedCount - 1) * safeIntervalMs;
+      const spanSlotCount =
+        earliestOpenTime !== null && latestOpenTime !== null && latestOpenTime >= earliestOpenTime
+          ? Math.floor((latestOpenTime - earliestOpenTime) / safeIntervalMs) + 1
+          : cachedCount;
+      const hasSpanGap = cachedCount > 1 && spanSlotCount > cachedCount;
+      const firstGap = hasSpanGap
+        ? await findKlineGap(symbol, intervalCode, safeIntervalMs, Math.max(targetStartTime, earliestOpenTime), now)
+        : null;
+      if (cachedCount < expectedCount || firstGap) {
         deficient.push({
           symbol,
           intervalCode,
           cachedCount,
           expectedCount,
-          missingCount: expectedCount - cachedCount,
-          earliestOpenTime: row?.earliestOpenTime === null || row?.earliestOpenTime === undefined
-            ? null
-            : Number(row.earliestOpenTime),
-          latestOpenTime: row?.latestOpenTime === null || row?.latestOpenTime === undefined
-            ? null
-            : Number(row.latestOpenTime)
+          missingCount: Math.max(0, expectedCount - cachedCount),
+          earliestOpenTime,
+          latestOpenTime,
+          gapStartTime: firstGap?.startTime ?? null,
+          gapEndTime: firstGap?.endTime ?? null,
+          gapMissingCount: firstGap?.missingCount ?? 0,
+          reason: firstGap ? "gap" : "count"
         });
       }
     }
@@ -815,6 +832,15 @@ export async function klineStats(symbol, intervalCode) {
   };
 }
 
+function intervalMs(intervalCode) {
+  return {
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000
+  }[intervalCode] ?? 60 * 60 * 1000;
+}
+
 export async function findKlineGap(symbol, intervalCode, intervalMsValue, startTime, endTime) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const [rows] = await getPool().query(
@@ -841,7 +867,8 @@ export async function findKlineGap(symbol, intervalCode, intervalMsValue, startT
     if (currentOpenTime > expectedOpenTime) {
       return {
         startTime: expectedOpenTime,
-        endTime: currentOpenTime - safeIntervalMs
+        endTime: currentOpenTime - safeIntervalMs,
+        missingCount: Math.max(1, Math.round((currentOpenTime - expectedOpenTime) / safeIntervalMs))
       };
     }
     previousOpenTime = currentOpenTime;
@@ -1153,6 +1180,20 @@ export async function listOneHourFundingIntervals() {
       adjusted_funding_rate_floor AS adjustedFundingRateFloor,
       current_funding_rate AS currentFundingRate,
       next_funding_time AS nextFundingTime,
+      (
+        SELECT k.close_price
+        FROM kline_cache k
+        WHERE k.symbol=funding_interval_state.symbol AND k.interval_code='15m'
+        ORDER BY k.open_time DESC
+        LIMIT 1
+      ) AS currentPrice,
+      (
+        SELECT k.close_time
+        FROM kline_cache k
+        WHERE k.symbol=funding_interval_state.symbol AND k.interval_code='15m'
+        ORDER BY k.open_time DESC
+        LIMIT 1
+      ) AS currentCloseTime,
       source_present AS sourcePresent,
       first_seen_at AS firstSeenAt,
       last_seen_at AS lastSeenAt,
@@ -1188,7 +1229,11 @@ export async function listOneHourFundingIntervals() {
       [symbols, baseAssets, hotRankActiveSeconds()]
     ),
     getPool().query(
-      `SELECT symbol, change_5m_pct AS change5mPct, change_1h_pct AS change1hPct
+      `SELECT symbol,
+        change_5m_pct AS change5mPct,
+        change_1h_pct AS change1hPct,
+        change_4h_pct AS change4hPct,
+        change_1d_pct AS change1dPct
        FROM open_interest_monitor
        WHERE symbol IN (?)
          AND observed_at >= DATE_SUB(NOW(3), INTERVAL ? SECOND)`,
@@ -1218,6 +1263,8 @@ export async function listOneHourFundingIntervals() {
       adjustedFundingRateFloor: row.adjustedFundingRateFloor === null ? null : Number(row.adjustedFundingRateFloor),
       currentFundingRate: row.currentFundingRate === null ? null : Number(row.currentFundingRate),
       nextFundingTime: row.nextFundingTime === null ? null : Number(row.nextFundingTime),
+      currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
+      currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
       sourcePresent: Boolean(row.sourcePresent),
       hotRank: hotSymbols.has(row.symbol),
       fundingOneHour: true,
@@ -1226,12 +1273,31 @@ export async function listOneHourFundingIntervals() {
       alertLevel: signal?.alertLevel ?? null,
       oiChange5mPct: oiSpike.change5mPct,
       oiChange1hPct: oiSpike.change1hPct,
+      oiChange4hPct: oiSpike.change4hPct,
+      oiChange1dPct: oiSpike.change1dPct,
       oiMatched,
       oiSpike: oiSpike.hit,
       oiSpike5mHit: oiSpike.hit5m,
-      oiSpike1hHit: oiSpike.hit1h
+      oiSpike1hHit: oiSpike.hit1h,
+      oiSpike4hHit: oiSpike.hit4h,
+      oiSpike1dHit: oiSpike.hit1d
     };
   });
+}
+
+export async function listTopFundingRealtimeTokens(limit = 5) {
+  const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+  const [rows] = await getPool().query(
+    `SELECT t.*
+     FROM funding_interval_state f
+     JOIN token_list t ON t.symbol=f.symbol AND t.is_active=1
+     WHERE f.funding_interval_hours=1
+       AND f.source_present=1
+     ORDER BY COALESCE(f.last_changed_at, f.last_seen_at) DESC, f.symbol
+     LIMIT :limit`,
+    { limit: safeLimit }
+  );
+  return rows;
 }
 
 const TRIGGER_TYPES = new Set(["MA_SIGNAL", "HOT_RANK", "FUNDING_RATE", "OI_SPIKE", "COMPOSITE"]);
@@ -1383,7 +1449,10 @@ export async function getSignalCorrelationContext(symbol) {
     { symbol: safeSymbol }
   );
   const [oiRows] = await getPool().query(
-    `SELECT change_5m_pct AS change5mPct, change_1h_pct AS change1hPct
+    `SELECT change_5m_pct AS change5mPct,
+      change_1h_pct AS change1hPct,
+      change_4h_pct AS change4hPct,
+      change_1d_pct AS change1dPct
      FROM open_interest_monitor
      WHERE symbol=:symbol
        AND observed_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
@@ -1399,9 +1468,13 @@ export async function getSignalCorrelationContext(symbol) {
     alertLevel: signalRows[0]?.alertLevel ?? null,
     oiChange5mPct: oiSpike.change5mPct,
     oiChange1hPct: oiSpike.change1hPct,
+    oiChange4hPct: oiSpike.change4hPct,
+    oiChange1dPct: oiSpike.change1dPct,
     oiSpike: oiSpike.hit,
     oiSpike5mHit: oiSpike.hit5m,
-    oiSpike1hHit: oiSpike.hit1h
+    oiSpike1hHit: oiSpike.hit1h,
+    oiSpike4hHit: oiSpike.hit4h,
+    oiSpike1dHit: oiSpike.hit1d
   };
 }
 
@@ -1470,6 +1543,20 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
       oi.change_1h_pct AS change1hPct,
       oi.change_4h_pct AS change4hPct,
       oi.change_1d_pct AS change1dPct,
+      (
+        SELECT k.close_price
+        FROM kline_cache k
+        WHERE k.symbol=oi.symbol AND k.interval_code='15m'
+        ORDER BY k.open_time DESC
+        LIMIT 1
+      ) AS currentPrice,
+      (
+        SELECT k.close_time
+        FROM kline_cache k
+        WHERE k.symbol=oi.symbol AND k.interval_code='15m'
+        ORDER BY k.open_time DESC
+        LIMIT 1
+      ) AS currentCloseTime,
       oi.observed_at AS observedAt,
       oi.last_spike_alert_at AS lastSpikeAlertAt,
       EXISTS(
@@ -1511,6 +1598,8 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
     change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
     change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
     change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
+    currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
+    currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
     hotRankHit: Boolean(row.hotRankHit),
     fundingOneHour: Boolean(row.fundingOneHour),
     multiCycleCount: Number(row.multiCycleCount ?? 0),
@@ -1554,6 +1643,20 @@ export async function listOpenInterestMonitorPage({
       oi.change_1h_pct AS change1hPct,
       oi.change_4h_pct AS change4hPct,
       oi.change_1d_pct AS change1dPct,
+      (
+        SELECT k.close_price
+        FROM kline_cache k
+        WHERE k.symbol=oi.symbol AND k.interval_code='15m'
+        ORDER BY k.open_time DESC
+        LIMIT 1
+      ) AS currentPrice,
+      (
+        SELECT k.close_time
+        FROM kline_cache k
+        WHERE k.symbol=oi.symbol AND k.interval_code='15m'
+        ORDER BY k.open_time DESC
+        LIMIT 1
+      ) AS currentCloseTime,
       oi.observed_at AS observedAt,
       oi.last_spike_alert_at AS lastSpikeAlertAt,
       EXISTS(
@@ -1595,6 +1698,8 @@ export async function listOpenInterestMonitorPage({
       change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
       change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
       change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
+      currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
+      currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
       hotRankHit: Boolean(row.hotRankHit),
       fundingOneHour: Boolean(row.fundingOneHour),
       multiCycleCount: Number(row.multiCycleCount ?? 0),
@@ -1608,6 +1713,22 @@ export async function listOpenInterestMonitorPage({
   };
 }
 
+export async function listTopOpenInterestRealtimeTokens({ timeWindow = "5m", sort = "desc", limit = 5 } = {}) {
+  const column = oiChangeColumn(timeWindow);
+  const direction = sort === "asc" ? "ASC" : "DESC";
+  const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
+  const [rows] = await getPool().query(
+    `SELECT t.*
+     FROM open_interest_monitor oi
+     JOIN token_list t ON t.symbol=oi.symbol AND t.is_active=1
+     WHERE oi.${column} IS NOT NULL
+     ORDER BY oi.${column} ${direction}, oi.observed_at DESC, oi.symbol
+     LIMIT :limit`,
+    { limit: safeLimit }
+  );
+  return rows;
+}
+
 export async function getOpenInterestMonitorItem(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return null;
@@ -1615,6 +1736,8 @@ export async function getOpenInterestMonitorItem(symbol) {
     `SELECT symbol,
       change_5m_pct AS change5mPct,
       change_1h_pct AS change1hPct,
+      change_4h_pct AS change4hPct,
+      change_1d_pct AS change1dPct,
       observed_at AS observedAt,
       last_spike_alert_at AS lastSpikeAlertAt
      FROM open_interest_monitor
@@ -1627,7 +1750,9 @@ export async function getOpenInterestMonitorItem(symbol) {
   return {
     ...row,
     change5mPct: row.change5mPct === null ? null : Number(row.change5mPct),
-    change1hPct: row.change1hPct === null ? null : Number(row.change1hPct)
+    change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
+    change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
+    change1dPct: row.change1dPct === null ? null : Number(row.change1dPct)
   };
 }
 
@@ -2048,6 +2173,8 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
         AND (
           oi.change_5m_pct >= :oiSpike5mPct
           OR oi.change_1h_pct >= :oiSpike1hPct
+          OR oi.change_4h_pct >= :oiSpike4hPct
+          OR oi.change_1d_pct >= :oiSpike1dPct
         )
     ), 4, 0)`;
   const hotBitSql = `IF(EXISTS(
@@ -2085,7 +2212,9 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       activeSeconds: hotRankActiveSeconds(),
       oiActiveSeconds: openInterestActiveSeconds(),
       oiSpike5mPct: config.openInterestMonitor.spike5mPct,
-      oiSpike1hPct: config.openInterestMonitor.spike1hPct
+      oiSpike1hPct: config.openInterestMonitor.spike1hPct,
+      oiSpike4hPct: config.openInterestMonitor.spike4hPct,
+      oiSpike1dPct: config.openInterestMonitor.spike1dPct
     }
   );
   const [symbolRows] = await getPool().query(
@@ -2103,7 +2232,9 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       activeSeconds: hotRankActiveSeconds(),
       oiActiveSeconds: openInterestActiveSeconds(),
       oiSpike5mPct: config.openInterestMonitor.spike5mPct,
-      oiSpike1hPct: config.openInterestMonitor.spike1hPct
+      oiSpike1hPct: config.openInterestMonitor.spike1hPct,
+      oiSpike4hPct: config.openInterestMonitor.spike4hPct,
+      oiSpike1dPct: config.openInterestMonitor.spike1dPct
     }
   );
   const symbols = symbolRows.map((row) => sanitizeDbSymbol(row.symbol)).filter(Boolean);
@@ -2143,7 +2274,9 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
   const [oiRows] = await getPool().query(
     `SELECT symbol,
       change_5m_pct AS oiChange5mPct,
-      change_1h_pct AS oiChange1hPct
+      change_1h_pct AS oiChange1hPct,
+      change_4h_pct AS oiChange4hPct,
+      change_1d_pct AS oiChange1dPct
      FROM open_interest_monitor
      WHERE symbol IN (${quotedList(symbols)})
        AND observed_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)`,
@@ -2179,7 +2312,12 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     const triggeredDetails = details.filter((row) => ["LEVEL1", "LEVEL2"].includes(row.alertLevel));
     const bestAlertLevel = resolveBestAlertLevel(triggeredDetails);
     const oiSpike = evaluateOpenInterestSpike(
-      { change5mPct: oi?.oiChange5mPct, change1hPct: oi?.oiChange1hPct },
+      {
+        change5mPct: oi?.oiChange5mPct,
+        change1hPct: oi?.oiChange1hPct,
+        change4hPct: oi?.oiChange4hPct,
+        change1dPct: oi?.oiChange1dPct
+      },
       config.openInterestMonitor
     );
     const oiMatched = oiSpike.hit;
@@ -2205,10 +2343,14 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       fundingOneHour,
       oiChange5mPct: oiSpike.change5mPct,
       oiChange1hPct: oiSpike.change1hPct,
+      oiChange4hPct: oiSpike.change4hPct,
+      oiChange1dPct: oiSpike.change1dPct,
       oiMatched,
       oiSpikeHit,
       oiSpike5mHit: oiSpike.hit5m,
       oiSpike1hHit: oiSpike.hit1h,
+      oiSpike4hHit: oiSpike.hit4h,
+      oiSpike1dHit: oiSpike.hit1d,
       compositeProfile
     };
   });
@@ -2463,6 +2605,26 @@ function rollingAverage(rows, index, size) {
   return Number((sum / size).toFixed(12));
 }
 
+function collectKlineGaps(rows, intervalCode) {
+  const safeIntervalMs = intervalMs(intervalCode);
+  const gaps = [];
+  let previous = null;
+  for (const row of rows) {
+    if (previous) {
+      const missingCount = Math.round((row.openTime - previous.openTime) / safeIntervalMs) - 1;
+      if (missingCount > 0) {
+        gaps.push({
+          startTime: previous.openTime + safeIntervalMs,
+          endTime: row.openTime - safeIntervalMs,
+          missingCount
+        });
+      }
+    }
+    previous = row;
+  }
+  return gaps;
+}
+
 export async function getKlines({ symbol, intervalCode, limit = 240 }) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const allRows = limit === "all";
@@ -2496,11 +2658,23 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
     volume: Number(row.volume)
   }));
 
+  const gaps = collectKlineGaps(normalized, intervalCode);
+  const gapStartTimes = new Set(gaps.map((gap) => gap.endTime + intervalMs(intervalCode)));
   const withMa = normalized.map((row, index) => ({
     ...row,
+    gapBefore: gapStartTimes.has(row.openTime),
     ma100: rollingAverage(normalized, index, 100),
     ma200: rollingAverage(normalized, index, 200)
   }));
+  const klines = allRows ? withMa : withMa.slice(-safeLimit);
+  const visibleStart = klines[0]?.openTime ?? null;
+  const visibleEnd = klines.at(-1)?.openTime ?? null;
+  const visibleGaps = gaps.filter((gap) =>
+    visibleStart !== null &&
+    visibleEnd !== null &&
+    gap.endTime >= visibleStart &&
+    gap.startTime <= visibleEnd
+  );
 
   return {
     symbol: safeSymbol,
@@ -2512,7 +2686,10 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
     earliestOpenTime: withMa[0]?.openTime ?? null,
     latestOpenTime: withMa.at(-1)?.openTime ?? null,
     hasMa200: withMa.length >= 200,
-    klines: allRows ? withMa : withMa.slice(-safeLimit)
+    gapCount: visibleGaps.length,
+    missingKlineCount: visibleGaps.reduce((sum, gap) => sum + gap.missingCount, 0),
+    gaps: visibleGaps,
+    klines
   };
 }
 
@@ -2749,6 +2926,8 @@ export async function listRealtimeKlineTokens() {
                    AND (
                      oi.change_5m_pct >= :oiSpike5mPct
                      OR oi.change_1h_pct >= :oiSpike1hPct
+                     OR oi.change_4h_pct >= :oiSpike4hPct
+                     OR oi.change_1d_pct >= :oiSpike1dPct
                    )
                )
                OR EXISTS(
@@ -2764,6 +2943,8 @@ export async function listRealtimeKlineTokens() {
       oiActiveSeconds: openInterestActiveSeconds(),
       oiSpike5mPct: config.openInterestMonitor.spike5mPct,
       oiSpike1hPct: config.openInterestMonitor.spike1hPct,
+      oiSpike4hPct: config.openInterestMonitor.spike4hPct,
+      oiSpike1dPct: config.openInterestMonitor.spike1dPct,
       hotRankActiveSeconds: hotRankActiveSeconds()
     }
   );

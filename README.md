@@ -80,7 +80,7 @@ pm2 delete ecosystem.config.cjs
 - 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理。
 - 关注池会单独开启 Binance Futures WebSocket 实时层，订阅关注代币的价格和四周期 K 线；价格会轻量落库，K 线按周期节流落库且收盘必落库，全市场均线扫描仍按原规则运行。
 - 资金费率结算周期监控默认每小时扫描一次 Binance USDⓈ-M `fundingInfo`，并通过 `premiumIndex` 保存当前资金费率；切换为 1 小时结算会发送独立提醒，未确认时每 5 分钟重复提醒，存在一级或二级均线警报时同步纳入组合信号。
-- OI 只有达到 `5分钟 >= 5%` 或 `1小时 >= 10%` 才接入均线组合；阈值可通过 `OPEN_INTEREST_SPIKE_5M_PCT`、`OPEN_INTEREST_SPIKE_1H_PCT` 调整。
+- OI 达到 `5分钟 >= 2%`、`1小时 >= 10%`、`4小时 >= 20%` 或 `1天 >= 40%` 会记录暴涨信号；有其他信号时发送组合推送，否则发送 OI 独立暴涨推送。阈值可通过 `OPEN_INTEREST_SPIKE_5M_PCT`、`OPEN_INTEREST_SPIKE_1H_PCT`、`OPEN_INTEREST_SPIKE_4H_PCT`、`OPEN_INTEREST_SPIKE_1D_PCT` 调整。
 - 热度排行严格按 BSC、Base、Solana 分链，排除动态市值前 10、稳定币和 Binance 标记的代币化股票。
 - 热度排行仅使用币安 Web3 热度源，不再调用推特热度接口。
 - 同一代币的多个均线周期在页面合并为一行，达到 3 个周期时统一标记为“多周期信号”。
@@ -121,11 +121,22 @@ POST /api/kline-audit
 # 同时处理多少个交易对；本机和 MySQL 正常时 4-8 都可以试
 CRAWLER_CONCURRENT_TOKENS=4
 
-# 每分钟最多使用多少 Binance REQUEST_WEIGHT；默认 900，偏保守
-BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE=900
+# 每分钟最多使用多少 Binance REQUEST_WEIGHT；默认 1800，低于 USD-M Futures 常见 2400/min 上限
+BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE=1800
 
-# K 线每页条数；499 是 2 weight 档，1000 是 5 weight 档，1500 是 10 weight 档
+# 历史补齐 K 线每页条数；499 是 2 weight 档，1000 是 5 weight 档，1500 是 10 weight 档
 KLINE_REQUEST_LIMIT=499
+
+# 普通增量补最新 K 线每页条数；50 是 1 weight 档，适合每轮只补少量 K 线
+KLINE_INCREMENTAL_REQUEST_LIMIT=50
+
+# OI 历史接口官方限制为 1000 requests/5min/IP；默认每轮最多扫 900 个币，超出滚动分批
+OPEN_INTEREST_SCAN_MS=180000
+OPEN_INTEREST_REQUEST_LIMIT_PER_5M=900
+
+# 单个 USD-M Futures WebSocket 连接最多 1024 streams；每个实时币约 5 个 streams
+REALTIME_STREAM_LIMIT=900
+REALTIME_KLINE_TOKEN_LIMIT=180
 
 # 数据库连接池；建议至少比并发 worker 多 2-4
 MYSQL_CONNECTION_LIMIT=8
@@ -144,7 +155,7 @@ TELEGRAM_BOT_TOKEN=你的bot token
 TELEGRAM_CHAT_ID=你的chat id
 ```
 
-一级、二级均线警报都不单独发送。Telegram 推送带一级或二级均线警报的资金费率、OI 暴涨、热度、多周期组合；资金费率 1 小时结算另有独立确认提醒。推特搜索和币安广场以正文链接紧跟代币名，键盘只保留“复制代币”按钮。Bot 导航包含均线排行、多周期、热度排行、资金费率、OI 和关注池，不包含触发记录。
+一级、二级均线警报都不单独发送。Telegram 推送带一级或二级均线警报的资金费率、OI 暴涨、热度、多周期组合；OI 暴涨没有组合信号时发送独立暴涨推送；资金费率 1 小时结算另有独立确认提醒。推特搜索和币安广场以正文链接紧跟代币名，键盘只保留“复制代币”按钮。Bot 导航包含均线排行、多周期、热度排行、资金费率、OI 和关注池，不包含触发记录。
 
 Telegram 请求默认重试 4 次，并对超时、TLS 断连、`429` 和 `5xx` 做指数退避。Bot 回调会先立即确认按钮，再执行查询。
 菜单查询默认缓存 30 秒，并在后台定时预热；缓存过期时会先返回最近一次结果再刷新，避免均线和 OI 按钮反复触发全量聚合。

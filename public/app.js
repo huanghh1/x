@@ -39,7 +39,6 @@ const state = {
   signalChartIntervals: new Map(),
   chartCache: new Map(),
   chartState: new Map(),
-  multiHistory: [],
   currentView: "signals",
   watchlist: [],
   watchLoaded: false,
@@ -647,6 +646,7 @@ function renderFundingRateTokens() {
             <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
             <span class="level-badge level1">${escapeHtml(token.fundingIntervalHours ?? 1)} 小时结算</span>
           </div>
+          <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(token.symbol)}">${formatNumber(token.currentPrice)}</b></div>
           <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
           <div><span>当前资金费率</span><b class="mono funding-rate ${rateTone}">${formatFundingPercent(token.currentFundingRate)}</b></div>
@@ -765,6 +765,7 @@ function renderIOMonitoring() {
       return `
         <article class="io-card">
           <div class="io-symbol"><button class="market-symbol-button" type="button" data-market-chart="io" data-market-symbol="${escapeHtml(item.symbol)}" aria-expanded="${expanded}">${escapeHtml(item.symbol)}</button><span>${escapeHtml(state.ioWindow)}</span></div>
+          <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(item.symbol)}">${formatNumber(item.currentPrice)}</b></div>
           <div><span>变化</span><b class="${changeClass}">${formatPercent(item.changePercent)}</b></div>
           <div><span>当前持仓量</span><b class="mono">${formatCompactNumber(item.currentOpenInterest)}</b></div>
           <div><span>持仓价值</span><b class="mono">${formatCompactUsd(item.currentOpenInterestValue)}</b></div>
@@ -1147,43 +1148,6 @@ function renderSignals() {
   updateWatchRealtime();
 }
 
-function renderMultiHistory() {
-  const target = $("#multiHistoryRows");
-  if (!target) return;
-  if (!state.multiHistory.length) {
-    target.innerHTML = '<div class="heat-empty">暂无多周期历史记录。</div>';
-    return;
-  }
-  target.innerHTML = state.multiHistory
-    .map((item) => `
-      <article class="multi-history-row">
-        <div>
-          <strong>${escapeHtml(item.symbol)}</strong>
-          <span>${escapeHtml(item.categoryLabel || item.baseAsset || "--")}</span>
-        </div>
-        <div><span>周期数</span><b>${escapeHtml(item.multiMatchCount)}</b></div>
-        <div><span>周期</span><b>${escapeHtml(item.intervals || "--")}</b></div>
-        <div><span>最高等级</span><b>${escapeHtml(LABELS.level[item.bestAlertLevel] || item.bestAlertLevel || "--")}</b></div>
-        <div><span>首次触发</span><b>${formatTime(item.firstTriggeredAt)}</b></div>
-        <div><span>最近触发</span><b>${formatTime(item.lastTriggeredAt)}</b></div>
-        <div class="heat-links">${copyButton(item.symbol)}${searchButtons(item.symbol)}</div>
-      </article>
-    `)
-    .join("");
-  bindCopyButtons(target);
-}
-
-async function loadMultiHistory() {
-  try {
-    const payload = await api("/api/multi-history?limit=80");
-    state.multiHistory = payload.items ?? [];
-  } catch (error) {
-    console.warn("multi history failed", error);
-    state.multiHistory = [];
-  }
-  renderMultiHistory();
-}
-
 async function copyText(text) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -1530,6 +1494,18 @@ function watchRealtimeStreams() {
       streams.add(`${state.watchExpandedSymbol.toLowerCase()}@kline_${state.watchInterval}`);
     }
   }
+  if (state.currentView === "funding") {
+    for (const token of state.fundingTokens.slice(0, 5)) {
+      const symbol = String(token.symbol ?? "").toLowerCase();
+      if (symbol) streams.add(`${symbol}@ticker`);
+    }
+  }
+  if (state.currentView === "io") {
+    for (const item of state.ioData.slice(0, 5)) {
+      const symbol = String(item.symbol ?? "").toLowerCase();
+      if (symbol) streams.add(`${symbol}@ticker`);
+    }
+  }
   const expandedCharts = [
     state.currentView === "signals" && state.expandedKey
       ? state.signals.find((row) => rowKey(row) === state.expandedKey)?.symbol
@@ -1566,6 +1542,22 @@ function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
   }
 }
 
+function updateMarketPriceDom(symbol, price, eventTime = Date.now()) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  if (!safeSymbol || !Number.isFinite(Number(price))) return;
+  for (const item of [...state.fundingTokens, ...state.ioData]) {
+    if (String(item.symbol ?? "").toUpperCase() === safeSymbol) {
+      item.currentPrice = price;
+      item.currentCloseTime = eventTime;
+    }
+  }
+  const selectorSymbol = cssEscape(safeSymbol);
+  for (const element of document.querySelectorAll(`[data-market-price="${selectorSymbol}"]`)) {
+    element.textContent = formatNumber(price);
+    element.title = `最新更新时间：${formatTime(eventTime)}`;
+  }
+}
+
 function averageRecent(values, size) {
   if (values.length < size) return null;
   const slice = values.slice(-size);
@@ -1591,11 +1583,16 @@ function updateChartKline(symbol, interval, kline) {
   if (last && last.openTime === next.openTime) {
     Object.assign(last, next);
   } else if (!last || next.openTime > last.openTime) {
+    next.gapBefore = last
+      ? Math.round((next.openTime - Number(last.openTime)) / intervalMsFromCode(interval)) > 1
+      : false;
     klines.push(next);
     if (klines.length > 6000) klines.shift();
+    payload._chartKlines = null;
     const settings = state.chartState.get(key);
     if (settings) {
-      settings.start = Math.max(0, klines.length - settings.visible);
+      const length = chartKlineLength(payload);
+      settings.start = Math.max(0, length - settings.visible);
     }
   } else {
     return;
@@ -1604,6 +1601,7 @@ function updateChartKline(symbol, interval, kline) {
   const target = klines.at(-1);
   target.ma100 = averageRecent(closes, 100);
   target.ma200 = averageRecent(closes, 200);
+  payload._chartKlines = null;
   drawChartForKey(key);
 }
 
@@ -1611,13 +1609,20 @@ function handleWatchRealtimeMessage(payload) {
   if (payload?.type === "price") {
     const symbol = String(payload.symbol ?? "").toUpperCase();
     const price = Number(payload.price);
-    if (symbol && Number.isFinite(price)) updateWatchPriceDom(symbol, price, Number(payload.eventTime ?? Date.now()));
+    if (symbol && Number.isFinite(price)) {
+      const eventTime = Number(payload.eventTime ?? Date.now());
+      updateWatchPriceDom(symbol, price, eventTime);
+      updateMarketPriceDom(symbol, price, eventTime);
+    }
     return;
   }
   if (payload?.type === "kline" && payload.kline) {
     const symbol = String(payload.symbol ?? "").toUpperCase();
     const interval = String(payload.interval ?? payload.kline.i ?? "");
-    updateWatchPriceDom(symbol, Number(payload.kline.c), Number(payload.eventTime ?? Date.now()));
+    const price = Number(payload.kline.c);
+    const eventTime = Number(payload.eventTime ?? Date.now());
+    updateWatchPriceDom(symbol, price, eventTime);
+    updateMarketPriceDom(symbol, price, eventTime);
     updateChartKline(symbol, interval, payload.kline);
     return;
   }
@@ -1626,13 +1631,20 @@ function handleWatchRealtimeMessage(payload) {
   if (stream.endsWith("@ticker") || data?.e === "24hrTicker") {
     const symbol = String(data.s ?? "").toUpperCase();
     const price = Number(data.c);
-    if (symbol && Number.isFinite(price)) updateWatchPriceDom(symbol, price, Number(data.E ?? Date.now()));
+    if (symbol && Number.isFinite(price)) {
+      const eventTime = Number(data.E ?? Date.now());
+      updateWatchPriceDom(symbol, price, eventTime);
+      updateMarketPriceDom(symbol, price, eventTime);
+    }
     return;
   }
   if (data?.e === "kline" && data.k) {
     const symbol = String(data.s ?? "").toUpperCase();
     const interval = String(data.k.i ?? "");
-    updateWatchPriceDom(symbol, Number(data.k.c), Number(data.E ?? Date.now()));
+    const price = Number(data.k.c);
+    const eventTime = Number(data.E ?? Date.now());
+    updateWatchPriceDom(symbol, price, eventTime);
+    updateMarketPriceDom(symbol, price, eventTime);
     updateChartKline(symbol, interval, data.k);
   }
 }
@@ -1776,7 +1788,6 @@ async function refreshAll({ keepPage = true } = {}) {
     if (!keepPage) state.page = 1;
     await loadSignalsPage();
     renderSignals();
-    loadMultiHistory();
   } catch (error) {
     const dbState = $("#dbState");
     if (dbState) {
@@ -1879,6 +1890,48 @@ function chartLayout(width, height, settings) {
   };
 }
 
+function intervalMsFromCode(intervalCode) {
+  return {
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000
+  }[intervalCode] ?? 60 * 60 * 1000;
+}
+
+function buildChartKlines(klines, intervalCode) {
+  const source = Array.isArray(klines) ? klines : [];
+  if (source.length < 2) return source;
+  const intervalMs = intervalMsFromCode(intervalCode);
+  const chartRows = [];
+  let previous = null;
+  for (const item of source) {
+    if (previous) {
+      const missingSlots = Math.round((Number(item.openTime) - Number(previous.openTime)) / intervalMs) - 1;
+      for (let slot = 1; slot <= Math.min(missingSlots, 5000); slot += 1) {
+        chartRows.push({
+          isGap: true,
+          openTime: Number(previous.openTime) + intervalMs * slot,
+          missingSlots
+        });
+      }
+    }
+    chartRows.push({ ...item, isGap: false });
+    previous = item;
+  }
+  return chartRows;
+}
+
+function chartKlines(payload) {
+  if (!payload) return [];
+  if (!payload._chartKlines) payload._chartKlines = buildChartKlines(payload.klines, payload.intervalCode);
+  return payload._chartKlines;
+}
+
+function chartKlineLength(payload) {
+  return chartKlines(payload).length;
+}
+
 async function loadAndRenderChart(row, { force = false } = {}) {
   const key = `${row.symbol}|${row.intervalCode}`;
   const shell = document.getElementById(chartElementId(key));
@@ -1889,10 +1942,10 @@ async function loadAndRenderChart(row, { force = false } = {}) {
     if (!state.chartCache.has(key)) {
       const payload = await api(`/api/klines?symbol=${encodeURIComponent(row.symbol)}&interval=${encodeURIComponent(row.intervalCode)}&limit=all`);
       state.chartCache.set(key, payload);
-      state.chartState.set(key, chartDefaults(payload.klines.length));
+      state.chartState.set(key, chartDefaults(chartKlineLength(payload)));
     }
     const payload = state.chartCache.get(key);
-    const settings = state.chartState.get(key) ?? chartDefaults(payload.klines.length);
+    const settings = state.chartState.get(key) ?? chartDefaults(chartKlineLength(payload));
     state.chartState.set(key, settings);
 
     if (!payload.klines.length) {
@@ -1909,7 +1962,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
       <div class="chart-toolbar">
         <div class="chart-title-block">
           <strong>${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} K线</strong>
-          <span>数据库全部 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根 · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
+          <span>数据库全部 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${payload.gapCount ? ` · 缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
         </div>
         <div class="chart-tools" role="toolbar" aria-label="K线工具">
           <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair" title="显示或隐藏十字线">十字线</button>
@@ -1963,7 +2016,7 @@ function bindChartTools(shell, key) {
     const payload = state.chartCache.get(key);
     if (!settings || !payload) return;
     event.preventDefault();
-    const length = payload.klines.length;
+    const length = chartKlineLength(payload);
     const minVisible = Math.min(length, 30);
     const rect = canvas.getBoundingClientRect();
     const layout = chartLayout(rect.width, rect.height || 430, settings);
@@ -2046,7 +2099,7 @@ function bindChartTools(shell, key) {
       }
       const slot = layout.width / Math.max(1, settings.visible);
       const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
-      settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(payload.klines.length, settings.visible));
+      settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(chartKlineLength(payload), settings.visible));
       settings.priceOffset =
         settings.dragStartOffset +
         ((event.clientY - settings.dragStartY) / Math.max(1, layout.height)) * settings.dragStartSpan;
@@ -2136,7 +2189,7 @@ function bindChartTools(shell, key) {
       settings.start = clamp(
         settings.dragStartStart - movedSlots,
         0,
-        chartMaxStart(payload.klines.length, settings.visible)
+        chartMaxStart(chartKlineLength(payload), settings.visible)
       );
       settings.priceOffset =
         settings.dragStartOffset +
@@ -2186,7 +2239,7 @@ function chartPointFromEvent(canvas, key, event) {
   const layout = chartLayout(rect.width, rect.height || 430, settings);
   const ratio = clamp((event.clientX - rect.left - layout.plotLeft) / (layout.plotRight - layout.plotLeft), 0, 1);
   const slotIndex = Math.min(settings.visible - 1, Math.floor(settings.visible * ratio));
-  const index = clamp(settings.start + slotIndex, 0, Math.max(0, payload.klines.length - 1));
+  const index = clamp(settings.start + slotIndex, 0, Math.max(0, chartKlineLength(payload) - 1));
   return {
     index,
     xRatio: ratio,
@@ -2195,10 +2248,11 @@ function chartPointFromEvent(canvas, key, event) {
 }
 
 function visibleKlines(payload, settings) {
-  const length = payload.klines.length;
+  const rows = chartKlines(payload);
+  const length = rows.length;
   settings.visible = clamp(settings.visible, 1, Math.max(1, length));
   settings.start = clamp(settings.start, 0, chartMaxStart(length, settings.visible));
-  return payload.klines.slice(settings.start, Math.min(length, settings.start + settings.visible));
+  return rows.slice(settings.start, Math.min(length, settings.start + settings.visible));
 }
 
 function chartPriceRange(payload, settings) {
@@ -2206,6 +2260,19 @@ function chartPriceRange(payload, settings) {
   const prices = data
     .flatMap((item) => [item.high, item.low, settings.ma100 ? item.ma100 : null, settings.ma200 ? item.ma200 : null])
     .filter(Number.isFinite);
+  if (!prices.length) {
+    const fallback = Number(payload.klines?.at(-1)?.close);
+    const center = Number.isFinite(fallback) && fallback > 0 ? fallback : 1;
+    const baseSpan = Math.max(Number.EPSILON, center * 0.16);
+    const span = baseSpan * settings.priceScale;
+    const shiftedCenter = center + settings.priceOffset;
+    return {
+      baseCenter: center,
+      baseSpan,
+      min: shiftedCenter - span / 2,
+      max: shiftedCenter + span / 2
+    };
+  }
   const rawMin = Math.min(...prices);
   const rawMax = Math.max(...prices);
   const pad = (rawMax - rawMin || rawMax || 1) * 0.08;
@@ -2252,6 +2319,28 @@ function drawLine(ctx, points, color, width = 1.5) {
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
   ctx.stroke();
+}
+
+function drawGapRegions(ctx, data, layout, slot, palette) {
+  let startIndex = null;
+  for (let index = 0; index <= data.length; index += 1) {
+    const isGap = Boolean(data[index]?.isGap);
+    if (isGap && startIndex === null) {
+      startIndex = index;
+      continue;
+    }
+    if ((!isGap || index === data.length) && startIndex !== null) {
+      const x = layout.plotLeft + slot * startIndex;
+      const width = Math.max(1, slot * (index - startIndex));
+      ctx.save();
+      ctx.fillStyle = palette.gridStrong;
+      ctx.globalAlpha = 0.16;
+      ctx.fillRect(x, layout.plotTop, width, layout.height);
+      if (layout.volumeHeight) ctx.fillRect(x, layout.volumeTop, width, layout.volumeHeight);
+      ctx.restore();
+      startIndex = null;
+    }
+  }
 }
 
 function drawUserDrawings(ctx, settings, layout, slot, palette) {
@@ -2368,8 +2457,11 @@ function drawChartForKey(key) {
     ctx.fillText(label, clamp(x - labelWidth / 2, plotLeft, plotRight - labelWidth), cssHeight - 25);
   }
 
-  const maxVolume = Math.max(...data.map((item) => item.volume), 1);
+  drawGapRegions(ctx, data, layout, slot, palette);
+
+  const maxVolume = Math.max(...data.filter((item) => !item.isGap).map((item) => item.volume).filter(Number.isFinite), 1);
   data.forEach((item, index) => {
+    if (item.isGap) return;
     const x = plotLeft + slot * index + slot / 2;
     const up = item.close >= item.open;
     const color = up ? palette.up : palette.down;
@@ -2398,7 +2490,7 @@ function drawChartForKey(key) {
   if (settings.ma100) {
     drawLine(
       ctx,
-      data.map((item, index) => (Number.isFinite(item.ma100) ? { x: plotLeft + slot * index + slot / 2, y: y(item.ma100) } : null)),
+      data.map((item, index) => (!item.isGap && Number.isFinite(item.ma100) ? { x: plotLeft + slot * index + slot / 2, y: y(item.ma100) } : null)),
       palette.ma100,
       2
     );
@@ -2406,13 +2498,13 @@ function drawChartForKey(key) {
   if (settings.ma200) {
     drawLine(
       ctx,
-      data.map((item, index) => (Number.isFinite(item.ma200) ? { x: plotLeft + slot * index + slot / 2, y: y(item.ma200) } : null)),
+      data.map((item, index) => (!item.isGap && Number.isFinite(item.ma200) ? { x: plotLeft + slot * index + slot / 2, y: y(item.ma200) } : null)),
       palette.ma200,
       2
     );
   }
 
-  const last = data.at(-1);
+  const last = [...data].reverse().find((item) => !item.isGap && Number.isFinite(item.close));
   if (last && Number.isFinite(last.close)) {
     const lastY = y(last.close);
     const lastUp = last.close >= last.open;
@@ -2462,13 +2554,19 @@ function drawChartForKey(key) {
     ctx.textBaseline = "middle";
     ctx.fillText(priceLabel, plotRight + 10, hoverY);
 
-    const changePct = item.open ? ((item.close - item.open) / item.open) * 100 : null;
-    const lines = [
-      new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
-      `O ${formatNumber(item.open, 4)}   H ${formatNumber(item.high, 4)}`,
-      `L ${formatNumber(item.low, 4)}   C ${formatNumber(item.close, 4)}   ${formatPercent(changePct)}`,
-      `V ${formatCompactNumber(item.volume)}   MA100 ${formatNumber(item.ma100, 4)}   MA200 ${formatNumber(item.ma200, 4)}`
-    ];
+    const lines = item.isGap
+      ? [
+          new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
+          "本时段缺失K线",
+          "等待后台审计补齐",
+          ""
+        ]
+      : [
+          new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
+          `O ${formatNumber(item.open, 4)}   H ${formatNumber(item.high, 4)}`,
+          `L ${formatNumber(item.low, 4)}   C ${formatNumber(item.close, 4)}   ${formatPercent(item.open ? ((item.close - item.open) / item.open) * 100 : null)}`,
+          `V ${formatCompactNumber(item.volume)}   MA100 ${formatNumber(item.ma100, 4)}   MA200 ${formatNumber(item.ma200, 4)}`
+        ];
     const tooltipWidth = Math.min(parentWidth - 24, Math.max(...lines.map((line) => ctx.measureText(line).width)) + 22);
     const tooltipHeight = 92;
     const tx = Math.min(parentWidth - tooltipWidth - 12, Math.max(12, x - tooltipWidth / 2));
@@ -2493,8 +2591,9 @@ function drawChartForKey(key) {
   ctx.fillRect(plotLeft + 88, cssHeight - 13, 18, 3);
   ctx.fillStyle = palette.muted;
   ctx.fillText("MA200", plotLeft + 112, cssHeight - 12);
-  const trailingSpace = Math.max(0, settings.start + settings.visible - payload.klines.length);
-  const rangeLabel = `范围 ${settings.start + 1}-${settings.start + data.length}/${payload.klines.length}${trailingSpace ? ` +${trailingSpace}空白` : ""}`;
+  const chartLength = chartKlineLength(payload);
+  const trailingSpace = Math.max(0, settings.start + settings.visible - chartLength);
+  const rangeLabel = `范围 ${settings.start + 1}-${settings.start + data.length}/${chartLength}槽 · 实K ${payload.klines.length}${trailingSpace ? ` +${trailingSpace}空白` : ""}`;
   const rangeWidth = ctx.measureText(rangeLabel).width;
   ctx.fillText(rangeLabel, Math.max(plotLeft + 190, plotRight - rangeWidth), cssHeight - 12);
 }

@@ -322,12 +322,14 @@ export async function sendOpenInterestSpikeTelegram(item, context = {}) {
     `交易对：${telegramTokenLine(item.symbol)}`,
     `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b>`,
     `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b>`,
+    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b>`,
+    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b>`,
     `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
     `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`,
     matches.length ? `同币种命中：<b>${escapeHtml(matches.join(" + "))}</b>` : "同币种命中：暂无其他信号",
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
-    `暴涨条件：5分钟 ≥ ${escapeHtml(config.openInterestMonitor.spike5mPct)}% 或 1小时 ≥ ${escapeHtml(config.openInterestMonitor.spike1hPct)}%`,
-    "提示：OI 暴涨只有与一级或二级均线警报组合时才发送，不构成投资建议。"
+    `暴涨条件：5分钟 ≥ ${escapeHtml(config.openInterestMonitor.spike5mPct)}% 或 1小时 ≥ ${escapeHtml(config.openInterestMonitor.spike1hPct)}% 或 4小时 ≥ ${escapeHtml(config.openInterestMonitor.spike4hPct)}% 或 1天 ≥ ${escapeHtml(config.openInterestMonitor.spike1dPct)}%`,
+    "提示：这是 OI 暴涨与其他信号组合推送，不构成投资建议。"
   ].filter(Boolean).join("\n");
   const result = await postTelegram(text, signalReplyMarkup(item, "oi"));
   return { skipped: false, result };
@@ -349,6 +351,12 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
   if (item.change1hPct !== null && item.change1hPct >= config.openInterestMonitor.spike1hPct) {
     hitIntervals.push(`1小时: ${formatOiChange(item.change1hPct)}`);
   }
+  if (item.change4hPct !== null && item.change4hPct >= config.openInterestMonitor.spike4hPct) {
+    hitIntervals.push(`4小时: ${formatOiChange(item.change4hPct)}`);
+  }
+  if (item.change1dPct !== null && item.change1dPct >= config.openInterestMonitor.spike1dPct) {
+    hitIntervals.push(`1天: ${formatOiChange(item.change1dPct)}`);
+  }
 
   const text = [
     "<b>🚨 [OI持仓量暴涨警报]</b>",
@@ -357,8 +365,8 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
     `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b> (阈值: ${config.openInterestMonitor.spike5mPct}%)`,
     `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b> (阈值: ${config.openInterestMonitor.spike1hPct}%)`,
     `15分钟变化：<b>${escapeHtml(formatOiChange(item.change15mPct))}</b>`,
-    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b>`,
-    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b>`,
+    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b> (阈值: ${config.openInterestMonitor.spike4hPct}%)`,
+    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b> (阈值: ${config.openInterestMonitor.spike1dPct}%)`,
     `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
     `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`,
     "提示：检测到持仓量异常增长，请密切关注市场动态。不构成投资建议。"

@@ -35,7 +35,8 @@ const retentionLimits = {
   "1d": numberEnv("KLINE_1D_RETENTION_LIMIT", 2190)
 };
 
-const openInterestScanIntervalMs = numberEnv("OPEN_INTEREST_SCAN_MS", 5 * 60 * 1000);
+const openInterestScanIntervalMs = numberEnv("OPEN_INTEREST_SCAN_MS", 3 * 60 * 1000);
+const realtimeStreamLimit = Math.max(5, Math.min(1024, numberEnv("REALTIME_STREAM_LIMIT", 900)));
 
 const twitterTokenPool = Array.from(new Set([
   ...listEnv("OPENNEWS_TOKENS"),
@@ -97,20 +98,21 @@ export const config = {
     requestTimeoutMs: numberEnv("REQUEST_TIMEOUT_MS", 15000),
     requestRetries: numberEnv("BINANCE_REQUEST_RETRIES", 4),
     retryDelayMs: numberEnv("BINANCE_RETRY_DELAY_MS", 1000),
-    requestWeightBudgetPerMinute: numberEnv("BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE", 900)
+    requestWeightBudgetPerMinute: numberEnv("BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE", 1800)
   },
   crawler: {
     autoStart: boolEnv("AUTO_START_CRAWLER", true),
-    concurrentTokens: numberEnv("CRAWLER_CONCURRENT_TOKENS", 1),
+    concurrentTokens: numberEnv("CRAWLER_CONCURRENT_TOKENS", 4),
     lookbackDays: numberEnv("KLINE_LOOKBACK_DAYS", 90),
     intervalLookbackDays,
     retentionLimits,
     cachePolicyKey: `15m:${intervalLookbackDays["15m"]}/${retentionLimits["15m"]}|1h:${intervalLookbackDays["1h"]}/${retentionLimits["1h"]}|4h:${intervalLookbackDays["4h"]}/${retentionLimits["4h"]}|1d:${intervalLookbackDays["1d"]}/${retentionLimits["1d"]}`,
     klineLimit: numberEnv("KLINE_REQUEST_LIMIT", 499),
-    pageDelayMs: numberEnv("KLINE_PAGE_DELAY_MS", 1200),
-    intervalDelayMs: numberEnv("INTERVAL_DELAY_MS", 2000),
-    tokenDelayMinMs: numberEnv("TOKEN_DELAY_MIN_MS", 8000),
-    tokenDelayMaxMs: numberEnv("TOKEN_DELAY_MAX_MS", 12000),
+    incrementalKlineLimit: numberEnv("KLINE_INCREMENTAL_REQUEST_LIMIT", 50),
+    pageDelayMs: numberEnv("KLINE_PAGE_DELAY_MS", 250),
+    intervalDelayMs: numberEnv("INTERVAL_DELAY_MS", 300),
+    tokenDelayMinMs: numberEnv("TOKEN_DELAY_MIN_MS", 500),
+    tokenDelayMaxMs: numberEnv("TOKEN_DELAY_MAX_MS", 1500),
     staleFetchingAfterMs: numberEnv("STALE_FETCHING_AFTER_MS", 5 * 60 * 1000),
     incrementalRefreshMs: numberEnv("CRAWLER_INCREMENTAL_REFRESH_MS", 15 * 60 * 1000),
     tokenUniverseSyncMs: numberEnv("TOKEN_UNIVERSE_SYNC_MS", 6 * 60 * 60 * 1000),
@@ -138,14 +140,21 @@ export const config = {
     activeMs: numberEnv("OPEN_INTEREST_ACTIVE_MS", Math.max(15 * 60 * 1000, openInterestScanIntervalMs * 3)),
     initialDelayMs: numberEnv("OPEN_INTEREST_INITIAL_DELAY_MS", 20 * 1000),
     concurrency: Math.max(1, numberEnv("OPEN_INTEREST_CONCURRENCY", 3)),
+    requestLimitPerWindow: Math.max(1, Math.min(1000, numberEnv("OPEN_INTEREST_REQUEST_LIMIT_PER_5M", 900))),
     historyLimit: Math.max(289, Math.min(500, numberEnv("OPEN_INTEREST_HISTORY_LIMIT", 289))),
-    spike5mPct: numberEnv("OPEN_INTEREST_SPIKE_5M_PCT", 5),
+    spike5mPct: numberEnv("OPEN_INTEREST_SPIKE_5M_PCT", 2),
     spike1hPct: numberEnv("OPEN_INTEREST_SPIKE_1H_PCT", 10),
+    spike4hPct: numberEnv("OPEN_INTEREST_SPIKE_4H_PCT", 20),
+    spike1dPct: numberEnv("OPEN_INTEREST_SPIKE_1D_PCT", 40),
     alertCooldownMs: numberEnv("OPEN_INTEREST_ALERT_COOLDOWN_MS", 30 * 60 * 1000),
-    standaloneAlertEnabled: boolEnv("OPEN_INTEREST_STANDALONE_ALERT_ENABLED", false)
+    standaloneAlertEnabled: boolEnv("OPEN_INTEREST_STANDALONE_ALERT_ENABLED", true)
   },
   signal: {
     nearThresholdPct: numberEnv("MA_NEAR_THRESHOLD_PCT", 1)
+  },
+  realtime: {
+    streamLimit: realtimeStreamLimit,
+    tokenLimit: Math.max(1, Math.min(Math.floor(realtimeStreamLimit / 5), numberEnv("REALTIME_KLINE_TOKEN_LIMIT", Math.floor(realtimeStreamLimit / 5))))
   },
   app: {
     publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() ?? ""
