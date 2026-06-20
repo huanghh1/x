@@ -221,7 +221,8 @@ body[data-page="heat"] [data-page-section="heat"],
 body[data-page="watch"] [data-page-section="watch"],
 body[data-page="funding"] [data-page-section="funding"],
 body[data-page="io"] [data-page-section="io"],
-body[data-page="trigger-history"] [data-page-section="trigger-history"] {
+body[data-page="trigger-history"] [data-page-section="trigger-history"],
+body[data-page="runtime-logs"] [data-page-section="runtime-logs"] {
   display: block;
 }
 
@@ -504,24 +505,6 @@ h2 {
   align-items: center;
   gap: var(--space-3);
   min-width: 0;
-}
-
-.heat-token img,
-.heat-token-mark {
-  flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  border-radius: 999px;
-  border: 1px solid var(--color-line);
-  background: var(--color-paper);
-}
-
-.heat-token-mark {
-  display: grid;
-  place-items: center;
-  color: #17654c;
-  font-size: 12px;
-  font-weight: 900;
 }
 
 .heat-token strong,
@@ -1190,6 +1173,146 @@ body[data-page="watch"] .watch-section[data-page-section="watch"] {
   display: block !important;
 }
 
+.runtime-service-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.runtime-service-card {
+  min-width: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  background: var(--color-paper-soft);
+}
+
+.runtime-service-card.is-ok {
+  border-color: #bfe7d8;
+  background: #f2fbf7;
+}
+
+.runtime-service-card.is-error {
+  border-color: #f4b8c1;
+  background: #fff4f5;
+}
+
+.runtime-service-card span,
+.runtime-service-card p,
+.runtime-service-card small {
+  display: block;
+  min-width: 0;
+  color: var(--color-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-service-card strong {
+  display: block;
+  margin: 4px 0;
+  color: var(--color-text);
+  font-size: 18px;
+}
+
+.runtime-log-table {
+  overflow-x: auto;
+}
+
+.runtime-log-table table {
+  min-width: 980px;
+}
+
+.runtime-message {
+  max-width: 620px;
+  color: var(--color-text);
+  line-height: 1.55;
+}
+
+.runtime-log-details summary {
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.runtime-log-details pre {
+  max-width: 100%;
+  max-height: 260px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  color: var(--color-muted);
+  background: var(--color-paper-soft);
+  font: 12px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.runtime-severity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.runtime-severity.is-error {
+  color: #9d1f32;
+  background: #ffe8ec;
+}
+
+.runtime-severity.is-warn {
+  color: #8a5405;
+  background: #fff4e4;
+}
+
+.runtime-category {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 8px;
+  color: #4b698d;
+  background: #eef6ff;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.runtime-category.category-NETWORK {
+  color: #176da3;
+  background: #eef8ff;
+}
+
+.runtime-category.category-BINANCE_LIMIT,
+.runtime-category.category-BINANCE_HTTP {
+  color: #8a5405;
+  background: #fff4e4;
+}
+
+.runtime-category.category-TELEGRAM {
+  color: #26706a;
+  background: #ecfbf8;
+}
+
+.runtime-category.category-DATABASE,
+.runtime-category.category-PROGRAM {
+  color: #9d1f32;
+  background: #ffe8ec;
+}
+
+.runtime-category.category-OI,
+.runtime-category.category-FUNDING,
+.runtime-category.category-KLINE {
+  color: #6842ad;
+  background: #f7f2ff;
+}
+
 .ghost-button.primary {
   color: #fff;
   border-color: var(--color-accent);
@@ -1614,7 +1737,8 @@ body[data-page="heat"] [data-page-section="heat"],
 body[data-page="watch"] [data-page-section="watch"],
 body[data-page="funding"] [data-page-section="funding"],
 body[data-page="io"] [data-page-section="io"],
-body[data-page="trigger-history"] [data-page-section="trigger-history"] { display: block !important; }
+body[data-page="trigger-history"] [data-page-section="trigger-history"],
+body[data-page="runtime-logs"] [data-page-section="runtime-logs"] { display: block !important; }
 body[data-page="signals"] .stat-strip[data-page-section="signals"] { display: grid !important; }
 .section { padding: var(--space-6); overflow: hidden; }
 .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-5); margin-bottom: var(--space-5); }
@@ -1729,8 +1853,6 @@ td.mono span { display: block; white-space: nowrap; }
   background: var(--surface-raised);
 }
 .heat-token { display: flex; align-items: center; gap: 10px; }
-.heat-token img, .heat-token-mark { width: 34px; height: 34px; border-radius: 50%; }
-.heat-token-mark { display: grid; place-items: center; color: var(--surface-raised); background: var(--ink-strong); font-family: var(--font-mono); font-size: 11px; }
 .heat-token span, .watch-row span, .funding-card span, .io-card span { display: block; color: var(--ink-muted); font-size: 11px; }
 .heat-change.up, .up { color: var(--positive); }
 .heat-change.down, .down { color: var(--negative); }
@@ -1788,6 +1910,7 @@ td.mono span { display: block; white-space: nowrap; }
     background: var(--surface-raised);
   }
   .pool-switch nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-service-grid { grid-template-columns: 1fr; }
   .pool-item { border-bottom: 1px solid var(--line); }
   .section-head, .chart-toolbar, .pagination-bar, .footer { align-items: stretch; flex-direction: column; }
   .watch-settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }

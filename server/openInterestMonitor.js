@@ -21,6 +21,7 @@ const WINDOW_MS = {
 const HISTORY_PERIOD_MS = 5 * 60 * 1000;
 
 let timer = null;
+const retryQueue = new Set();
 
 const monitorState = {
   running: false,
@@ -36,7 +37,10 @@ const monitorState = {
   updatedCount: 0,
   spikeCount: 0,
   alertedSymbols: [],
-  errors: []
+  errors: [],
+  failedSymbols: [],
+  retryPendingCount: 0,
+  lastRetryMode: false
 };
 
 function percentChange(current, previous) {
@@ -141,12 +145,15 @@ function scheduleNext(delayMs) {
   const safeDelay = Math.max(1000, Number(delayMs) || config.openInterestMonitor.scanIntervalMs);
   monitorState.nextRunAt = new Date(Date.now() + safeDelay).toISOString();
   timer = setTimeout(async () => {
+    let nextDelayMs = config.openInterestMonitor.scanIntervalMs;
     try {
-      await runOpenInterestCheck();
+      const result = await runOpenInterestCheck();
+      if (result?.retryPendingCount > 0) nextDelayMs = config.openInterestMonitor.retryDelayMs;
     } catch (error) {
       console.error("open interest monitor failed", error);
+      nextDelayMs = config.openInterestMonitor.retryDelayMs;
     } finally {
-      scheduleNext(config.openInterestMonitor.scanIntervalMs);
+      scheduleNext(nextDelayMs);
     }
   }, safeDelay);
   timer.unref?.();
@@ -160,6 +167,7 @@ export function getOpenInterestMonitorState() {
     spike1hPct: config.openInterestMonitor.spike1hPct,
     spike4hPct: config.openInterestMonitor.spike4hPct,
     spike1dPct: config.openInterestMonitor.spike1dPct,
+    retryDelayMs: config.openInterestMonitor.retryDelayMs,
     standaloneAlertEnabled: config.openInterestMonitor.standaloneAlertEnabled,
     ...monitorState
   };
@@ -177,9 +185,29 @@ function selectScanBatch(tokens) {
     return { batch: [], startOffset: 0, deferredCount: 0 };
   }
   const limit = Math.min(tokens.length, config.openInterestMonitor.requestLimitPerWindow);
+  const tokenBySymbol = new Map(tokens.map((token) => [token.symbol, token]));
+  const retryBatch = [];
+  for (const symbol of retryQueue) {
+    const token = tokenBySymbol.get(symbol);
+    if (!token) {
+      retryQueue.delete(symbol);
+      continue;
+    }
+    retryBatch.push(token);
+    retryQueue.delete(symbol);
+    if (retryBatch.length >= limit) break;
+  }
+  if (retryBatch.length) {
+    return {
+      batch: retryBatch,
+      startOffset: 0,
+      deferredCount: tokens.length - retryBatch.length,
+      retryMode: true
+    };
+  }
   if (tokens.length <= limit) {
     monitorState.scanCursor = 0;
-    return { batch: tokens, startOffset: 0, deferredCount: 0 };
+    return { batch: tokens, startOffset: 0, deferredCount: 0, retryMode: false };
   }
   const startOffset = monitorState.scanCursor % tokens.length;
   const batch = Array.from({ length: limit }, (_, index) => tokens[(startOffset + index) % tokens.length]);
@@ -187,7 +215,8 @@ function selectScanBatch(tokens) {
   return {
     batch,
     startOffset,
-    deferredCount: tokens.length - batch.length
+    deferredCount: tokens.length - batch.length,
+    retryMode: false
   };
 }
 
@@ -202,15 +231,19 @@ export async function runOpenInterestCheck({ force = false } = {}) {
   monitorState.lastError = null;
   monitorState.errors = [];
   monitorState.alertedSymbols = [];
+  monitorState.failedSymbols = [];
+  monitorState.retryPendingCount = retryQueue.size;
+  monitorState.lastRetryMode = false;
 
   try {
     const tokens = await listActiveTokenSymbols();
-    const { batch: scanTokens, startOffset, deferredCount } = selectScanBatch(tokens);
+    const { batch: scanTokens, startOffset, deferredCount, retryMode } = selectScanBatch(tokens);
     let cursor = 0;
     let updatedCount = 0;
     let spikeCount = 0;
     const alertedSymbols = [];
     const errors = [];
+    const failedSymbols = [];
 
     const worker = async () => {
       while (cursor < scanTokens.length) {
@@ -223,6 +256,7 @@ export async function runOpenInterestCheck({ force = false } = {}) {
           if (result.spike) spikeCount += 1;
           if (result.alerted) alertedSymbols.push(token.symbol);
         } catch (error) {
+          failedSymbols.push(token.symbol);
           errors.push(`${token.symbol}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
@@ -234,6 +268,7 @@ export async function runOpenInterestCheck({ force = false } = {}) {
         () => worker()
       )
     );
+    for (const symbol of failedSymbols) retryQueue.add(symbol);
 
     monitorState.lastSuccessAt = new Date().toISOString();
     monitorState.totalTokenCount = tokens.length;
@@ -244,6 +279,9 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     monitorState.spikeCount = spikeCount;
     monitorState.alertedSymbols = alertedSymbols;
     monitorState.errors = errors.slice(0, 30);
+    monitorState.failedSymbols = failedSymbols.slice(0, 100);
+    monitorState.retryPendingCount = retryQueue.size;
+    monitorState.lastRetryMode = Boolean(retryMode);
     return {
       ok: true,
       totalTokenCount: tokens.length,
@@ -251,9 +289,12 @@ export async function runOpenInterestCheck({ force = false } = {}) {
       deferredCount,
       scanStartOffset: startOffset,
       requestLimitPerWindow: config.openInterestMonitor.requestLimitPerWindow,
+      retryMode: Boolean(retryMode),
       updatedCount,
       spikeCount,
       alertedSymbols,
+      failedSymbols: monitorState.failedSymbols,
+      retryPendingCount: retryQueue.size,
       errors: monitorState.errors
     };
   } catch (error) {

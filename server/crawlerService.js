@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import {
   getCrawlerState,
   initializeTokenUniverse,
+  refreshKlineCacheForSymbol,
   runDailyKlineAudit,
   setDailyAuditNextRunAt,
   startCrawler,
@@ -42,6 +43,18 @@ app.post("/internal/kline/audit", async (_request, response) => {
   response.json(await runDailyKlineAudit({ syncUniverse: true }));
 });
 
+app.post("/internal/kline/refresh", async (request, response) => {
+  const symbol = String(request.body?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  const intervalCode = ["15m", "1h", "4h", "1d"].includes(request.body?.intervalCode)
+    ? request.body.intervalCode
+    : null;
+  if (!symbol || !intervalCode) {
+    response.status(400).json({ ok: false, error: "symbol and intervalCode are required" });
+    return;
+  }
+  response.json(await refreshKlineCacheForSymbol(symbol, intervalCode));
+});
+
 function scheduleDailyKlineAudit() {
   const now = new Date();
   const nextRunAt = nextDailyRunAt(config.crawler.dailyAuditHour, now);
@@ -59,6 +72,14 @@ function scheduleDailyKlineAudit() {
   timer.unref?.();
 }
 
+async function runRecoveryKlineAudit() {
+  try {
+    await runDailyKlineAudit({ syncUniverse: false });
+  } catch (error) {
+    console.error("recovery kline audit failed", error);
+  }
+}
+
 await ensureDatabase();
 setInterval(() => {
   initializeTokenUniverse().catch((error) => console.error("token universe sync failed", error));
@@ -66,6 +87,7 @@ setInterval(() => {
 setInterval(() => {
   startCrawler().catch((error) => console.error("incremental crawler failed", error));
 }, config.crawler.incrementalRefreshMs).unref?.();
+setInterval(runRecoveryKlineAudit, config.crawler.recoveryAuditMs).unref?.();
 setInterval(() => {
   refreshWatchlistMarketData().catch((error) => console.error("watchlist market refresh failed", error));
 }, 15_000).unref?.();

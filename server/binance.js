@@ -70,6 +70,14 @@ function retryDelay(attempt) {
   return config.binance.retryDelayMs * 2 ** Math.max(0, attempt);
 }
 
+function describeFetchError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = error?.cause;
+  const code = cause?.code ?? error?.code;
+  const causeMessage = cause?.message && cause.message !== message ? `: ${cause.message}` : "";
+  return `${message}${code ? ` (${code})` : ""}${causeMessage}`;
+}
+
 async function fetchJson(url, label, options = {}) {
   const weight = options.weight ?? 1;
   const retries = options.retries ?? config.binance.requestRetries;
@@ -101,7 +109,12 @@ async function fetchJson(url, label, options = {}) {
       error.retryable = false;
       throw error;
     } catch (error) {
-      if (error?.retryable === false || attempt >= retries) throw error;
+      if (error?.retryable === false || attempt >= retries) {
+        if (error?.retryable === false) throw error;
+        const wrapped = new Error(`${label} ${describeFetchError(error)}`, { cause: error });
+        wrapped.code = error?.cause?.code ?? error?.code;
+        throw wrapped;
+      }
       await sleep(retryDelay(attempt));
     } finally {
       clearTimeout(timer);
@@ -242,7 +255,7 @@ export async function fetchKlinesPaged({ symbol, intervalCode, startTime, endTim
   let cursor = startTime;
   let pageCount = 0;
   const limit = klineLimit(requestedLimit);
-  while (cursor < endTime && (!shouldContinue || shouldContinue())) {
+  while (cursor <= endTime && (!shouldContinue || shouldContinue())) {
     const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/klines`);
     url.searchParams.set("symbol", symbol);
     url.searchParams.set("interval", intervalCode);

@@ -39,6 +39,8 @@ const state = {
   signalChartIntervals: new Map(),
   chartCache: new Map(),
   chartState: new Map(),
+  chartRefreshTimers: new Map(),
+  chartRefreshAttempts: new Map(),
   currentView: "signals",
   watchlist: [],
   watchLoaded: false,
@@ -76,6 +78,7 @@ const state = {
   ioTotal: 0,
   ioLoading: false,
   ioError: "",
+  ioMonitor: null,
   ioRequestId: 0,
   ioWindow: "5m",
   ioSort: "desc",
@@ -87,6 +90,13 @@ const state = {
   triggerHistoryTotal: 0,
   selectedTriggerIds: new Set(),
   triggerTypes: new Set(["MA_SIGNAL", "HOT_RANK", "FUNDING_RATE", "OI_SPIKE", "COMPOSITE"]),
+  runtimeLogs: [],
+  runtimeLogFiles: [],
+  runtimeStateErrors: [],
+  runtimeServices: null,
+  runtimeLogsLoading: false,
+  runtimeLogsError: "",
+  runtimeLogsGeneratedAt: null,
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
   watchRealtimeSignature: "",
@@ -440,27 +450,6 @@ function clampHotRankPage() {
   state.hotRankPage = clamp(state.hotRankPage, 1, hotRankTotalPages());
 }
 
-function hotRankFallbackText(symbol) {
-  return String(symbol ?? "")
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "")
-    .slice(0, 2) || "--";
-}
-
-function replaceHotRankLogo(image) {
-  const fallback = document.createElement("span");
-  fallback.className = "heat-token-mark";
-  fallback.textContent = image.dataset.hotRankLogoFallback || "--";
-  image.replaceWith(fallback);
-}
-
-function bindHotRankLogoFallbacks(root) {
-  for (const image of root.querySelectorAll("img[data-hot-rank-logo-fallback]")) {
-    image.addEventListener("error", () => replaceHotRankLogo(image), { once: true });
-    if (image.complete && image.naturalWidth === 0) replaceHotRankLogo(image);
-  }
-}
-
 function renderHotRank() {
   const target = $("#hotRankRows");
   const status = $("#hotRankStatus");
@@ -512,15 +501,10 @@ function renderHotRank() {
       const change = Number(token.priceChange);
       const changeClass = Number.isFinite(change) && change < 0 ? "down" : "up";
       const symbol = escapeHtml(token.symbol);
-      const fallback = escapeHtml(hotRankFallbackText(token.symbol));
-      const logo = token.logo
-        ? `<img src="${escapeHtml(token.logo)}" alt="" loading="lazy" data-hot-rank-logo-fallback="${fallback}" />`
-        : `<span class="heat-token-mark">${fallback}</span>`;
       return `
         <article class="heat-rank-row">
           <div class="heat-rank-num">#${escapeHtml(token.rank)}</div>
           <div class="heat-token">
-            ${logo}
             <div>
               <strong>${symbol}</strong>
               <span>市值 ${formatCompactUsd(token.marketCap)} · 情绪 ${escapeHtml(sentimentLabel(token.sentiment))}</span>
@@ -537,7 +521,6 @@ function renderHotRank() {
     .join("");
 
   bindCopyButtons(target);
-  bindHotRankLogoFallbacks(target);
   updateHeatPagination();
 }
 
@@ -710,6 +693,7 @@ async function loadIOMonitoring() {
     state.ioTotal = payload.total || 0;
     state.ioPage = payload.page || state.ioPage;
     state.ioPageSize = payload.pageSize || state.ioPageSize;
+    state.ioMonitor = payload.monitor || null;
   } catch (error) {
     if (requestId !== state.ioRequestId) return;
     state.ioError = `OI 数据读取失败：${error instanceof Error ? error.message : String(error)}`;
@@ -770,7 +754,7 @@ function renderIOMonitoring() {
           <div><span>当前持仓量</span><b class="mono">${formatCompactNumber(item.currentOpenInterest)}</b></div>
           <div><span>持仓价值</span><b class="mono">${formatCompactUsd(item.currentOpenInterestValue)}</b></div>
           <div><span>同币种命中</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
-          <div><span>更新时间</span><b>${formatTime(item.observedAt)}</b></div>
+          <div><span>更新时间</span><b title="${item.isStale ? `数据已过期，年龄约 ${Math.round(Number(item.observedAgeSeconds ?? 0) / 60)} 分钟` : ""}">${formatTime(item.observedAt)}${item.isStale ? " · 过期" : ""}</b></div>
           <div class="heat-links">
             ${copyButton(item.symbol)}
             ${watchButton(item.symbol, "从 OI 监控加入")}
@@ -791,6 +775,8 @@ function renderIOMonitoring() {
   ];
   if (state.ioLoading) statusParts.push("刷新中");
   if (state.ioError) statusParts.push("上次刷新失败，保留当前结果");
+  if (state.ioData.some((item) => item.isStale)) statusParts.push(`本页 ${state.ioData.filter((item) => item.isStale).length} 项过期`);
+  if (state.ioMonitor?.errors?.length) statusParts.push(`抓取错误 ${state.ioMonitor.errors.length} 条`);
   setText("#ioStatus", statusParts.join(" · "));
   updateIoPagination();
 }
@@ -970,6 +956,153 @@ function updateTriggerHistoryPagination() {
   });
 }
 
+function serviceRuntimeSummary(service, payload) {
+  if (!payload) return { ok: false, title: service, meta: "未返回状态", detail: "" };
+  if (payload.ok === false) {
+    return { ok: false, title: service, meta: "不可达", detail: payload.error || "服务未响应" };
+  }
+  if (service === "crawler") {
+    const crawler = payload.crawler ?? {};
+    return {
+      ok: !crawler.lastError,
+      title: "crawler",
+      meta: crawler.running ? `运行中 · ${crawler.currentSymbol || "空闲"}` : "未运行",
+      detail: crawler.lastError || crawler.lastAction || "正常"
+    };
+  }
+  if (service === "realtime") {
+    const realtime = payload.watchRealtime ?? {};
+    return {
+      ok: !realtime.lastError && Boolean(realtime.connected),
+      title: "realtime",
+      meta: realtime.connected ? `已连接 · ${realtime.streamCount || 0} streams` : "未连接",
+      detail: realtime.lastError || `最近消息 ${formatTime(realtime.lastMessageAt)}`
+    };
+  }
+  const scheduler = payload;
+  const errors = [
+    scheduler.maintenance?.lastError,
+    scheduler.maintenance?.runtimeLogCleanup?.lastError,
+    scheduler.fundingMonitor?.lastError,
+    scheduler.openInterestMonitor?.lastError,
+    ...(scheduler.openInterestMonitor?.errors ?? []),
+    ...(scheduler.tokenUnlock?.errors ?? []),
+    scheduler.telegramBot?.lastError
+  ].filter(Boolean);
+  return {
+    ok: errors.length === 0,
+    title: "scheduler",
+    meta: `OI ${scheduler.openInterestMonitor?.running ? "扫描中" : "等待"} · 资金费率 ${scheduler.fundingMonitor?.running ? "扫描中" : "等待"}`,
+    detail: errors[0] || "正常"
+  };
+}
+
+async function loadRuntimeLogs() {
+  state.runtimeLogsLoading = true;
+  state.runtimeLogsError = "";
+  renderRuntimeLogs();
+  try {
+    const payload = await api("/api/runtime-logs?limit=160");
+    state.runtimeLogs = payload.entries || [];
+    state.runtimeLogFiles = payload.files || [];
+    state.runtimeStateErrors = payload.stateErrors || [];
+    state.runtimeServices = payload.services || null;
+    state.runtimeLogsGeneratedAt = payload.generatedAt || null;
+  } catch (error) {
+    state.runtimeLogsError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.runtimeLogsLoading = false;
+    renderRuntimeLogs();
+  }
+}
+
+function renderRuntimeLogs() {
+  const cardTarget = $("#runtimeServiceCards");
+  const rowTarget = $("#runtimeLogRows");
+  if (!cardTarget || !rowTarget) return;
+
+  const services = state.runtimeServices ?? {};
+  const summaries = ["crawler", "realtime", "scheduler"].map((service) => serviceRuntimeSummary(service, services[service]));
+  cardTarget.innerHTML = summaries
+    .map((item) => `
+      <article class="runtime-service-card ${item.ok ? "is-ok" : "is-error"}">
+        <span>${escapeHtml(item.title)}</span>
+        <strong>${escapeHtml(item.ok ? "正常" : "异常")}</strong>
+        <p>${escapeHtml(item.meta)}</p>
+        <small title="${escapeHtml(item.detail)}">${escapeHtml(item.detail)}</small>
+      </article>
+    `)
+    .join("");
+
+  const statusParts = [];
+  if (state.runtimeLogsLoading) statusParts.push("刷新中");
+  if (state.runtimeLogsGeneratedAt) statusParts.push(`更新时间 ${formatTime(state.runtimeLogsGeneratedAt)}`);
+  statusParts.push(`${state.runtimeLogs.length} 条日志`);
+  const categoryCounts = runtimeLogCategoryCounts(state.runtimeLogs);
+  if (categoryCounts.length) {
+    statusParts.push(categoryCounts.map(({ label, count }) => `${label} ${count}`).join(" / "));
+  }
+  if (state.runtimeStateErrors.length) statusParts.push(`当前错误 ${state.runtimeStateErrors.length} 条`);
+  if (state.runtimeLogsError) statusParts.push(`读取失败：${state.runtimeLogsError}`);
+  setText("#runtimeLogsStatus", statusParts.join(" · "));
+
+  if (state.runtimeLogsLoading && !state.runtimeLogs.length) {
+    rowTarget.innerHTML = '<tr><td colspan="6" class="empty">正在读取运行日志。</td></tr>';
+    return;
+  }
+  if (state.runtimeLogsError && !state.runtimeLogs.length) {
+    rowTarget.innerHTML = `<tr><td colspan="6" class="empty">${escapeHtml(state.runtimeLogsError)}</td></tr>`;
+    return;
+  }
+  if (!state.runtimeLogs.length) {
+    rowTarget.innerHTML = '<tr><td colspan="6" class="empty">最近没有错误日志。</td></tr>';
+    return;
+  }
+
+  rowTarget.innerHTML = state.runtimeLogs
+    .map((item) => {
+      const detail = item.details ? `<details class="runtime-log-details"><summary>${escapeHtml(item.message || "--")}</summary><pre>${escapeHtml(item.details)}</pre></details>` : escapeHtml(item.message || "--");
+      return `
+        <tr class="${item.severity === "ERROR" ? "runtime-row-error" : ""}">
+          <td>${escapeHtml(item.source || "--")}</td>
+          <td><span class="runtime-category category-${escapeHtml(item.category || "OTHER")}">${escapeHtml(item.categoryLabel || runtimeCategoryLabel(item.category))}</span></td>
+          <td><span class="runtime-severity ${item.severity === "ERROR" ? "is-error" : "is-warn"}">${escapeHtml(item.severity || "WARN")}</span></td>
+          <td>${escapeHtml([item.service, item.component].filter(Boolean).join(" / ") || "--")}</td>
+          <td>${formatTime(item.updatedAt)}</td>
+          <td class="runtime-message">${detail}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function runtimeCategoryLabel(category) {
+  return {
+    NETWORK: "网络连接",
+    BINANCE_LIMIT: "Binance限频",
+    BINANCE_HTTP: "Binance接口",
+    TELEGRAM: "Telegram",
+    DATABASE: "数据库",
+    OI: "OI监控",
+    FUNDING: "资金费率",
+    KLINE: "K线抓取",
+    PROGRAM: "程序异常",
+    OTHER: "其他"
+  }[category] ?? "其他";
+}
+
+function runtimeLogCategoryCounts(items) {
+  const counts = new Map();
+  for (const item of items) {
+    const key = item.category || "OTHER";
+    const current = counts.get(key) ?? { key, label: item.categoryLabel || runtimeCategoryLabel(key), count: 0 };
+    current.count += 1;
+    counts.set(key, current);
+  }
+  const order = ["NETWORK", "BINANCE_LIMIT", "BINANCE_HTTP", "DATABASE", "TELEGRAM", "OI", "FUNDING", "KLINE", "PROGRAM", "OTHER"];
+  return Array.from(counts.values()).sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+}
+
 async function loadHotRank({ silent = false } = {}) {
   const requestedChain = state.hotRankChain;
   const requestId = state.hotRankRequestId + 1;
@@ -1069,14 +1202,14 @@ function renderSignals() {
         : "";
       const details = Array.isArray(row.intervalDetails) ? row.intervalDetails : [];
       const triggered = details.filter((item) => ["LEVEL1", "LEVEL2"].includes(item.alertLevel));
-      const availableIntervals = details.map((item) => item.intervalCode).filter(Boolean);
+      const availableIntervals = ALL_INTERVALS;
       const preferredInterval =
         state.signalChartIntervals.get(row.symbol) ??
         triggered[0]?.intervalCode ??
         row.intervalCode ??
         availableIntervals[0] ??
         "1h";
-      const selectedInterval = availableIntervals.includes(preferredInterval) ? preferredInterval : availableIntervals[0] ?? "1h";
+      const selectedInterval = availableIntervals.includes(preferredInterval) ? preferredInterval : "15m";
       state.signalChartIntervals.set(row.symbol, selectedInterval);
       const selectedDetail = details.find((item) => item.intervalCode === selectedInterval) ?? row;
       const bestLevel = row.bestAlertLevel ??
@@ -1712,6 +1845,7 @@ function pageFromHash() {
   if (window.location.hash === "#fundingPage") return "funding";
   if (window.location.hash === "#ioPage") return "io";
   if (window.location.hash === "#triggerHistoryPage") return "trigger-history";
+  if (window.location.hash === "#runtimeLogsPage") return "runtime-logs";
   if (window.location.hash === "#overview") {
     window.history.replaceState(null, "", "#signalsPage");
   }
@@ -1748,6 +1882,7 @@ function setPage(page) {
   if (page === "funding") loadFundingRateTokens();
   if (page === "io") loadIOMonitoring();
   if (page === "trigger-history") loadTriggerHistory();
+  if (page === "runtime-logs") loadRuntimeLogs();
 }
 
 function toggleRow(key) {
@@ -1901,22 +2036,20 @@ function intervalMsFromCode(intervalCode) {
 
 function buildChartKlines(klines, intervalCode) {
   const source = Array.isArray(klines) ? klines : [];
-  if (source.length < 2) return source;
+  if (source.length < 2) return source.map((item) => ({ ...item, isGap: false }));
   const intervalMs = intervalMsFromCode(intervalCode);
   const chartRows = [];
   let previous = null;
   for (const item of source) {
+    const next = { ...item, isGap: false };
     if (previous) {
       const missingSlots = Math.round((Number(item.openTime) - Number(previous.openTime)) / intervalMs) - 1;
-      for (let slot = 1; slot <= Math.min(missingSlots, 5000); slot += 1) {
-        chartRows.push({
-          isGap: true,
-          openTime: Number(previous.openTime) + intervalMs * slot,
-          missingSlots
-        });
+      if (missingSlots > 0) {
+        next.gapBefore = true;
+        next.gapMissingSlots = missingSlots;
       }
     }
-    chartRows.push({ ...item, isGap: false });
+    chartRows.push(next);
     previous = item;
   }
   return chartRows;
@@ -1939,8 +2072,13 @@ async function loadAndRenderChart(row, { force = false } = {}) {
 
   try {
     if (force) state.chartCache.delete(key);
+    const cached = state.chartCache.get(key);
+    const shouldRefreshCached =
+      cached?.needsRefresh && Date.now() - Number(cached._fetchedAt ?? 0) > 60_000;
+    if (shouldRefreshCached) state.chartCache.delete(key);
     if (!state.chartCache.has(key)) {
       const payload = await api(`/api/klines?symbol=${encodeURIComponent(row.symbol)}&interval=${encodeURIComponent(row.intervalCode)}&limit=all`);
+      payload._fetchedAt = Date.now();
       state.chartCache.set(key, payload);
       state.chartState.set(key, chartDefaults(chartKlineLength(payload)));
     }
@@ -1962,7 +2100,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
       <div class="chart-toolbar">
         <div class="chart-title-block">
           <strong>${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} K线</strong>
-          <span>数据库全部 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${payload.gapCount ? ` · 缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
+          <span>数据库全部 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${payload.gapCount ? ` · 缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""}${payload.isStale ? " · 最新K线落后，已后台补齐" : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
         </div>
         <div class="chart-tools" role="toolbar" aria-label="K线工具">
           <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair" title="显示或隐藏十字线">十字线</button>
@@ -1989,9 +2127,32 @@ async function loadAndRenderChart(row, { force = false } = {}) {
 
     bindChartTools(shell, key);
     drawChartForKey(key);
+    scheduleChartRefreshIfNeeded(key, row, payload);
   } catch (error) {
     shell.innerHTML = `<div class="chart-loading">K线读取失败：${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
   }
+}
+
+function scheduleChartRefreshIfNeeded(key, row, payload) {
+  if (!payload?.needsRefresh) {
+    state.chartRefreshAttempts.delete(key);
+    const timer = state.chartRefreshTimers.get(key);
+    if (timer) clearTimeout(timer);
+    state.chartRefreshTimers.delete(key);
+    return;
+  }
+  if (state.chartRefreshTimers.has(key)) return;
+  const attempts = Number(state.chartRefreshAttempts.get(key) ?? 0);
+  if (attempts >= 6) return;
+  const delayMs = attempts === 0 ? 12_000 : 25_000;
+  const timer = setTimeout(() => {
+    state.chartRefreshTimers.delete(key);
+    state.chartRefreshAttempts.set(key, attempts + 1);
+    const shell = document.getElementById(chartElementId(key));
+    if (!shell) return;
+    loadAndRenderChart(row, { force: true });
+  }, delayMs);
+  state.chartRefreshTimers.set(key, timer);
 }
 
 function bindChartTools(shell, key) {
@@ -2322,24 +2483,24 @@ function drawLine(ctx, points, color, width = 1.5) {
 }
 
 function drawGapRegions(ctx, data, layout, slot, palette) {
-  let startIndex = null;
-  for (let index = 0; index <= data.length; index += 1) {
-    const isGap = Boolean(data[index]?.isGap);
-    if (isGap && startIndex === null) {
-      startIndex = index;
-      continue;
-    }
-    if ((!isGap || index === data.length) && startIndex !== null) {
-      const x = layout.plotLeft + slot * startIndex;
-      const width = Math.max(1, slot * (index - startIndex));
-      ctx.save();
-      ctx.fillStyle = palette.gridStrong;
-      ctx.globalAlpha = 0.16;
-      ctx.fillRect(x, layout.plotTop, width, layout.height);
-      if (layout.volumeHeight) ctx.fillRect(x, layout.volumeTop, width, layout.volumeHeight);
-      ctx.restore();
-      startIndex = null;
-    }
+  for (let index = 0; index < data.length; index += 1) {
+    const item = data[index];
+    if (!item?.gapBefore) continue;
+    const x = layout.plotLeft + slot * index;
+    const width = Math.max(2, Math.min(slot * 0.48, 10));
+    ctx.save();
+    ctx.fillStyle = palette.gridStrong;
+    ctx.globalAlpha = 0.34;
+    ctx.fillRect(x - width / 2, layout.plotTop, width, layout.height);
+    if (layout.volumeHeight) ctx.fillRect(x - width / 2, layout.volumeTop, width, layout.volumeHeight);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = palette.muted;
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(x, layout.plotTop);
+    ctx.lineTo(x, layout.plotBottom);
+    ctx.stroke();
+    ctx.restore();
   }
 }
 
@@ -2554,19 +2715,14 @@ function drawChartForKey(key) {
     ctx.textBaseline = "middle";
     ctx.fillText(priceLabel, plotRight + 10, hoverY);
 
-    const lines = item.isGap
-      ? [
-          new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
-          "本时段缺失K线",
-          "等待后台审计补齐",
-          ""
-        ]
-      : [
-          new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
-          `O ${formatNumber(item.open, 4)}   H ${formatNumber(item.high, 4)}`,
-          `L ${formatNumber(item.low, 4)}   C ${formatNumber(item.close, 4)}   ${formatPercent(item.open ? ((item.close - item.open) / item.open) * 100 : null)}`,
-          `V ${formatCompactNumber(item.volume)}   MA100 ${formatNumber(item.ma100, 4)}   MA200 ${formatNumber(item.ma200, 4)}`
-        ];
+    const lines = [
+      new Date(item.openTime).toLocaleString("zh-CN", { hour12: false }),
+      `O ${formatNumber(item.open, 4)}   H ${formatNumber(item.high, 4)}`,
+      `L ${formatNumber(item.low, 4)}   C ${formatNumber(item.close, 4)}   ${formatPercent(item.open ? ((item.close - item.open) / item.open) * 100 : null)}`,
+      item.gapBefore
+        ? `前方缺失 ${formatNumber(item.gapMissingSlots, 0)} 根K线   MA100 ${formatNumber(item.ma100, 4)}   MA200 ${formatNumber(item.ma200, 4)}`
+        : `V ${formatCompactNumber(item.volume)}   MA100 ${formatNumber(item.ma100, 4)}   MA200 ${formatNumber(item.ma200, 4)}`
+    ];
     const tooltipWidth = Math.min(parentWidth - 24, Math.max(...lines.map((line) => ctx.measureText(line).width)) + 22);
     const tooltipHeight = 92;
     const tx = Math.min(parentWidth - tooltipWidth - 12, Math.max(12, x - tooltipWidth / 2));
@@ -2724,6 +2880,7 @@ $("#refreshFundingBtn")?.addEventListener("click", () => loadFundingRateTokens()
 $("#scanFundingBtn")?.addEventListener("click", () => scanFundingIntervals());
 $("#refreshIoBtn")?.addEventListener("click", () => loadIOMonitoring());
 $("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
+$("#refreshRuntimeLogsBtn")?.addEventListener("click", () => loadRuntimeLogs());
 $("#clearTriggerHistoryBtn")?.addEventListener("click", async () => {
   if (!confirm("确定要清空所有历史记录吗？")) return;
   try {
@@ -2853,7 +3010,8 @@ $("#mobilePageSelect")?.addEventListener("change", (event) => {
     watch: "#watchPage",
     funding: "#fundingPage",
     io: "#ioPage",
-    "trigger-history": "#triggerHistoryPage"
+    "trigger-history": "#triggerHistoryPage",
+    "runtime-logs": "#runtimeLogsPage"
   };
   window.location.hash = hashes[page] ?? "#signalsPage";
 });

@@ -4,9 +4,10 @@ import {
   claimNextTokenForFetch,
   cleanupInactiveTokenKlines,
   countActiveTokens,
-  findKlineGap,
+  getActiveTokenBySymbol,
   getKlineAuditReport,
   getSignalCorrelationContext,
+  listKlineGaps,
   markHotMaSignalAlertSent,
   klineStats,
   markTokenFetching,
@@ -92,7 +93,7 @@ function intervalLookbackStart(intervalCode) {
   return Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
 }
 
-async function fetchKlineRange({ token, intervalCode, startTime, endTime, action, limit }) {
+async function fetchKlineRange({ token, intervalCode, startTime, endTime, action, limit, shouldContinue }) {
   if (endTime < startTime) return 0;
   let fetchedRows = 0;
   crawlerState.lastAction = action;
@@ -108,7 +109,7 @@ async function fetchKlineRange({ token, intervalCode, startTime, endTime, action
       const changeSummary = stored ? `，写入/更新 ${stored} 行` : "";
       crawlerState.lastAction = `${token.symbol} ${intervalCode} 同步 ${page.length} 根K线${changeSummary}`;
     },
-    shouldContinue: () => crawlerState.running
+    shouldContinue: shouldContinue ?? (() => crawlerState.running)
   });
   return fetchedRows;
 }
@@ -327,55 +328,10 @@ async function fetchToken(token, workerId) {
   for (const intervalCode of INTERVALS) {
     if (!crawlerState.running) break;
     setWorkerActivity(workerId, token, intervalCode);
-    await markTokenFetching(token.id, intervalCode);
-
-    const targetStartTime = intervalLookbackStart(intervalCode);
-    const stats = await klineStats(token.symbol, intervalCode);
-    const hasEnoughCoverage =
-      stats.count > 0 &&
-      stats.minOpenTime !== null &&
-      stats.minOpenTime <= targetStartTime + intervalMs(intervalCode);
-
-    if (!hasEnoughCoverage) {
-      const startTime = targetStartTime;
-      const endTime = stats.minOpenTime === null ? Date.now() : stats.minOpenTime - intervalMs(intervalCode);
-      await fetchKlineRange({
-        token,
-        intervalCode,
-        startTime,
-        endTime,
-        action: `${token.symbol} ${intervalCode} 补齐目标窗口中`
-      });
-    }
-
-    for (let gapPass = 0; gapPass < 25; gapPass += 1) {
-      const gap = await findKlineGap(token.symbol, intervalCode, intervalMs(intervalCode), targetStartTime, Date.now());
-      if (!gap) break;
-      await fetchKlineRange({
-        token,
-        intervalCode,
-        startTime: gap.startTime,
-        endTime: gap.endTime,
-        action: `${token.symbol} ${intervalCode} 补齐中间缺口`
-      });
-    }
-
-    const latestStats = await klineStats(token.symbol, intervalCode);
-    const recentStartTime =
-      latestStats.maxOpenTime === null ? targetStartTime : Number(latestStats.maxOpenTime) + intervalMs(intervalCode);
-    const recentEndTime = Date.now();
-    const insertedRecent = await fetchKlineRange({
-      token,
-      intervalCode,
-      startTime: recentStartTime,
-      endTime: recentEndTime,
-      limit: config.crawler.incrementalKlineLimit,
-      action: `${token.symbol} ${intervalCode} 补最新K线`
+    await refreshTokenInterval(token, intervalCode, {
+      maxGapPasses: config.crawler.maxGapRepairPasses,
+      shouldContinue: () => crawlerState.running
     });
-    if (hasEnoughCoverage && insertedRecent === 0) {
-      crawlerState.lastAction = `${token.symbol} ${intervalCode} 已是最新缓存`;
-    }
-    await refreshTokenFetchState(token.id);
     await sleep(config.crawler.intervalDelayMs);
   }
 
@@ -383,6 +339,99 @@ async function fetchToken(token, workerId) {
   if (crawlerState.running) {
     await recomputeAndNotifyToken(token);
     crawlerState.lastAction = `${token.symbol} 四周期缓存与信号计算完成`;
+  }
+}
+
+async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, shouldContinue = () => true } = {}) {
+  await markTokenFetching(token.id, intervalCode);
+
+  const targetStartTime = intervalLookbackStart(intervalCode);
+  const stats = await klineStats(token.symbol, intervalCode);
+  const hasEnoughCoverage =
+    stats.count > 0 &&
+    stats.minOpenTime !== null &&
+    stats.minOpenTime <= targetStartTime + intervalMs(intervalCode);
+  let coverageRows = 0;
+  let gapRows = 0;
+  let recentRows = 0;
+  let repairedGapCount = 0;
+
+  if (!hasEnoughCoverage && shouldContinue()) {
+    const startTime = targetStartTime;
+    const endTime = stats.minOpenTime === null ? Date.now() : stats.minOpenTime - intervalMs(intervalCode);
+    coverageRows = await fetchKlineRange({
+      token,
+      intervalCode,
+      startTime,
+      endTime,
+      action: `${token.symbol} ${intervalCode} 补齐目标窗口中`,
+      shouldContinue
+    });
+  }
+
+  const gaps = await listKlineGaps(token.symbol, intervalCode, intervalMs(intervalCode), targetStartTime, Date.now(), maxGapPasses);
+  for (const gap of gaps) {
+    if (!shouldContinue()) break;
+    const fetched = await fetchKlineRange({
+      token,
+      intervalCode,
+      startTime: gap.startTime,
+      endTime: gap.endTime,
+      action: `${token.symbol} ${intervalCode} 补齐中间缺口`,
+      shouldContinue
+    });
+    gapRows += fetched;
+    repairedGapCount += 1;
+    if (fetched === 0) {
+      crawlerState.lastAction = `${token.symbol} ${intervalCode} 缺口 ${new Date(gap.startTime).toISOString()} 未返回K线，继续检查后续缺口`;
+    }
+  }
+
+  const latestStats = await klineStats(token.symbol, intervalCode);
+  const recentStartTime =
+    latestStats.maxOpenTime === null ? targetStartTime : Number(latestStats.maxOpenTime) + intervalMs(intervalCode);
+  const recentEndTime = Date.now();
+  if (shouldContinue()) {
+    recentRows = await fetchKlineRange({
+      token,
+      intervalCode,
+      startTime: recentStartTime,
+      endTime: recentEndTime,
+      limit: config.crawler.incrementalKlineLimit,
+      action: `${token.symbol} ${intervalCode} 补最新K线`,
+      shouldContinue
+    });
+  }
+  if (hasEnoughCoverage && recentRows === 0 && gapRows === 0) {
+    crawlerState.lastAction = `${token.symbol} ${intervalCode} 已是最新缓存`;
+  }
+  await refreshTokenFetchState(token.id);
+  return {
+    intervalCode,
+    coverageRows,
+    gapRows,
+    recentRows,
+    repairedGapCount,
+    totalRows: coverageRows + gapRows + recentRows
+  };
+}
+
+export async function refreshKlineCacheForSymbol(symbol, intervalCode) {
+  if (!INTERVALS.includes(intervalCode)) {
+    return { ok: false, reason: "invalid interval" };
+  }
+  const token = await getActiveTokenBySymbol(symbol);
+  if (!token) return { ok: false, reason: "symbol not active" };
+  setWorkerActivity("on-demand", token, intervalCode);
+  try {
+    const result = await refreshTokenInterval(token, intervalCode, {
+      maxGapPasses: config.crawler.onDemandMaxGapRepairPasses,
+      shouldContinue: () => true
+    });
+    crawlerState.lastAction = `${token.symbol} ${intervalCode} 按需K线修复完成`;
+    return { ok: true, symbol: token.symbol, ...result };
+  } finally {
+    setWorkerActivity("on-demand", null);
   }
 }
 

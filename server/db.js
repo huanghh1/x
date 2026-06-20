@@ -596,6 +596,22 @@ export async function queueActiveTokensForKlineAudit(symbols = []) {
   return Number(result.affectedRows ?? 0);
 }
 
+export async function queueSymbolsForKlineRefresh(symbols = [], reason = "K 线缓存需要补齐") {
+  const safeSymbols = [...new Set((Array.isArray(symbols) ? symbols : [symbols]).map(sanitizeDbSymbol).filter(Boolean))];
+  if (!safeSymbols.length) return 0;
+  const [result] = await getPool().query(
+    `UPDATE token_list
+     SET fetch_status='partial',
+         current_interval=NULL,
+         last_error=:reason
+     WHERE is_active=1
+       AND fetch_status<>'fetching'
+       AND symbol IN (:symbols)`,
+    { symbols: safeSymbols, reason: String(reason).slice(0, 1000) }
+  );
+  return Number(result.affectedRows ?? 0);
+}
+
 export async function getKlineAuditReport(retentionLimits = config.crawler.retentionLimits) {
   const [rows] = await getPool().query(
     `SELECT t.symbol, k.interval_code AS intervalCode, COUNT(k.id) AS cachedCount,
@@ -842,6 +858,11 @@ function intervalMs(intervalCode) {
 }
 
 export async function findKlineGap(symbol, intervalCode, intervalMsValue, startTime, endTime) {
+  const gaps = await listKlineGaps(symbol, intervalCode, intervalMsValue, startTime, endTime, 1);
+  return gaps[0] ?? null;
+}
+
+export async function listKlineGaps(symbol, intervalCode, intervalMsValue, startTime, endTime, limit = 200) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const [rows] = await getPool().query(
     `SELECT open_time AS openTime
@@ -858,22 +879,25 @@ export async function findKlineGap(symbol, intervalCode, intervalMsValue, startT
       endTime: Math.max(0, Number(endTime) || 0)
     }
   );
-  if (rows.length < 2) return null;
+  if (rows.length < 2) return [];
+  const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 200));
+  const gaps = [];
   let previousOpenTime = Number(rows[0].openTime);
   const safeIntervalMs = Math.max(1, Number(intervalMsValue) || 1);
   for (const row of rows.slice(1)) {
     const currentOpenTime = Number(row.openTime);
     const expectedOpenTime = previousOpenTime + safeIntervalMs;
     if (currentOpenTime > expectedOpenTime) {
-      return {
+      gaps.push({
         startTime: expectedOpenTime,
         endTime: currentOpenTime - safeIntervalMs,
         missingCount: Math.max(1, Math.round((currentOpenTime - expectedOpenTime) / safeIntervalMs))
-      };
+      });
+      if (gaps.length >= safeLimit) break;
     }
     previousOpenTime = currentOpenTime;
   }
-  return null;
+  return gaps;
 }
 
 function nextTurn() {
@@ -1406,6 +1430,19 @@ export async function listActiveTokenSymbols() {
   return rows;
 }
 
+export async function getActiveTokenBySymbol(symbol) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  if (!safeSymbol) return null;
+  const [rows] = await getPool().query(
+    `SELECT id, symbol, base_asset AS baseAsset, category_type AS categoryType, category_label AS categoryLabel
+     FROM token_list
+     WHERE is_active=1 AND symbol=:symbol
+     LIMIT 1`,
+    { symbol: safeSymbol }
+  );
+  return rows[0] ?? null;
+}
+
 export async function getSignalCorrelationContext(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) {
@@ -1558,6 +1595,8 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
         LIMIT 1
       ) AS currentCloseTime,
       oi.observed_at AS observedAt,
+      oi.observed_at < DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND) AS isStale,
+      TIMESTAMPDIFF(SECOND, oi.observed_at, NOW(3)) AS observedAgeSeconds,
       oi.last_spike_alert_at AS lastSpikeAlertAt,
       EXISTS(
         SELECT 1 FROM hot_rank_seen h
@@ -1586,7 +1625,7 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
      ORDER BY oi.${column} ${direction}, oi.observed_at DESC, oi.symbol
      ${safeLimit === null ? "" : "LIMIT :limit"}`
     ,
-    { activeSeconds: hotRankActiveSeconds(), limit: safeLimit }
+    { activeSeconds: hotRankActiveSeconds(), oiActiveSeconds: openInterestActiveSeconds(), limit: safeLimit }
   );
   return rows.map((row) => ({
     ...row,
@@ -1600,6 +1639,8 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
     change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
     currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
     currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
+    isStale: Boolean(row.isStale),
+    observedAgeSeconds: Number(row.observedAgeSeconds ?? 0),
     hotRankHit: Boolean(row.hotRankHit),
     fundingOneHour: Boolean(row.fundingOneHour),
     multiCycleCount: Number(row.multiCycleCount ?? 0),
@@ -1630,6 +1671,7 @@ export async function listOpenInterestMonitorPage({
   const effectivePage = Math.min(safePage, totalPages);
   const params = {
     activeSeconds: hotRankActiveSeconds(),
+    oiActiveSeconds: openInterestActiveSeconds(),
     pageSize: safePageSize,
     offset: (effectivePage - 1) * safePageSize
   };
@@ -1658,6 +1700,8 @@ export async function listOpenInterestMonitorPage({
         LIMIT 1
       ) AS currentCloseTime,
       oi.observed_at AS observedAt,
+      oi.observed_at < DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND) AS isStale,
+      TIMESTAMPDIFF(SECOND, oi.observed_at, NOW(3)) AS observedAgeSeconds,
       oi.last_spike_alert_at AS lastSpikeAlertAt,
       EXISTS(
         SELECT 1 FROM hot_rank_seen h
@@ -1700,6 +1744,8 @@ export async function listOpenInterestMonitorPage({
       change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
       currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
       currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
+      isStale: Boolean(row.isStale),
+      observedAgeSeconds: Number(row.observedAgeSeconds ?? 0),
       hotRankHit: Boolean(row.hotRankHit),
       fundingOneHour: Boolean(row.fundingOneHour),
       multiCycleCount: Number(row.multiCycleCount ?? 0),
@@ -2629,6 +2675,9 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const allRows = limit === "all";
   const expectedCount = Math.max(200, Number(config.crawler.retentionLimits[intervalCode]) || 200);
+  const safeIntervalMs = intervalMs(intervalCode);
+  const currentSlotOpenTime = Math.floor(Date.now() / safeIntervalMs) * safeIntervalMs;
+  const latestExpectedOpenTime = currentSlotOpenTime - safeIntervalMs;
   const safeLimit = allRows
     ? Math.max(200, Math.min(20_000, expectedCount))
     : Math.max(50, Math.min(1000, Number(limit) || 240));
@@ -2641,11 +2690,12 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
       SELECT *
       FROM kline_cache
       WHERE symbol=:symbol AND interval_code=:intervalCode
+        AND open_time<:currentSlotOpenTime
       ORDER BY open_time DESC
       LIMIT :expandedLimit
      ) recent
      ORDER BY open_time ASC`,
-    { symbol: safeSymbol, intervalCode, expandedLimit }
+    { symbol: safeSymbol, intervalCode, currentSlotOpenTime, expandedLimit }
   );
 
   const normalized = rows.map((row) => ({
@@ -2675,6 +2725,11 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
     gap.endTime >= visibleStart &&
     gap.startTime <= visibleEnd
   );
+  const staleBeforeOpenTime = latestExpectedOpenTime;
+  const latestOpenTime = withMa.at(-1)?.openTime ?? null;
+  const isStale = latestOpenTime === null || latestOpenTime < staleBeforeOpenTime;
+  const hasCoverageShortfall = withMa.length < expectedCount;
+  const needsRefresh = isStale || hasCoverageShortfall || gaps.length > 0;
 
   return {
     symbol: safeSymbol,
@@ -2684,7 +2739,18 @@ export async function getKlines({ symbol, intervalCode, limit = 240 }) {
     cachedCount: withMa.length,
     coveragePercent: Number(Math.min(100, (withMa.length / expectedCount) * 100).toFixed(2)),
     earliestOpenTime: withMa[0]?.openTime ?? null,
-    latestOpenTime: withMa.at(-1)?.openTime ?? null,
+    latestOpenTime,
+    latestExpectedOpenTime,
+    staleBeforeOpenTime,
+    isStale,
+    needsRefresh,
+    refreshReason: needsRefresh
+      ? [
+          isStale ? "stale_latest" : null,
+          hasCoverageShortfall ? "coverage_shortfall" : null,
+          gaps.length > 0 ? "gap" : null
+        ].filter(Boolean).join(",")
+      : null,
     hasMa200: withMa.length >= 200,
     gapCount: visibleGaps.length,
     missingKlineCount: visibleGaps.reduce((sum, gap) => sum + gap.missingCount, 0),

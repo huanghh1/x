@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260614-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260620-3" />
   </head>
   <body>
     <header class="app-nav">
@@ -21,6 +21,7 @@
           <a class="nav-tab" href="#fundingPage" data-nav-page="funding">资金费率</a>
           <a class="nav-tab" href="#ioPage" data-nav-page="io">OI监控</a>
           <a class="nav-tab" href="#triggerHistoryPage" data-nav-page="trigger-history">触发历史</a>
+          <a class="nav-tab" href="#runtimeLogsPage" data-nav-page="runtime-logs">运行日志</a>
         </nav>
         <select id="mobilePageSelect" class="mobile-page-select" aria-label="切换监控页面">
           <option value="signals">均线信号</option>
@@ -29,6 +30,7 @@
           <option value="funding">资金费率</option>
           <option value="io">OI监控</option>
           <option value="trigger-history">触发历史</option>
+          <option value="runtime-logs">运行日志</option>
         </select>
         <span id="dbState" class="dot-label nav-status">数据库检查中</span>
       </div>
@@ -317,6 +319,41 @@
           </div>
         </section>
 
+        <section id="runtimeLogsPage" class="section page-section" aria-labelledby="runtimeLogsTitle" data-page-section="runtime-logs">
+          <div class="section-head">
+            <div>
+              <h2 id="runtimeLogsTitle">程序运行日志</h2>
+              <p>集中查看 API、crawler、realtime、scheduler 的当前错误状态和最近 PM2 错误日志。</p>
+            </div>
+            <div class="table-actions">
+              <span id="runtimeLogsStatus" class="selection-count">等待刷新</span>
+              <button id="refreshRuntimeLogsBtn" class="ghost-button" type="button">刷新日志</button>
+            </div>
+          </div>
+
+          <div id="runtimeServiceCards" class="runtime-service-grid">
+            <div class="heat-empty">等待服务状态。</div>
+          </div>
+
+          <div class="table-card runtime-log-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源</th>
+                  <th>分类</th>
+                  <th>级别</th>
+                  <th>服务</th>
+                  <th>更新时间</th>
+                  <th>报错内容</th>
+                </tr>
+              </thead>
+              <tbody id="runtimeLogRows">
+                <tr><td colspan="6" class="empty">等待日志数据</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section id="rules" class="section rules-inline" data-page-section="signals">
           <h2>后期更新策略</h2>
           <p>前期全量 K 线缓存完成后，后续只需要补每个周期最新未入库的 K 线，并按权重限速轮询；全市场秒级实时 K 线不建议用 REST 暴力轮询。</p>
@@ -328,6 +365,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260620-1" type="module"></script>
+    <script src="/app.js?v=20260620-3" type="module"></script>
   </body>
 </html>

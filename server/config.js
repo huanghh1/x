@@ -115,6 +115,9 @@ export const config = {
     tokenDelayMaxMs: numberEnv("TOKEN_DELAY_MAX_MS", 1500),
     staleFetchingAfterMs: numberEnv("STALE_FETCHING_AFTER_MS", 5 * 60 * 1000),
     incrementalRefreshMs: numberEnv("CRAWLER_INCREMENTAL_REFRESH_MS", 15 * 60 * 1000),
+    recoveryAuditMs: Math.max(5 * 60 * 1000, numberEnv("KLINE_RECOVERY_AUDIT_MS", 10 * 60 * 1000)),
+    maxGapRepairPasses: Math.max(25, Math.min(500, numberEnv("KLINE_MAX_GAP_REPAIR_PASSES", 120))),
+    onDemandMaxGapRepairPasses: Math.max(25, Math.min(1000, numberEnv("KLINE_ON_DEMAND_MAX_GAP_REPAIR_PASSES", 300))),
     tokenUniverseSyncMs: numberEnv("TOKEN_UNIVERSE_SYNC_MS", 6 * 60 * 60 * 1000),
     dailyAuditHour: Math.max(0, Math.min(23, numberEnv("KLINE_DAILY_AUDIT_HOUR", 0))),
     inactiveRetentionDays: Math.max(1, numberEnv("INACTIVE_TOKEN_KLINE_RETENTION_DAYS", 7))
@@ -125,7 +128,8 @@ export const config = {
     deleteBatchSize: numberEnv("MAINTENANCE_DELETE_BATCH_SIZE", 5000),
     signalHistoryRetentionDays: numberEnv("SIGNAL_HISTORY_RETENTION_DAYS", 180),
     hotRankRetentionDays: numberEnv("HOT_RANK_RETENTION_DAYS", 30),
-    ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 30)
+    ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 30),
+    runtimeLogCleanupHour: Math.max(0, Math.min(23, numberEnv("RUNTIME_LOG_CLEANUP_HOUR", 0)))
   },
   fundingMonitor: {
     enabled: boolEnv("FUNDING_INTERVAL_MONITOR_ENABLED", true),
@@ -141,6 +145,7 @@ export const config = {
     initialDelayMs: numberEnv("OPEN_INTEREST_INITIAL_DELAY_MS", 20 * 1000),
     concurrency: Math.max(1, numberEnv("OPEN_INTEREST_CONCURRENCY", 3)),
     requestLimitPerWindow: Math.max(1, Math.min(1000, numberEnv("OPEN_INTEREST_REQUEST_LIMIT_PER_5M", 900))),
+    retryDelayMs: Math.max(5 * 1000, numberEnv("OPEN_INTEREST_RETRY_DELAY_MS", 30 * 1000)),
     historyLimit: Math.max(289, Math.min(500, numberEnv("OPEN_INTEREST_HISTORY_LIMIT", 289))),
     spike5mPct: numberEnv("OPEN_INTEREST_SPIKE_5M_PCT", 2),
     spike1hPct: numberEnv("OPEN_INTEREST_SPIKE_1H_PCT", 10),

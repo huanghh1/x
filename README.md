@@ -77,7 +77,7 @@ pm2 delete ecosystem.config.cjs
 - 每个周期先检查本地缓存；已覆盖目标窗口则直接跳过，未覆盖则只补齐缺失历史段，入库使用唯一键去重。
 - 程序重启后会继续处理 `pending`、`partial`、`failed`、`fetching` 状态的币种。
 - 四周期独立计算 MA100/MA200，独立写入 `signal_result`。
-- 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理。
+- 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理；PM2 运行日志每天本机时间 0 点自动截断清理。
 - 关注池会单独开启 Binance Futures WebSocket 实时层，订阅关注代币的价格和四周期 K 线；价格会轻量落库，K 线按周期节流落库且收盘必落库，全市场均线扫描仍按原规则运行。
 - 资金费率结算周期监控默认每小时扫描一次 Binance USDⓈ-M `fundingInfo`，并通过 `premiumIndex` 保存当前资金费率；切换为 1 小时结算会发送独立提醒，未确认时每 5 分钟重复提醒，存在一级或二级均线警报时同步纳入组合信号。
 - OI 达到 `5分钟 >= 2%`、`1小时 >= 10%`、`4小时 >= 20%` 或 `1天 >= 40%` 会记录暴涨信号；有其他信号时发送组合推送，否则发送 OI 独立暴涨推送。阈值可通过 `OPEN_INTEREST_SPIKE_5M_PCT`、`OPEN_INTEREST_SPIKE_1H_PCT`、`OPEN_INTEREST_SPIKE_4H_PCT`、`OPEN_INTEREST_SPIKE_1D_PCT` 调整。
@@ -102,9 +102,12 @@ pm2 delete ecosystem.config.cjs
 
 清理频率默认每 7 天一次，可通过 `KLINE_CLEANUP_INTERVAL_DAYS` 调整；服务会每小时检查一次是否到期。
 
+运行日志默认每天 0 点清理 PM2 的 `monitor-*-error.log` 和 `monitor-*-out.log`，可通过 `RUNTIME_LOG_CLEANUP_HOUR` 调整小时。
+
 全量 K 线完整性审计默认每天 0 点执行：
 
 ```bash
+RUNTIME_LOG_CLEANUP_HOUR=0
 KLINE_DAILY_AUDIT_HOUR=0
 INACTIVE_TOKEN_KLINE_RETENTION_DAYS=7
 ```
