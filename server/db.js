@@ -2062,6 +2062,7 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     SELECT s.symbol,
       COUNT(DISTINCT s.interval_code) AS matchingIntervalCount,
       COALESCE(mp.multiMatchCount, 0) AS multiMatchCount,
+      ${sourceMaskSql} AS sourceMask,
       MAX(s.updated_at) AS latestUpdatedAt,
       MIN(CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 WHEN 'NONE' THEN 2 ELSE 3 END) AS bestLevelRank,
       MAX(s.signal_weight) AS bestWeight,
@@ -2076,7 +2077,8 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     JOIN token_list t ON t.id=s.token_id
     ${multiJoinSql}
     WHERE ${whereSql}
-    GROUP BY s.symbol, mp.multiMatchCount, mp.bestAlertRank`;
+    GROUP BY s.symbol, mp.multiMatchCount, mp.bestAlertRank
+    HAVING sourceMask > 0`;
   const [countRows] = await getPool().query(
     `SELECT COUNT(*) AS total FROM (${groupSql}) grouped`,
     {
@@ -2721,13 +2723,6 @@ export async function listRealtimeKlineTokens() {
      WHERE t.is_active=1
        AND (
          EXISTS(SELECT 1 FROM watchlist w WHERE w.symbol=t.symbol)
-         OR EXISTS(
-           SELECT 1 FROM funding_interval_state f
-           WHERE f.symbol=t.symbol
-             AND f.funding_interval_hours=1
-             AND f.source_present=1
-             AND f.one_hour_confirmed_at IS NULL
-         )
          OR EXISTS(
            SELECT 1
            FROM signal_result s

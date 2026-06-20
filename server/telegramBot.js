@@ -44,6 +44,8 @@ const botStatus = {
 };
 const OI_TIME_WINDOWS = new Set(["5m", "15m", "1h", "4h", "1d"]);
 const OI_SORTS = new Set(["asc", "desc"]);
+const TELEGRAM_HOT_RANK_LIMIT = 100;
+const TELEGRAM_OI_LIMIT = 10;
 
 export function getTelegramBotState() {
   return { ...botStatus };
@@ -421,8 +423,8 @@ async function sendHotMa(chatId, page = 1, messageId = null) {
 }
 
 async function sendHeat(chatId, messageId = null) {
-  const payload = await menuCache.get("heat", () => getHotRank({ chain: "all", limit: 30 }));
-  const visibleTokens = (payload.tokens ?? []).slice(0, 12);
+  const payload = await menuCache.get("heat", () => getHotRank({ chain: "all", limit: TELEGRAM_HOT_RANK_LIMIT }));
+  const visibleTokens = payload.tokens ?? [];
   const rows = visibleTokens.map((token) =>
     `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 热度 ${escapeHtml(token.heat)} · 币安 ${escapeHtml(token.binanceHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
   );
@@ -439,7 +441,7 @@ async function sendHeat(chatId, messageId = null) {
     chatId,
     messageId,
     text: [
-      rows.length ? `<b>综合热度排行 TOP ${rows.length}</b>` : "<b>综合热度排行</b>",
+      rows.length ? `<b>综合热度排行 · 共 ${rows.length} 个</b>` : "<b>综合热度排行</b>",
       `来源：${escapeHtml(payload.source || "Binance Web3 Social Hype")}${flags.length ? ` · ${escapeHtml(flags.join(" · "))}` : ""}`,
       rows.length ? rows.join("\n") : "暂无热度数据。"
     ].join("\n"),
@@ -449,24 +451,24 @@ async function sendHeat(chatId, messageId = null) {
 
 async function sendWatch(chatId, messageId = null) {
   const items = await menuCache.get("watch", () => listWatchlist());
-  const rows = items.slice(0, 12).map((item, index) =>
+  const rows = items.map((item, index) =>
     `${index + 1}. ${telegramTokenLine(item.symbol)} · 现价 ${escapeHtml(item.currentPrice ?? "--")} · 高于 ${escapeHtml(item.alertAbove ?? "--")} · 低于 ${escapeHtml(item.alertBelow ?? "--")}`
   );
   const keyboard = appendMainNavigation(
-    { inline_keyboard: tokenOperationRows(items.slice(0, 12).map((item) => item.symbol)) },
+    { inline_keyboard: tokenOperationRows(items.map((item) => item.symbol)) },
     "watch"
   );
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: rows.length ? [`<b>关注池</b>`, ...rows].join("\n") : "<b>关注池</b>\n暂无关注代币。",
+    text: rows.length ? [`<b>关注池 · 共 ${items.length} 个</b>`, ...rows].join("\n") : "<b>关注池</b>\n暂无关注代币。",
     replyMarkup: keyboard
   });
 }
 
 async function sendFunding(chatId, messageId = null) {
   const items = await menuCache.get("funding", () => listOneHourFundingIntervals());
-  const rows = items.slice(0, 20).map((item, index) => {
+  const rows = items.map((item, index) => {
     const matches = [
       item.oiMatched ? "OI" : null,
       item.hotRank ? "热度" : null,
@@ -477,13 +479,13 @@ async function sendFunding(chatId, messageId = null) {
     )} · 均线 ${escapeHtml((item.intervals ?? []).join(" / ") || "--")} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
   });
   const keyboard = appendMainNavigation(
-    { inline_keyboard: tokenOperationRows(items.slice(0, 20).map((item) => item.symbol)) },
+    { inline_keyboard: tokenOperationRows(items.map((item) => item.symbol)) },
     "funding"
   );
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: rows.length ? ["<b>1小时资金费率代币</b>", ...rows].join("\n") : "<b>资金费率</b>\n当前没有1小时资金费率的代币。",
+    text: rows.length ? [`<b>1小时资金费率代币 · 共 ${items.length} 个</b>`, ...rows].join("\n") : "<b>资金费率</b>\n当前没有1小时资金费率的代币。",
     replyMarkup: keyboard
   });
 }
@@ -511,9 +513,9 @@ async function sendOI(chatId, timeWindow = "5m", sort = "desc", messageId = null
   const safeTimeWindow = normalizeOiTimeWindow(timeWindow);
   const safeSort = normalizeOiSort(sort);
   const items = await menuCache.get(`oi:${safeTimeWindow}:${safeSort}`, () =>
-    listOpenInterestMonitor({ timeWindow: safeTimeWindow, sort: safeSort, limit: 20 })
+    listOpenInterestMonitor({ timeWindow: safeTimeWindow, sort: safeSort, limit: TELEGRAM_OI_LIMIT })
   );
-  const rows = items.slice(0, 20).map((item, index) => {
+  const rows = items.map((item, index) => {
     const intervals = item.signalIntervals ?? [];
     const matches = [
       item.hotRankHit ? "热度" : null,
@@ -527,12 +529,12 @@ async function sendOI(chatId, timeWindow = "5m", sort = "desc", messageId = null
   const keyboard = oiFilterKeyboard({
     timeWindow: safeTimeWindow,
     sort: safeSort,
-    symbols: items.slice(0, 20).map((item) => item.symbol)
+    symbols: items.map((item) => item.symbol)
   });
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: rows.length ? [`<b>OI监控 · ${escapeHtml(safeTimeWindow)}</b>`, ...rows].join("\n") : "<b>OI监控</b>\n暂无 OI 数据。",
+    text: rows.length ? [`<b>OI监控 · ${escapeHtml(safeTimeWindow)} · TOP ${items.length}</b>`, ...rows].join("\n") : "<b>OI监控</b>\n暂无 OI 数据。",
     replyMarkup: keyboard
   });
 }
@@ -664,7 +666,7 @@ async function warmPrimaryMenus() {
       })
     ),
     menuCache.get("funding", () => listOneHourFundingIntervals()),
-    menuCache.get("oi:5m:desc", () => listOpenInterestMonitor({ timeWindow: "5m", sort: "desc", limit: 20 }))
+    menuCache.get("oi:5m:desc", () => listOpenInterestMonitor({ timeWindow: "5m", sort: "desc", limit: TELEGRAM_OI_LIMIT }))
   ]);
 }
 

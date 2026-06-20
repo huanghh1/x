@@ -481,7 +481,7 @@ h2 {
 
 .heat-rank-row {
   display: grid;
-  grid-template-columns: 44px minmax(140px, 1.2fr) 92px 112px 108px 112px minmax(220px, 2fr);
+  grid-template-columns: 44px minmax(140px, 1.2fr) 92px 112px 108px 168px minmax(180px, 2fr);
   align-items: center;
   gap: var(--space-3);
   min-height: 76px;
@@ -560,7 +560,7 @@ h2 {
 
 .heat-links {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--space-2);
 }
 
@@ -1717,6 +1717,7 @@ td { font-size: 13px; }
 .signal-row { cursor: pointer; }
 .signal-row:hover td, .signal-row.is-expanded td { background: color-mix(in oklch, var(--surface-accent) 58%, var(--surface-raised)); }
 .symbol-cell, .interval-stack, .heat-links { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.heat-links { flex-wrap: nowrap; }
 .symbol-button, .watch-symbol-button {
   padding: 0;
   border: 0;
@@ -1756,7 +1757,7 @@ td.mono span { display: block; white-space: nowrap; }
 .heat-rank-list { display: grid; gap: 8px; max-height: none; overflow: visible; }
 .heat-rank-row {
   display: grid;
-  grid-template-columns: 46px minmax(210px, 1.2fr) 72px 90px 90px 110px minmax(220px, 1fr);
+  grid-template-columns: 46px minmax(210px, 1.2fr) 72px 90px 90px 168px minmax(180px, 1fr);
   align-items: center;
   gap: 12px;
   min-width: 980px;
