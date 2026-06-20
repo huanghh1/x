@@ -1839,14 +1839,22 @@ td.mono span { display: block; white-space: nowrap; }
   background: color-mix(in oklch, var(--warning) 9%, var(--surface-raised));
 }
 .pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin-top: var(--space-4); color: var(--ink-muted); font-size: 12px; }
-.heat-section { overflow-x: auto; }
-.heat-rank-list { display: grid; gap: 8px; max-height: none; overflow: visible; }
+.heat-section { overflow: hidden; }
+.heat-rank-list {
+  display: grid;
+  gap: 8px;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: visible;
+  padding-bottom: 2px;
+  scrollbar-gutter: stable;
+}
 .heat-rank-row {
   display: grid;
-  grid-template-columns: 46px minmax(210px, 1.2fr) 72px 90px 90px 168px minmax(180px, 1fr);
+  grid-template-columns: 46px minmax(170px, 1.1fr) 72px 92px 86px minmax(138px, 0.8fr) minmax(220px, 1.5fr);
   align-items: center;
   gap: 12px;
-  min-width: 980px;
+  min-width: 920px;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -1854,9 +1862,15 @@ td.mono span { display: block; white-space: nowrap; }
 }
 .heat-token { display: flex; align-items: center; gap: 10px; }
 .heat-token span, .watch-row span, .funding-card span, .io-card span { display: block; color: var(--ink-muted); font-size: 11px; }
+.heat-rank-row .heat-links { justify-content: flex-start; min-width: 0; }
 .heat-change.up, .up { color: var(--positive); }
 .heat-change.down, .down { color: var(--negative); }
 .funding-rate {
+  display: inline-block;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.funding-rate-band {
   display: inline-block;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -1876,7 +1890,8 @@ td.mono span { display: block; white-space: nowrap; }
   border-radius: var(--radius-md);
   background: var(--surface-raised);
 }
-.funding-card, .io-card { grid-template-columns: minmax(170px, 1.2fr) repeat(6, minmax(120px, 1fr)) auto; min-width: 1120px; }
+.funding-card { grid-template-columns: minmax(170px, 1.2fr) repeat(7, minmax(120px, 1fr)) auto; min-width: 1260px; }
+.io-card { grid-template-columns: minmax(170px, 1.2fr) repeat(6, minmax(120px, 1fr)) auto; min-width: 1120px; }
 .funding-symbol, .io-symbol { display: flex; align-items: center; gap: 8px; }
 .watch-section, #fundingPage, #ioPage { overflow-x: auto; }
 .watch-detail { padding: var(--space-5); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-raised); }
@@ -1919,7 +1934,11 @@ td.mono span { display: block; white-space: nowrap; }
     min-width: 0;
   }
   .heat-chain, .heat-score, .heat-change { font-family: var(--font-mono); font-size: 11px; }
+  .heat-chain { grid-column: 3; grid-row: 1; justify-self: end; }
+  .heat-score { grid-column: 2; }
+  .heat-change { grid-column: 3; justify-self: end; }
   .heat-links, .heat-summary { grid-column: 2 / -1; }
+  .heat-rank-row .heat-links { flex-wrap: wrap; }
   .watch-row, .funding-card, .io-card {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     min-width: 0;
@@ -1939,7 +1958,11 @@ td.mono span { display: block; white-space: nowrap; }
   .pool-switch nav, .stat-strip { grid-template-columns: 1fr; }
   .watch-settings { grid-template-columns: 1fr; }
   .heat-rank-row { grid-template-columns: 34px minmax(0, 1fr); }
-  .heat-chain, .heat-score, .heat-change { grid-column: 2; }
+  .heat-chain, .heat-score, .heat-change {
+    grid-column: 2;
+    grid-row: auto;
+    justify-self: start;
+  }
   .watch-row, .funding-card, .io-card { grid-template-columns: 1fr; }
   .watch-actions, .funding-card .heat-links, .io-card .heat-links { grid-column: 1; }
 }

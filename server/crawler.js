@@ -87,10 +87,16 @@ function intervalLookbackStart(intervalCode) {
   const fallback = config.crawler.lookbackDays;
   const lookbackDays = config.crawler.intervalLookbackDays[intervalCode] ?? fallback;
   const retentionCount = Number(config.crawler.retentionLimits[intervalCode]);
+  const latestClosedOpenTime = latestClosedKlineOpenTime(intervalCode);
   if (Number.isFinite(retentionCount) && retentionCount > 1) {
-    return Date.now() - (retentionCount - 1) * intervalMs(intervalCode);
+    return latestClosedOpenTime - (retentionCount - 1) * intervalMs(intervalCode);
   }
-  return Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+  return latestClosedOpenTime - lookbackDays * 24 * 60 * 60 * 1000;
+}
+
+function latestClosedKlineOpenTime(intervalCode) {
+  const ms = intervalMs(intervalCode);
+  return Math.floor(Date.now() / ms) * ms - ms;
 }
 
 async function fetchKlineRange({ token, intervalCode, startTime, endTime, action, limit, shouldContinue }) {
@@ -262,6 +268,12 @@ async function recomputeAndNotifyToken(token) {
   telegramContext.oiSpike = correlation.oiSpike;
   telegramContext.oiChange5mPct = correlation.oiChange5mPct;
   telegramContext.oiChange1hPct = correlation.oiChange1hPct;
+  telegramContext.oiChange4hPct = correlation.oiChange4hPct;
+  telegramContext.oiChange1dPct = correlation.oiChange1dPct;
+  telegramContext.oiSpike5mHit = correlation.oiSpike5mHit;
+  telegramContext.oiSpike1hHit = correlation.oiSpike1hHit;
+  telegramContext.oiSpike4hHit = correlation.oiSpike4hHit;
+  telegramContext.oiSpike1dHit = correlation.oiSpike1dHit;
   telegramContext.alertLevel = bestAlertLevel;
   telegramContext.profile = profile;
   const compositeChanged = newAlertSignals.length > 0 || (multiCycleSignals.length >= 3 && previousMultiCycleCount < 3);
@@ -346,6 +358,7 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
   await markTokenFetching(token.id, intervalCode);
 
   const targetStartTime = intervalLookbackStart(intervalCode);
+  const targetEndTime = latestClosedKlineOpenTime(intervalCode);
   const stats = await klineStats(token.symbol, intervalCode);
   const hasEnoughCoverage =
     stats.count > 0 &&
@@ -358,7 +371,9 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
 
   if (!hasEnoughCoverage && shouldContinue()) {
     const startTime = targetStartTime;
-    const endTime = stats.minOpenTime === null ? Date.now() : stats.minOpenTime - intervalMs(intervalCode);
+    const endTime = stats.minOpenTime === null
+      ? targetEndTime
+      : Math.min(targetEndTime, stats.minOpenTime - intervalMs(intervalCode));
     coverageRows = await fetchKlineRange({
       token,
       intervalCode,
@@ -369,7 +384,7 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
     });
   }
 
-  const gaps = await listKlineGaps(token.symbol, intervalCode, intervalMs(intervalCode), targetStartTime, Date.now(), maxGapPasses);
+  const gaps = await listKlineGaps(token.symbol, intervalCode, intervalMs(intervalCode), targetStartTime, targetEndTime, maxGapPasses);
   for (const gap of gaps) {
     if (!shouldContinue()) break;
     const fetched = await fetchKlineRange({
@@ -389,8 +404,10 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
 
   const latestStats = await klineStats(token.symbol, intervalCode);
   const recentStartTime =
-    latestStats.maxOpenTime === null ? targetStartTime : Number(latestStats.maxOpenTime) + intervalMs(intervalCode);
-  const recentEndTime = Date.now();
+    latestStats.maxOpenTime === null
+      ? targetStartTime
+      : Math.min(Number(latestStats.maxOpenTime) + intervalMs(intervalCode), targetEndTime);
+  const recentEndTime = targetEndTime;
   if (shouldContinue()) {
     recentRows = await fetchKlineRange({
       token,

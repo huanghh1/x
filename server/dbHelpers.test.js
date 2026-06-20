@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeHotRankSeenTokens, normalizeOptionalLimit } from "./db.js";
+import {
+  collectHotRankFundingSymbols,
+  normalizeFundingIntervalSnapshotItems,
+  normalizeHotRankSeenTokens,
+  normalizeOptionalLimit
+} from "./db.js";
 
 test("optional query limits keep null unbounded instead of coercing it to LIMIT 1", () => {
   assert.equal(normalizeOptionalLimit(null), null);
@@ -24,4 +29,37 @@ test("hot rank seen rows are deduped by symbol before database upsert", () => {
     { symbol: "BROKEN", baseAsset: "BROKEN", chainLabel: "", rank: 1, heat: null },
     { symbol: "AERO", baseAsset: "AERO", chainLabel: "BSC", rank: 3, heat: 10 }
   ]);
+});
+
+test("funding interval snapshot rows are normalized and deduped by symbol", () => {
+  const rows = normalizeFundingIntervalSnapshotItems([
+    { symbol: "aero/usdt", fundingIntervalHours: "1", currentFundingRate: "0.0001" },
+    { symbol: "AEROUSDT", fundingIntervalHours: "4", currentFundingRate: "-0.0002" },
+    { symbol: "BADUSDT", fundingIntervalHours: "0" },
+    { symbol: "", fundingIntervalHours: "1" }
+  ]);
+
+  assert.deepEqual(rows, [
+    {
+      symbol: "AEROUSDT",
+      fundingIntervalHours: 4,
+      adjustedFundingRateCap: null,
+      adjustedFundingRateFloor: null,
+      currentFundingRate: -0.0002,
+      nextFundingTime: null,
+      disclaimer: 0
+    }
+  ]);
+});
+
+test("funding hot-rank matching handles multiplier-prefixed futures symbols", () => {
+  const matches = collectHotRankFundingSymbols(
+    ["1000AEROUSDT", "ETHUSDT"],
+    [
+      { symbol: "AERO", baseAsset: "AERO" },
+      { symbol: "ETHUSDT", baseAsset: "ETH" }
+    ]
+  );
+
+  assert.deepEqual([...matches].sort(), ["1000AEROUSDT", "ETHUSDT"]);
 });

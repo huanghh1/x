@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS token_list (
   UNIQUE KEY uk_token_symbol (symbol),
   KEY idx_token_category_status (category_type, fetch_status),
   KEY idx_token_status (fetch_status, updated_at),
+  KEY idx_token_active_status (is_active, fetch_status, category_type, updated_at),
   KEY idx_token_base_active (base_asset, is_active, updated_at),
   KEY idx_token_inactive_since (is_active, inactive_since)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS kline_cache (
   UNIQUE KEY uk_kline_symbol_interval_time (symbol, interval_code, open_time),
   KEY idx_kline_token_interval_time (token_id, interval_code, open_time),
   KEY idx_kline_symbol_interval_close (symbol, interval_code, close_time),
+  KEY idx_kline_interval_symbol (interval_code, symbol),
   CONSTRAINT fk_kline_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -80,6 +82,7 @@ CREATE TABLE IF NOT EXISTS signal_result (
   KEY idx_signal_time (signal_time),
   KEY idx_signal_filter_page (category_type, alert_level, interval_code, updated_at, symbol),
   KEY idx_signal_symbol_time (symbol, signal_time),
+  KEY idx_signal_symbol_level_interval (symbol, alert_level, interval_code),
   CONSTRAINT fk_signal_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -171,7 +174,8 @@ CREATE TABLE IF NOT EXISTS funding_interval_state (
   PRIMARY KEY (symbol),
   KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
   KEY idx_funding_last_changed (last_changed_at),
-  KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol)
+  KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol),
+  KEY idx_funding_pending_alerts (funding_interval_hours, source_present, one_hour_confirmed_at, next_one_hour_alert_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 触发历史记录表
@@ -250,5 +254,6 @@ CREATE TABLE IF NOT EXISTS token_unlock_cache (
   PRIMARY KEY (symbol),
   KEY idx_unlock_base_asset (base_asset),
   KEY idx_unlock_next (next_unlock_at, symbol),
-  KEY idx_unlock_expiry (expires_at)
+  KEY idx_unlock_expiry (expires_at),
+  KEY idx_unlock_checked (checked_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

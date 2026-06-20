@@ -44,7 +44,8 @@ const botStatus = {
 };
 const OI_TIME_WINDOWS = new Set(["5m", "15m", "1h", "4h", "1d"]);
 const OI_SORTS = new Set(["asc", "desc"]);
-const TELEGRAM_HOT_RANK_LIMIT = 100;
+const TELEGRAM_HOT_RANK_LIMIT = 30;
+const TELEGRAM_MENU_LIST_LIMIT = 30;
 const TELEGRAM_OI_LIMIT = 10;
 
 export function getTelegramBotState() {
@@ -70,6 +71,28 @@ function levelLabel(level) {
   if (level === "LEVEL2") return "二级预警";
   if (level === "NONE") return "观察";
   return "样本不足";
+}
+
+function formatOiChange(value) {
+  const numeric = Number(value);
+  return value === null || value === undefined || !Number.isFinite(numeric) ? "--" : `${numeric.toFixed(2)}%`;
+}
+
+function oiChangeSummary(row) {
+  const intervals = [
+    ["5m", row.oiChange5mPct, row.oiSpike5mHit],
+    ["1h", row.oiChange1hPct, row.oiSpike1hHit],
+    ["4h", row.oiChange4hPct, row.oiSpike4hHit],
+    ["1d", row.oiChange1dPct, row.oiSpike1dHit]
+  ];
+  const available = intervals.filter(([, value]) => {
+    const numeric = Number(value);
+    return value !== null && value !== undefined && Number.isFinite(numeric);
+  });
+  const hits = available.filter(([, , hit]) => hit);
+  return (hits.length ? hits : available)
+    .map(([label, value]) => `${label} ${formatOiChange(value)}`)
+    .join("｜");
 }
 
 function clampPage(page, total, pageSize) {
@@ -264,6 +287,19 @@ function appendMainNavigation(keyboard, active = null) {
   return keyboard;
 }
 
+function limitMenuItems(items, limit = TELEGRAM_MENU_LIST_LIMIT) {
+  const source = Array.isArray(items) ? items : [];
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || TELEGRAM_MENU_LIST_LIMIT));
+  return {
+    visibleItems: source.slice(0, safeLimit),
+    hiddenCount: Math.max(0, source.length - safeLimit)
+  };
+}
+
+function hiddenItemsText(hiddenCount) {
+  return hiddenCount > 0 ? `仅显示前 ${TELEGRAM_MENU_LIST_LIMIT} 项，另有 ${hiddenCount} 项未展开。` : null;
+}
+
 function pageButtons({ prefix, page, total, pageSize }) {
   const totalPages = Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 1)));
   return [
@@ -292,12 +328,8 @@ export function signalRowText(row, index) {
     multiCycleCount: row.multiMatchCount,
     alertLevel: row.bestAlertLevel ?? row.alertLevel
   });
-  const formatOiChange = (value) => {
-    const numeric = Number(value);
-    return value === null || value === undefined || !Number.isFinite(numeric) ? "--" : `${numeric.toFixed(2)}%`;
-  };
   const oiText = row.oiMatched
-    ? `OI暴涨：5m ${formatOiChange(row.oiChange5mPct)}｜1h ${formatOiChange(row.oiChange1hPct)}`
+    ? `OI暴涨：${oiChangeSummary(row) || "暂无可用变化率"}`
     : null;
   return [
     `${telegramTokenLine(row.symbol, `${index}. `)}${multiText}`,
@@ -451,24 +483,27 @@ async function sendHeat(chatId, messageId = null) {
 
 async function sendWatch(chatId, messageId = null) {
   const items = await menuCache.get("watch", () => listWatchlist());
-  const rows = items.map((item, index) =>
+  const { visibleItems, hiddenCount } = limitMenuItems(items);
+  const rows = visibleItems.map((item, index) =>
     `${index + 1}. ${telegramTokenLine(item.symbol)} · 现价 ${escapeHtml(item.currentPrice ?? "--")} · 高于 ${escapeHtml(item.alertAbove ?? "--")} · 低于 ${escapeHtml(item.alertBelow ?? "--")}`
   );
   const keyboard = appendMainNavigation(
-    { inline_keyboard: tokenOperationRows(items.map((item) => item.symbol)) },
+    { inline_keyboard: tokenOperationRows(visibleItems.map((item) => item.symbol)) },
     "watch"
   );
+  const tail = hiddenItemsText(hiddenCount);
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: rows.length ? [`<b>关注池 · 共 ${items.length} 个</b>`, ...rows].join("\n") : "<b>关注池</b>\n暂无关注代币。",
+    text: rows.length ? [`<b>关注池 · 共 ${items.length} 个</b>`, ...rows, tail].filter(Boolean).join("\n") : "<b>关注池</b>\n暂无关注代币。",
     replyMarkup: keyboard
   });
 }
 
 async function sendFunding(chatId, messageId = null) {
   const items = await menuCache.get("funding", () => listOneHourFundingIntervals());
-  const rows = items.map((item, index) => {
+  const { visibleItems, hiddenCount } = limitMenuItems(items);
+  const rows = visibleItems.map((item, index) => {
     const matches = [
       item.oiMatched ? "OI" : null,
       item.hotRank ? "热度" : null,
@@ -479,13 +514,14 @@ async function sendFunding(chatId, messageId = null) {
     )} · 均线 ${escapeHtml((item.intervals ?? []).join(" / ") || "--")} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
   });
   const keyboard = appendMainNavigation(
-    { inline_keyboard: tokenOperationRows(items.map((item) => item.symbol)) },
+    { inline_keyboard: tokenOperationRows(visibleItems.map((item) => item.symbol)) },
     "funding"
   );
+  const tail = hiddenItemsText(hiddenCount);
   await sendOrEditMessage({
     chatId,
     messageId,
-    text: rows.length ? [`<b>1小时资金费率代币 · 共 ${items.length} 个</b>`, ...rows].join("\n") : "<b>资金费率</b>\n当前没有1小时资金费率的代币。",
+    text: rows.length ? [`<b>1小时资金费率代币 · 共 ${items.length} 个</b>`, ...rows, tail].filter(Boolean).join("\n") : "<b>资金费率</b>\n当前没有1小时资金费率的代币。",
     replyMarkup: keyboard
   });
 }
@@ -573,9 +609,7 @@ async function handleCallback(callback) {
     return;
   }
   const data = String(callback.data ?? "");
-  if (!data.startsWith("funding_confirm:")) {
-    void answerCallback(callback.id);
-  }
+  void answerCallback(callback.id, data.startsWith("funding_confirm:") ? { text: "正在确认..." } : {});
   try {
     if (data === "noop") return;
     const messageId = callback?.message?.message_id ?? null;
@@ -584,11 +618,8 @@ async function handleCallback(callback) {
     if (data === "funding") return sendFunding(chatId, messageId);
     if (data.startsWith("funding_confirm:")) {
       const [, symbol] = data.split(":");
-      const updated = await markFundingIntervalAlertConfirmed(symbol);
+      await markFundingIntervalAlertConfirmed(symbol);
       menuCache.invalidate("funding");
-      void answerCallback(callback.id, {
-        text: updated ? `${symbol} 已确认，停止重复推送。` : `${symbol} 当前无需确认。`
-      });
       return sendFunding(chatId, messageId);
     }
     if (data === "signals") return sendSignals(chatId, "LEVEL1", "15m", 1, messageId);
@@ -640,7 +671,9 @@ async function pollOnce() {
         ? handleCallback(update.callback_query)
         : null;
     task?.catch((error) => {
-      console.error("telegram update handling failed:", error instanceof Error ? error.message : error);
+      const message = error instanceof Error ? error.message : String(error);
+      botStatus.lastError = message;
+      console.error("telegram update handling failed:", message);
     });
   }
 }
@@ -684,11 +717,17 @@ function startMenuWarmup() {
 
 export function startTelegramBot() {
   if (botRunning) return { running: true };
-  if (!config.telegram.enabled || !config.telegram.botToken || !config.telegram.chatId) {
+  if (!config.telegram.enabled) {
+    botStatus.running = false;
+    botStatus.state = "disabled";
+    botStatus.lastError = null;
+    return { running: false, reason: "Telegram disabled" };
+  }
+  if (!config.telegram.botToken || !config.telegram.chatId) {
     botStatus.running = false;
     botStatus.state = "not_configured";
-    botStatus.lastError = "Telegram is not configured";
-    return { running: false, reason: "Telegram is not configured" };
+    botStatus.lastError = "Telegram missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID";
+    return { running: false, reason: botStatus.lastError };
   }
   const lock = acquirePollingLock();
   if (!lock.acquired) {

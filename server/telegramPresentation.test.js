@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { config } from "./config.js";
 import {
   formatHotMaSignalTelegram,
   telegramApi,
   telegramTokenCopyButton,
   telegramTokenLine
 } from "./telegram.js";
-import { oiFilterKeyboard, signalKeyboard, signalRowText, splitTelegramText } from "./telegramBot.js";
+import {
+  getTelegramBotState,
+  oiFilterKeyboard,
+  signalKeyboard,
+  signalRowText,
+  splitTelegramText,
+  startTelegramBot
+} from "./telegramBot.js";
 
 test("Telegram token line keeps Twitter and Binance Square inside the card body", () => {
   const line = telegramTokenLine("ZESTUSDT");
@@ -14,6 +22,7 @@ test("Telegram token line keeps Twitter and Binance Square inside the card body"
   assert.match(line, /<b>ZESTUSDT<\/b>/);
   assert.match(line, /<a href="[^"]+">推特<\/a>/);
   assert.match(line, /<a href="[^"]+">币安广场<\/a>/);
+  assert.match(line, /&amp;src=typed_query&amp;f=live/);
 });
 
 test("Telegram token action button is copy-only", () => {
@@ -67,6 +76,10 @@ test("Telegram signal menu shows OI spike changes as a matched combination", () 
       oiSpikeHit: true,
       oiChange5mPct: 5.25,
       oiChange1hPct: 11.5,
+      oiChange4hPct: 23.2,
+      oiSpike5mHit: true,
+      oiSpike1hHit: true,
+      oiSpike4hHit: true,
       hotRankHit: 1,
       currentPrice: 0.05,
       ma100: 0.051,
@@ -78,7 +91,7 @@ test("Telegram signal menu shows OI spike changes as a matched combination", () 
   );
 
   assert.match(text, /组合等级：OI \+ 热度 \+ 多周期 · 一级警报/);
-  assert.match(text, /OI暴涨：5m 5.25%｜1h 11.50%/);
+  assert.match(text, /OI暴涨：5m 5.25%｜1h 11.50%｜4h 23.20%/);
 });
 
 test("Telegram navigation marks the active menu", () => {
@@ -86,6 +99,24 @@ test("Telegram navigation marks the active menu", () => {
   const oiButton = keyboard.inline_keyboard.flat().find((button) => button.callback_data === "oi:5m:desc");
 
   assert.equal(oiButton.text, "【OI监控】");
+});
+
+test("disabled Telegram bot does not report a runtime error", () => {
+  const originalTelegramConfig = { ...config.telegram };
+  try {
+    config.telegram.enabled = false;
+    config.telegram.botToken = "";
+    config.telegram.chatId = "";
+
+    const result = startTelegramBot();
+    const state = getTelegramBotState();
+
+    assert.equal(result.running, false);
+    assert.equal(state.state, "disabled");
+    assert.equal(state.lastError, null);
+  } finally {
+    Object.assign(config.telegram, originalTelegramConfig);
+  }
 });
 
 test("Telegram OI controls mark the selected window and sort order", () => {

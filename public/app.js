@@ -158,10 +158,31 @@ function formatFundingPercent(value) {
   return `${number > 0 ? "+" : ""}${(number * 100).toFixed(4)}%`;
 }
 
+function formatFundingBand(floor, cap) {
+  const floorText = formatFundingPercent(floor);
+  const capText = formatFundingPercent(cap);
+  if (floorText === "--" && capText === "--") return "--";
+  return `${floorText} / ${capText}`;
+}
+
 function fundingRateTone(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number === 0) return "is-neutral";
   return number > 0 ? "is-positive" : "is-negative";
+}
+
+function oiChangeSummary(row) {
+  const intervals = [
+    ["5m", row.oiChange5mPct, row.oiSpike5mHit],
+    ["1h", row.oiChange1hPct, row.oiSpike1hHit],
+    ["4h", row.oiChange4hPct, row.oiSpike4hHit],
+    ["1d", row.oiChange1dPct, row.oiSpike1dHit]
+  ];
+  const available = intervals.filter(([, value]) => Number.isFinite(Number(value)));
+  const hits = available.filter(([, , hit]) => hit);
+  return (hits.length ? hits : available)
+    .map(([label, value]) => `${label} ${formatPercent(value)}`)
+    .join(" / ");
 }
 
 function cssVar(name, fallback) {
@@ -221,6 +242,25 @@ function watchUnlockTitle(item) {
   if (item.unlockCheckedAt) parts.push(`核对：${formatTime(item.unlockCheckedAt)}`);
   if (item.unlockError) parts.push(`错误：${item.unlockError}`);
   return parts.join("\n");
+}
+
+function watchStatusText() {
+  if (state.watchLoading) return "正在读取关注池";
+  if (state.watchError) return state.watchError;
+  const count = state.watchlist.length;
+  if (!count) return "暂无关注代币";
+  const liveCount = state.watchlist.filter((item) => item.currentPrice !== null && item.currentPrice !== undefined).length;
+  const latestTime = Math.max(
+    ...state.watchlist
+      .map((item) => Number(item.currentCloseTime ?? item.realtimePriceTime ?? 0))
+      .filter(Number.isFinite)
+  );
+  const suffix = Number.isFinite(latestTime) && latestTime > 0 ? `，最新价格时间 ${formatTime(latestTime)}` : "";
+  return `共 ${count} 个关注，${liveCount} 个有价格缓存${suffix}`;
+}
+
+function updateWatchStatus() {
+  setText("#watchStatus", watchStatusText());
 }
 
 function levelBadge(level) {
@@ -442,6 +482,19 @@ function twitterStatusLabel(token) {
   return `推特${token.twitterStatus}`;
 }
 
+function hotRankChainLabel(chain = state.hotRankChain) {
+  return {
+    all: "全部链",
+    bsc: "BSC",
+    base: "Base",
+    solana: "Solana"
+  }[chain] ?? "全部链";
+}
+
+function hasCurrentHotRankData() {
+  return Boolean(state.hotRankFetchedAt && state.hotRankLoadedChain === state.hotRankChain);
+}
+
 function hotRankTotalPages() {
   return Math.ceil(state.hotRankTotal / state.hotRankPageSize) || 1;
 }
@@ -455,7 +508,9 @@ function renderHotRank() {
   const status = $("#hotRankStatus");
   if (!target || !status) return;
 
-  setText("#heatRankCount", state.hotRankTotal || "--");
+  const hasCurrentData = hasCurrentHotRankData();
+  const hasRows = hasCurrentData && state.hotRank.length > 0;
+  setText("#heatRankCount", hasRows ? state.hotRankTotal : "--");
   const refreshButton = $("#refreshHotRankBtn");
   if (refreshButton) {
     refreshButton.disabled = state.hotRankLoading;
@@ -466,13 +521,18 @@ function renderHotRank() {
   });
 
   if (state.hotRankLoading) {
-    status.textContent = "正在刷新热度排行...";
-    target.innerHTML = '<div class="heat-empty">正在读取热度数据。</div>';
-    updateHeatPagination();
-    return;
+    status.textContent = hasCurrentData
+      ? `正在刷新${hotRankChainLabel()}热度排行，当前列表为上次结果...`
+      : `正在读取${hotRankChainLabel()}热度排行...`;
+    status.title = "";
+    if (!hasCurrentData) {
+      target.innerHTML = '<div class="heat-empty">正在读取热度数据。</div>';
+      updateHeatPagination({ empty: true });
+      return;
+    }
   }
 
-  if (state.hotRankFetchedAt) {
+  if (!state.hotRankLoading && hasCurrentData) {
     const flags = [];
     if (state.hotRankStale) flags.push("使用上次缓存");
     else if (state.hotRankPartial) flags.push("部分链失败");
@@ -485,9 +545,9 @@ function renderHotRank() {
     status.title = state.hotRankError || "";
   }
 
-  if (!state.hotRank.length) {
+  if (!hasRows) {
     target.innerHTML = '<div class="heat-empty">暂无热度数据。</div>';
-    updateHeatPagination();
+    updateHeatPagination({ empty: true });
     return;
   }
 
@@ -511,7 +571,7 @@ function renderHotRank() {
             </div>
           </div>
           <div class="heat-chain">${escapeHtml(token.chainLabel)}</div>
-          <div class="heat-score">${formatNumber(token.heat, 0)}</div>
+          <div class="heat-score" title="综合热度">${formatNumber(token.heat, 0)}</div>
           <div class="heat-change ${changeClass}">${formatPercent(change)}</div>
           <div class="heat-links">${copyButton(token.symbol)}${searchButtons(token.symbol)}</div>
           <div class="heat-summary" title="${escapeHtml(token.summary || "暂无讨论摘要")}">${escapeHtml(token.summary || "暂无讨论摘要")}</div>
@@ -524,22 +584,25 @@ function renderHotRank() {
   updateHeatPagination();
 }
 
-function updateHeatPagination() {
-  clampHotRankPage();
-  const totalPages = hotRankTotalPages();
-  const summary = state.hotRankTotal
-    ? `第 ${state.hotRankPage} / ${totalPages} 页，共 ${state.hotRankTotal} 项`
+function updateHeatPagination({ empty = false } = {}) {
+  const hasRows = !empty && hasCurrentHotRankData() && state.hotRankTotal > 0;
+  if (hasRows) clampHotRankPage();
+  const totalPages = hasRows ? hotRankTotalPages() : 1;
+  const displayPage = hasRows ? state.hotRankPage : 1;
+  const summary = hasRows
+    ? `第 ${displayPage} / ${totalPages} 页，共 ${state.hotRankTotal} 项`
     : "--";
   setText("#heatPaginationSummary", summary);
-  setText("#heatPageIndicator", `${state.hotRankPage} / ${totalPages}`);
+  setText("#heatPageIndicator", `${displayPage} / ${totalPages}`);
 
   const prevBtn = $("#prevHeatPageBtn");
   const nextBtn = $("#nextHeatPageBtn");
-  if (prevBtn) prevBtn.disabled = state.hotRankPage <= 1;
-  if (nextBtn) nextBtn.disabled = state.hotRankPage >= totalPages;
+  if (prevBtn) prevBtn.disabled = state.hotRankLoading || !hasRows || state.hotRankPage <= 1;
+  if (nextBtn) nextBtn.disabled = state.hotRankLoading || !hasRows || state.hotRankPage >= totalPages;
 
   document.querySelectorAll("[data-heat-pagesize]").forEach((btn) => {
     btn.classList.toggle("active", parseInt(btn.dataset.heatPagesize) === state.hotRankPageSize);
+    btn.disabled = state.hotRankLoading && !hasRows;
   });
 }
 
@@ -618,7 +681,7 @@ function renderFundingRateTokens() {
             ? `均线 ${token.multiCycleCount} 周期`
             : null,
         token.oiSpike
-          ? `OI 5m ${formatPercent(token.oiChange5mPct)} / 1h ${formatPercent(token.oiChange1hPct)}`
+          ? `OI ${oiChangeSummary(token) || "暂无可用变化率"}`
           : null
       ].filter(Boolean);
       const expanded = state.fundingExpandedSymbol === token.symbol;
@@ -633,6 +696,7 @@ function renderFundingRateTokens() {
           <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
           <div><span>当前资金费率</span><b class="mono funding-rate ${rateTone}">${formatFundingPercent(token.currentFundingRate)}</b></div>
+          <div><span>费率下限 / 上限</span><b class="mono funding-rate-band">${formatFundingBand(token.adjustedFundingRateFloor, token.adjustedFundingRateCap)}</b></div>
           <div><span>下次结算</span><b>${formatTime(token.nextFundingTime)}</b></div>
           <div><span>最近变化</span><b>${formatTime(token.lastChangedAt || token.lastSeenAt)}</b></div>
           <div class="heat-links">
@@ -663,7 +727,9 @@ async function scanFundingIntervals() {
       setText("#fundingStatus", `扫描已返回，但列表刷新失败：${state.fundingError}`);
       return;
     }
-    const suffix = result?.skipped ? `扫描跳过：${result.reason || "未知原因"}` : `扫描完成，发现 ${Number(result?.seenCount ?? 0)} 个调整周期合约`;
+    const suffix = result?.skipped
+      ? `扫描跳过：${result.reason || "未知原因"}`
+      : `扫描完成，调整周期 ${Number(result?.seenCount ?? 0)} 个，回写默认周期 ${Number(result?.missingCount ?? 0)} 个，待提醒 ${Number(result?.pendingCount ?? 0)} 个`;
     setText("#fundingStatus", `${fundingStatusText()}，${suffix}`);
   } catch (error) {
     state.fundingError = error instanceof Error ? error.message : String(error);
@@ -773,6 +839,13 @@ function renderIOMonitoring() {
     state.ioSort === "desc" ? "从高到低" : "从低到高",
     `${state.ioTotal} 个代币`
   ];
+  if (state.ioMonitor?.running) statusParts.push("扫描中");
+  if (Number(state.ioMonitor?.scannedCount ?? 0) > 0) {
+    statusParts.push(`本轮已扫 ${state.ioMonitor.scannedCount}/${state.ioMonitor.totalTokenCount ?? "--"}`);
+  }
+  if (Number(state.ioMonitor?.retryPendingCount ?? 0) > 0) {
+    statusParts.push(`待重试 ${state.ioMonitor.retryPendingCount}`);
+  }
   if (state.ioLoading) statusParts.push("刷新中");
   if (state.ioError) statusParts.push("上次刷新失败，保留当前结果");
   if (state.ioData.some((item) => item.isStale)) statusParts.push(`本页 ${state.ioData.filter((item) => item.isStale).length} 项过期`);
@@ -1198,7 +1271,7 @@ function renderSignals() {
       const hotRankHit = Boolean(Number(row.hotRankHit ?? 0));
       const profile = signalProfile(row);
       const oiChangeText = row.oiMatched
-        ? `5m ${formatPercent(row.oiChange5mPct)} / 1h ${formatPercent(row.oiChange1hPct)}`
+        ? oiChangeSummary(row)
         : "";
       const details = Array.isArray(row.intervalDetails) ? row.intervalDetails : [];
       const triggered = details.filter((item) => ["LEVEL1", "LEVEL2"].includes(item.alertLevel));
@@ -1333,6 +1406,7 @@ function bindCopyButtons(root = document) {
 function renderWatchlist() {
   const target = $("#watchRows");
   if (!target) return;
+  updateWatchStatus();
   if (state.watchLoading) {
     target.innerHTML = '<div class="heat-empty">正在读取关注池。</div>';
     return;
@@ -1487,6 +1561,7 @@ function renderWatchlist() {
   if (expandedItem) {
     loadAndRenderChart({ symbol: expandedItem.symbol, intervalCode: state.watchInterval }, { live: true });
   }
+  updateWatchStatus();
   updateWatchRealtime();
 }
 
@@ -1537,6 +1612,7 @@ function updateWatchlistDomFromState() {
   for (const item of state.watchlist) {
     updateWatchPriceDom(item.symbol, item.currentPrice, item.currentCloseTime);
   }
+  updateWatchStatus();
 }
 
 async function loadWatchlist({ silent = false } = {}) {
@@ -1673,6 +1749,7 @@ function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
   for (const element of document.querySelectorAll(`[data-watch-updated="${selectorSymbol}"]`)) {
     element.textContent = `最新更新时间：${formatTime(eventTime)}`;
   }
+  updateWatchStatus();
 }
 
 function updateMarketPriceDom(symbol, price, eventTime = Date.now()) {
@@ -1754,8 +1831,10 @@ function handleWatchRealtimeMessage(payload) {
     const interval = String(payload.interval ?? payload.kline.i ?? "");
     const price = Number(payload.kline.c);
     const eventTime = Number(payload.eventTime ?? Date.now());
-    updateWatchPriceDom(symbol, price, eventTime);
-    updateMarketPriceDom(symbol, price, eventTime);
+    if (symbol && Number.isFinite(price)) {
+      updateWatchPriceDom(symbol, price, eventTime);
+      updateMarketPriceDom(symbol, price, eventTime);
+    }
     updateChartKline(symbol, interval, payload.kline);
     return;
   }
@@ -1776,8 +1855,10 @@ function handleWatchRealtimeMessage(payload) {
     const interval = String(data.k.i ?? "");
     const price = Number(data.k.c);
     const eventTime = Number(data.E ?? Date.now());
-    updateWatchPriceDom(symbol, price, eventTime);
-    updateMarketPriceDom(symbol, price, eventTime);
+    if (symbol && Number.isFinite(price)) {
+      updateWatchPriceDom(symbol, price, eventTime);
+      updateMarketPriceDom(symbol, price, eventTime);
+    }
     updateChartKline(symbol, interval, data.k);
   }
 }
@@ -1876,7 +1957,7 @@ function setPage(page) {
   });
   const mobileSelect = $("#mobilePageSelect");
   if (mobileSelect) mobileSelect.value = page;
-  if (page === "heat") loadHotRank({ silent: true });
+  if (page === "heat" && !state.hotRankLoading) loadHotRank({ silent: hasCurrentHotRankData() });
   if (page === "watch") loadWatchlist();
   else updateWatchRealtime();
   if (page === "funding") loadFundingRateTokens();
@@ -3025,8 +3106,8 @@ window.addEventListener("resize", () => {
 updateFilterControls();
 setPage(pageFromHash());
 void bootstrap();
-await refreshAll({ keepPage: false });
-if (state.currentView !== "heat" || (!state.hotRankLoading && !state.hotRankFetchedAt)) loadHotRank();
+void refreshAll({ keepPage: false });
+if (state.currentView !== "heat") loadHotRank({ silent: true });
 loadWatchlist();
 setInterval(() => loadHotRank({ silent: true }), 5 * 60 * 1000);
 setInterval(() => {

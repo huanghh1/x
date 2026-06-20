@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260620-3" />
+    <link rel="stylesheet" href="/styles.css?v=20260620-4" />
   </head>
   <body>
     <header class="app-nav">
@@ -79,11 +79,11 @@
               <p>基于币安 Web3 热度按链展示，并排除市值前 10、稳定币和代币化股票。</p>
             </div>
             <div class="table-actions">
-              <button class="page-size-btn active" type="button" data-heat-chain="all">全部</button>
-              <button class="page-size-btn" type="button" data-heat-chain="bsc">BSC</button>
-              <button class="page-size-btn" type="button" data-heat-chain="base">Base</button>
-              <button class="page-size-btn" type="button" data-heat-chain="solana">Solana</button>
-              <button id="refreshHotRankBtn" class="ghost-button" type="button">刷新热度</button>
+              <button class="page-size-btn active" type="button" data-heat-chain="all" aria-label="查看全部链热度排行">全部</button>
+              <button class="page-size-btn" type="button" data-heat-chain="bsc" aria-label="查看 BSC 热度排行">BSC</button>
+              <button class="page-size-btn" type="button" data-heat-chain="base" aria-label="查看 Base 热度排行">Base</button>
+              <button class="page-size-btn" type="button" data-heat-chain="solana" aria-label="查看 Solana 热度排行">Solana</button>
+              <button id="refreshHotRankBtn" class="ghost-button" type="button" aria-label="刷新热度排行">刷新热度</button>
             </div>
           </div>
 
@@ -95,9 +95,9 @@
             <span id="heatPaginationSummary">--</span>
             <div class="page-size">
               <span>每页</span>
-              <button class="page-size-btn active" type="button" data-heat-pagesize="20">20</button>
-              <button class="page-size-btn" type="button" data-heat-pagesize="50">50</button>
-              <button class="page-size-btn" type="button" data-heat-pagesize="100">100</button>
+              <button class="page-size-btn active" type="button" data-heat-pagesize="20" aria-label="热度排行每页 20 项">20</button>
+              <button class="page-size-btn" type="button" data-heat-pagesize="50" aria-label="热度排行每页 50 项">50</button>
+              <button class="page-size-btn" type="button" data-heat-pagesize="100" aria-label="热度排行每页 100 项">100</button>
             </div>
             <div class="page-buttons">
               <button id="prevHeatPageBtn" class="ghost-button" type="button">上一页</button>
@@ -194,6 +194,7 @@
           <div class="watch-list" id="watchRows">
             <div class="heat-empty">暂无关注代币。</div>
           </div>
+          <div id="watchStatus" class="heat-rank-status">按最近更新排序</div>
         </section>
 
         <section id="fundingPage" class="section page-section" aria-labelledby="fundingTitle" data-page-section="funding">
@@ -218,7 +219,7 @@
           <div class="section-head">
             <div>
               <h2 id="ioTitle">OI 持仓量监控</h2>
-              <p>监控 Open Interest 在 5分钟、15分钟、1小时、4小时和1天内的变化；达到 5分钟 5% 或 1小时 10% 才接入均线组合。</p>
+              <p>监控 Open Interest 在 5分钟、15分钟、1小时、4小时和1天内的变化；达到 5分钟 2%、1小时 10%、4小时 20% 或 1天 40% 才接入均线组合。</p>
             </div>
             <div class="table-actions">
               <button id="refreshIoBtn" class="ghost-button" type="button">刷新数据</button>
@@ -365,6 +366,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260620-3" type="module"></script>
+    <script src="/app.js?v=20260620-4" type="module"></script>
   </body>
 </html>

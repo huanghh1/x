@@ -79,6 +79,7 @@ const TABLE_SQL = [
     UNIQUE KEY uk_token_symbol (symbol),
     KEY idx_token_category_status (category_type, fetch_status),
     KEY idx_token_status (fetch_status, updated_at),
+    KEY idx_token_active_status (is_active, fetch_status, category_type, updated_at),
     KEY idx_token_base_active (base_asset, is_active, updated_at),
     KEY idx_token_inactive_since (is_active, inactive_since)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -101,6 +102,7 @@ const TABLE_SQL = [
     UNIQUE KEY uk_kline_symbol_interval_time (symbol, interval_code, open_time),
     KEY idx_kline_token_interval_time (token_id, interval_code, open_time),
     KEY idx_kline_symbol_interval_close (symbol, interval_code, close_time),
+    KEY idx_kline_interval_symbol (interval_code, symbol),
     CONSTRAINT fk_kline_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS signal_result (
@@ -127,6 +129,7 @@ const TABLE_SQL = [
     KEY idx_signal_time (signal_time),
     KEY idx_signal_filter_page (category_type, alert_level, interval_code, updated_at, symbol),
     KEY idx_signal_symbol_time (symbol, signal_time),
+    KEY idx_signal_symbol_level_interval (symbol, alert_level, interval_code),
     CONSTRAINT fk_signal_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS maintenance_state (
@@ -212,7 +215,8 @@ const TABLE_SQL = [
     PRIMARY KEY (symbol),
     KEY idx_funding_interval_hours (funding_interval_hours, one_hour_alerted_at),
     KEY idx_funding_last_changed (last_changed_at),
-    KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol)
+    KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol),
+    KEY idx_funding_pending_alerts (funding_interval_hours, source_present, one_hour_confirmed_at, next_one_hour_alert_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS signal_trigger_history (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -285,11 +289,16 @@ const TABLE_SQL = [
     PRIMARY KEY (symbol),
     KEY idx_unlock_base_asset (base_asset),
     KEY idx_unlock_next (next_unlock_at, symbol),
-    KEY idx_unlock_expiry (expires_at)
+    KEY idx_unlock_expiry (expires_at),
+    KEY idx_unlock_checked (checked_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 ];
 
 export async function ensureDatabase() {
+  if (databaseInitPromise) {
+    await databaseInitPromise;
+    return;
+  }
   if (pool) return;
   if (!databaseInitPromise) {
     databaseInitPromise = initializeDatabase().finally(() => {
@@ -471,14 +480,17 @@ async function ensureIndex(tableName, indexName, definition) {
 }
 
 async function ensurePerformanceIndexes() {
+  await ensureIndex("token_list", "idx_token_active_status", "(is_active, fetch_status, category_type, updated_at)");
   await ensureIndex("token_list", "idx_token_base_active", "(base_asset, is_active, updated_at)");
   await ensureIndex("token_list", "idx_token_inactive_since", "(is_active, inactive_since)");
+  await ensureIndex("kline_cache", "idx_kline_interval_symbol", "(interval_code, symbol)");
   await ensureIndex(
     "signal_result",
     "idx_signal_filter_page",
     "(category_type, alert_level, interval_code, updated_at, symbol)"
   );
   await ensureIndex("signal_result", "idx_signal_symbol_time", "(symbol, signal_time)");
+  await ensureIndex("signal_result", "idx_signal_symbol_level_interval", "(symbol, alert_level, interval_code)");
   await ensureIndex("hot_rank_seen", "idx_hot_base_seen", "(base_asset, last_seen_at, last_seen_rank)");
   await ensureIndex("hot_rank_seen", "idx_hot_chain_seen", "(chain_label, last_seen_at, last_seen_rank)");
   await ensureIndex(
@@ -486,7 +498,13 @@ async function ensurePerformanceIndexes() {
     "idx_funding_interval_changed",
     "(funding_interval_hours, last_changed_at, symbol)"
   );
+  await ensureIndex(
+    "funding_interval_state",
+    "idx_funding_pending_alerts",
+    "(funding_interval_hours, source_present, one_hour_confirmed_at, next_one_hour_alert_at)"
+  );
   await ensureIndex("watchlist", "idx_watch_updated", "(updated_at, symbol)");
+  await ensureIndex("open_interest_monitor", "idx_oi_5m", "(change_5m_pct, observed_at)");
   await ensureIndex("open_interest_monitor", "idx_oi_15m", "(change_15m_pct, observed_at)");
   await ensureIndex("open_interest_monitor", "idx_oi_1h", "(change_1h_pct, observed_at)");
   await ensureIndex("open_interest_monitor", "idx_oi_4h", "(change_4h_pct, observed_at)");
@@ -495,6 +513,7 @@ async function ensurePerformanceIndexes() {
   await ensureIndex("signal_trigger_history", "idx_trigger_type_time_id", "(trigger_type, trigger_time, id)");
   await ensureIndex("kline_cache", "idx_kline_symbol_interval_close", "(symbol, interval_code, close_time)");
   await ensureIndex("hot_rank_snapshot", "idx_hot_snapshot_time", "(snapshot_time)");
+  await ensureIndex("token_unlock_cache", "idx_unlock_checked", "(checked_at)");
 }
 
 const EXCLUDED_BASE_ASSETS = [
@@ -613,14 +632,52 @@ export async function queueSymbolsForKlineRefresh(symbols = [], reason = "K çº¿ç
 }
 
 export async function getKlineAuditReport(retentionLimits = config.crawler.retentionLimits) {
+  const latestClosed = {
+    "15m": latestClosedKlineOpenTime("15m"),
+    "1h": latestClosedKlineOpenTime("1h"),
+    "4h": latestClosedKlineOpenTime("4h"),
+    "1d": latestClosedKlineOpenTime("1d")
+  };
   const [rows] = await getPool().query(
-    `SELECT t.symbol, k.interval_code AS intervalCode, COUNT(k.id) AS cachedCount,
-      MIN(k.open_time) AS earliestOpenTime, MAX(k.open_time) AS latestOpenTime
+    `SELECT t.symbol, k.interval_code AS intervalCode,
+      COUNT(CASE
+        WHEN k.open_time <= CASE k.interval_code
+          WHEN '15m' THEN :latest15m
+          WHEN '1h' THEN :latest1h
+          WHEN '4h' THEN :latest4h
+          WHEN '1d' THEN :latest1d
+          ELSE 0
+        END THEN k.id
+      END) AS cachedCount,
+      MIN(CASE
+        WHEN k.open_time <= CASE k.interval_code
+          WHEN '15m' THEN :latest15m
+          WHEN '1h' THEN :latest1h
+          WHEN '4h' THEN :latest4h
+          WHEN '1d' THEN :latest1d
+          ELSE 0
+        END THEN k.open_time
+      END) AS earliestOpenTime,
+      MAX(CASE
+        WHEN k.open_time <= CASE k.interval_code
+          WHEN '15m' THEN :latest15m
+          WHEN '1h' THEN :latest1h
+          WHEN '4h' THEN :latest4h
+          WHEN '1d' THEN :latest1d
+          ELSE 0
+        END THEN k.open_time
+      END) AS latestOpenTime
      FROM token_list t
      LEFT JOIN kline_cache k ON k.token_id=t.id
      WHERE t.is_active=1
      GROUP BY t.symbol, k.interval_code
-     ORDER BY t.symbol, FIELD(k.interval_code, '15m','1h','4h','1d')`
+     ORDER BY t.symbol, FIELD(k.interval_code, '15m','1h','4h','1d')`,
+    {
+      latest15m: latestClosed["15m"],
+      latest1h: latestClosed["1h"],
+      latest4h: latestClosed["4h"],
+      latest1d: latestClosed["1d"]
+    }
   );
   const bySymbol = new Map();
   for (const row of rows) {
@@ -628,7 +685,6 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
     if (row.intervalCode) bySymbol.get(row.symbol).set(row.intervalCode, row);
   }
   const deficient = [];
-  const now = Date.now();
   for (const [symbol, intervals] of bySymbol) {
     for (const intervalCode of ["15m", "1h", "4h", "1d"]) {
       const row = intervals.get(intervalCode);
@@ -641,14 +697,15 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
         ? null
         : Number(row.latestOpenTime);
       const safeIntervalMs = intervalMs(intervalCode);
-      const targetStartTime = now - (expectedCount - 1) * safeIntervalMs;
+      const targetEndTime = latestClosed[intervalCode] ?? latestClosedKlineOpenTime(intervalCode);
+      const targetStartTime = targetEndTime - (expectedCount - 1) * safeIntervalMs;
       const spanSlotCount =
         earliestOpenTime !== null && latestOpenTime !== null && latestOpenTime >= earliestOpenTime
           ? Math.floor((latestOpenTime - earliestOpenTime) / safeIntervalMs) + 1
           : cachedCount;
       const hasSpanGap = cachedCount > 1 && spanSlotCount > cachedCount;
       const firstGap = hasSpanGap
-        ? await findKlineGap(symbol, intervalCode, safeIntervalMs, Math.max(targetStartTime, earliestOpenTime), now)
+        ? await findKlineGap(symbol, intervalCode, safeIntervalMs, Math.max(targetStartTime, earliestOpenTime), targetEndTime)
         : null;
       if (cachedCount < expectedCount || firstGap) {
         deficient.push({
@@ -857,6 +914,11 @@ function intervalMs(intervalCode) {
   }[intervalCode] ?? 60 * 60 * 1000;
 }
 
+function latestClosedKlineOpenTime(intervalCode) {
+  const ms = intervalMs(intervalCode);
+  return Math.floor(Date.now() / ms) * ms - ms;
+}
+
 export async function findKlineGap(symbol, intervalCode, intervalMsValue, startTime, endTime) {
   const gaps = await listKlineGaps(symbol, intervalCode, intervalMsValue, startTime, endTime, 1);
   return gaps[0] ?? null;
@@ -1039,8 +1101,17 @@ function normalizedFundingIntervalItem(item) {
   };
 }
 
+export function normalizeFundingIntervalSnapshotItems(items) {
+  const bySymbol = new Map();
+  for (const item of items ?? []) {
+    const normalized = normalizedFundingIntervalItem(item);
+    if (normalized) bySymbol.set(normalized.symbol, normalized);
+  }
+  return Array.from(bySymbol.values());
+}
+
 export async function recordFundingIntervalSnapshot(items) {
-  const normalized = (items ?? []).map(normalizedFundingIntervalItem).filter(Boolean);
+  const normalized = normalizeFundingIntervalSnapshotItems(items);
   if (!normalized.length) return { seenCount: 0, symbols: [] };
 
   const rows = normalized.map((item) => [
@@ -1195,6 +1266,40 @@ export async function markFundingIntervalAlertConfirmed(symbols) {
   return result.affectedRows ?? 0;
 }
 
+function baseAssetAliases(value) {
+  const baseAsset = sanitizeDbSymbol(value);
+  if (!baseAsset) return [];
+  const aliases = new Set([baseAsset]);
+  for (const prefix of ["1000000", "1000"]) {
+    if (baseAsset.startsWith(prefix) && baseAsset.length > prefix.length) {
+      aliases.add(baseAsset.slice(prefix.length));
+    }
+  }
+  return Array.from(aliases);
+}
+
+export function collectHotRankFundingSymbols(symbols, hotRows) {
+  const symbolSet = new Set((symbols ?? []).map(sanitizeDbSymbol).filter(Boolean));
+  const symbolsByBaseAsset = new Map();
+  for (const symbol of symbolSet) {
+    for (const alias of baseAssetAliases(baseAssetFromSymbol(symbol))) {
+      const matches = symbolsByBaseAsset.get(alias) ?? new Set();
+      matches.add(symbol);
+      symbolsByBaseAsset.set(alias, matches);
+    }
+  }
+
+  const matched = new Set();
+  for (const row of hotRows ?? []) {
+    const rowSymbol = sanitizeDbSymbol(row?.symbol);
+    if (symbolSet.has(rowSymbol)) matched.add(rowSymbol);
+    for (const alias of baseAssetAliases(row?.baseAsset)) {
+      for (const symbol of symbolsByBaseAsset.get(alias) ?? []) matched.add(symbol);
+    }
+  }
+  return matched;
+}
+
 export async function listOneHourFundingIntervals() {
   const [rows] = await getPool().query(
     `SELECT symbol,
@@ -1229,7 +1334,7 @@ export async function listOneHourFundingIntervals() {
   );
   const symbols = rows.map((row) => sanitizeDbSymbol(row.symbol)).filter(Boolean);
   if (!symbols.length) return [];
-  const baseAssets = [...new Set(symbols.map(baseAssetFromSymbol).filter(Boolean))];
+  const baseAssets = [...new Set(symbols.flatMap((symbol) => baseAssetAliases(baseAssetFromSymbol(symbol))))];
   const [signalResult, hotResult, oiResult] = await Promise.all([
     getPool().query(
       `SELECT symbol,
@@ -1265,13 +1370,7 @@ export async function listOneHourFundingIntervals() {
     )
   ]);
   const signalBySymbol = new Map(signalResult[0].map((row) => [row.symbol, row]));
-  const hotSymbols = new Set();
-  const symbolByBaseAsset = new Map(symbols.map((symbol) => [baseAssetFromSymbol(symbol), symbol]));
-  for (const row of hotResult[0]) {
-    if (symbols.includes(row.symbol)) hotSymbols.add(row.symbol);
-    const matchedSymbol = symbolByBaseAsset.get(row.baseAsset);
-    if (matchedSymbol) hotSymbols.add(matchedSymbol);
-  }
+  const hotSymbols = collectHotRankFundingSymbols(symbols, hotResult[0]);
   const oiBySymbol = new Map(oiResult[0].map((row) => [row.symbol, row]));
 
   return rows.map((row) => {
@@ -2903,20 +3002,20 @@ export async function listWatchlist() {
       w.current_price AS realtimePrice, UNIX_TIMESTAMP(w.current_price_time) * 1000 AS realtimePriceTime,
       w.created_at AS createdAt, w.updated_at AS updatedAt,
       t.category_label AS categoryLabel,
-      IF(EXISTS(
-        SELECT 1 FROM kline_cache k
-        WHERE k.symbol=w.symbol AND k.interval_code='15m'
-        LIMIT 1
-      ), '15m', NULL) AS latestInterval,
+      (
+        SELECT k.interval_code FROM kline_cache k
+        WHERE k.symbol=w.symbol
+        ORDER BY FIELD(k.interval_code, '15m', '1h', '4h', '1d'), k.open_time DESC LIMIT 1
+      ) AS latestInterval,
       COALESCE(w.current_price, (
         SELECT k.close_price FROM kline_cache k
-        WHERE k.symbol=w.symbol AND k.interval_code='15m'
-        ORDER BY k.open_time DESC LIMIT 1
+        WHERE k.symbol=w.symbol
+        ORDER BY FIELD(k.interval_code, '15m', '1h', '4h', '1d'), k.open_time DESC LIMIT 1
       )) AS currentPrice,
       COALESCE(UNIX_TIMESTAMP(w.current_price_time) * 1000, (
         SELECT k.close_time FROM kline_cache k
-        WHERE k.symbol=w.symbol AND k.interval_code='15m'
-        ORDER BY k.open_time DESC LIMIT 1
+        WHERE k.symbol=w.symbol
+        ORDER BY FIELD(k.interval_code, '15m', '1h', '4h', '1d'), k.open_time DESC LIMIT 1
       )) AS currentCloseTime,
       u.next_unlock_at AS nextUnlockAt,
       u.unlock_amount AS unlockAmount,

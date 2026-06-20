@@ -1,8 +1,8 @@
 import { fetchKlinesPaged, fetchRecentKlines } from "./binance.js";
 import { config } from "./config.js";
 import {
-  findKlineGap,
   klineStats,
+  listKlineGaps,
   listWatchlistTokens,
   refreshTokenFetchState,
   selectClosePrices,
@@ -26,7 +26,12 @@ function intervalMs(intervalCode) {
 
 function targetStart(intervalCode) {
   const targetCount = Math.max(200, Number(config.crawler.retentionLimits[intervalCode]) || 200);
-  return Date.now() - Math.max(1, targetCount - 1) * intervalMs(intervalCode);
+  return latestClosedKlineOpenTime(intervalCode) - Math.max(1, targetCount - 1) * intervalMs(intervalCode);
+}
+
+function latestClosedKlineOpenTime(intervalCode) {
+  const ms = intervalMs(intervalCode);
+  return Math.floor(Date.now() / ms) * ms - ms;
 }
 
 async function fetchRange(token, intervalCode, startTime, endTime) {
@@ -49,20 +54,20 @@ async function fetchRange(token, intervalCode, startTime, endTime) {
 async function repairGaps(token, intervalCode) {
   const ms = intervalMs(intervalCode);
   const startTime = targetStart(intervalCode);
+  const endTime = latestClosedKlineOpenTime(intervalCode);
   const stats = await klineStats(token.symbol, intervalCode);
   if (stats.minOpenTime === null || stats.minOpenTime > startTime + ms) {
     await fetchRange(
       token,
       intervalCode,
       startTime,
-      stats.minOpenTime === null ? Date.now() : stats.minOpenTime - ms
+      stats.minOpenTime === null ? endTime : Math.min(endTime, stats.minOpenTime - ms)
     );
   }
-  for (let pass = 0; pass < 3; pass += 1) {
-    const gap = await findKlineGap(token.symbol, intervalCode, ms, startTime, Date.now());
-    if (!gap) break;
+  const gaps = await listKlineGaps(token.symbol, intervalCode, ms, startTime, endTime, 25);
+  for (const gap of gaps) {
     const fetched = await fetchRange(token, intervalCode, gap.startTime, gap.endTime);
-    if (!fetched) break;
+    if (!fetched) continue;
   }
 }
 

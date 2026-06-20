@@ -25,11 +25,33 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;");
 }
 
+function escapeHtmlAttribute(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
 function formatOiChange(value) {
   const numeric = Number(value);
   return value === null || value === undefined || !Number.isFinite(numeric)
     ? "--"
     : `${numeric.toFixed(2)}%`;
+}
+
+function oiChangeSummary(source, prefix = "oi") {
+  const key = (name) => `${prefix}${name}`;
+  const intervals = [
+    ["5分钟", source?.[key("Change5mPct")], source?.[key("Spike5mHit")]],
+    ["1小时", source?.[key("Change1hPct")], source?.[key("Spike1hHit")]],
+    ["4小时", source?.[key("Change4hPct")], source?.[key("Spike4hHit")]],
+    ["1天", source?.[key("Change1dPct")], source?.[key("Spike1dHit")]]
+  ];
+  const available = intervals.filter(([, value]) => {
+    const numeric = Number(value);
+    return value !== null && value !== undefined && Number.isFinite(numeric);
+  });
+  const hits = available.filter(([, , hit]) => hit);
+  return (hits.length ? hits : available)
+    .map(([label, value]) => `${label} ${formatOiChange(value)}`)
+    .join(" · ");
 }
 
 function tokenSearchTerm(token) {
@@ -58,6 +80,7 @@ function signalActionButtons(active = null) {
   const label = (text, key) => active === key ? `【${text}】` : text;
   return [
     { text: label("均线组合", "signals"), callback_data: "signals" },
+    { text: label("多周期", "multi"), callback_data: "multi:1" },
     { text: label("热度排行", "heat"), callback_data: "heat" },
     { text: label("资金费率", "funding"), callback_data: "funding" },
     { text: label("OI监控", "oi"), callback_data: "oi:5m:desc" },
@@ -71,7 +94,7 @@ export function telegramTokenCopyButton(symbol) {
 
 export function telegramTokenLine(symbol, prefix = "") {
   const links = telegramSearchLinks(symbol);
-  return `<b>${escapeHtml(prefix)}${escapeHtml(symbol)}</b> · <a href="${links.twitter}">推特</a> · <a href="${links.binanceSquare}">币安广场</a>`;
+  return `<b>${escapeHtml(prefix)}${escapeHtml(symbol)}</b> · <a href="${escapeHtmlAttribute(links.twitter)}">推特</a> · <a href="${escapeHtmlAttribute(links.binanceSquare)}">币安广场</a>`;
 }
 
 function signalReplyMarkup(token = null, active = "signals") {
@@ -79,8 +102,9 @@ function signalReplyMarkup(token = null, active = "signals") {
   return {
     inline_keyboard: token?.symbol
       ? [
-          [telegramTokenCopyButton(token.symbol), ...navigation.slice(0, 2)],
-          navigation.slice(2)
+          [telegramTokenCopyButton(token.symbol)],
+          navigation.slice(0, 3),
+          navigation.slice(3)
         ]
       : [navigation.slice(0, 3), navigation.slice(3)]
   };
@@ -207,7 +231,7 @@ export function formatHotMaSignalTelegram(token, signal, context = {}) {
     context.hotRank ? "热度确认：该代币当前在综合热度排行内" : null,
     context.fundingOneHour ? "资金费率：当前为 1 小时结算周期" : null,
     context.oiSpike
-      ? `OI：5分钟 ${escapeHtml(formatOiChange(context.oiChange5mPct))} · 1小时 ${escapeHtml(formatOiChange(context.oiChange1hPct))}`
+      ? `OI：${escapeHtml(oiChangeSummary(context) || "暂无可用变化率")}`
       : null,
     `触发周期：<b>${escapeHtml(intervalText)}</b>${multiCycleCount > 1 ? `（共 ${escapeHtml(multiCycleCount)} 个）` : ""}`,
     isAggregated ? null : `现价：${escapeHtml(signal.currentPrice)}`,
@@ -286,7 +310,7 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
     item.nextFundingTime ? `下次结算：${escapeHtml(new Date(Number(item.nextFundingTime)).toLocaleString("zh-CN", { hour12: false }))}` : null,
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
     context.oiSpike
-      ? `OI：5分钟 ${escapeHtml(formatOiChange(context.oiChange5mPct))} · 1小时 ${escapeHtml(formatOiChange(context.oiChange1hPct))}`
+      ? `OI：${escapeHtml(oiChangeSummary(context) || "暂无可用变化率")}`
       : null,
     item.lastChangedAt ? `变化时间：${escapeHtml(new Date(item.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null
   ].filter(Boolean).join("\n");

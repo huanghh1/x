@@ -514,7 +514,7 @@ function materializeHotRank(basePayload, safeLimit) {
   };
 }
 
-async function fetchHotRankBase({ normalizedChain, safeLimit, targetLanguage, socialLanguage, safeTimeRange }) {
+async function fetchHotRankBase({ normalizedChain, targetLanguage, socialLanguage, safeTimeRange }) {
   const chains = CHAIN_GROUPS[normalizedChain];
   const [results, topMarketCap] = await Promise.all([
     Promise.allSettled(
@@ -581,7 +581,6 @@ export async function getHotRank({
   const safeTimeRange = Math.max(1, Number(timeRange) || 1);
   const cacheKey = JSON.stringify({
     normalizedChain,
-    safeLimit,
     targetLanguage,
     socialLanguage,
     safeTimeRange
@@ -595,7 +594,6 @@ export async function getHotRank({
   if (!request) {
     request = fetchHotRankBase({
       normalizedChain,
-      safeLimit,
       targetLanguage,
       socialLanguage,
       safeTimeRange
