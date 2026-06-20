@@ -213,8 +213,7 @@ export function formatHotMaSignalTelegram(token, signal, context = {}) {
     isAggregated ? null : `现价：${escapeHtml(signal.currentPrice)}`,
     isAggregated ? null : `MA100：${escapeHtml(signal.ma100)} / MA200：${escapeHtml(signal.ma200)}`,
     isAggregated ? null : `状态：${escapeHtml(signal.signalStatus)}`,
-    isAggregated ? null : `说明：${escapeHtml(signal.note)}`,
-    "提示：本条按资金费、OI、热度、多周期与均线等级组合排序，不构成投资建议。"
+    isAggregated ? null : `说明：${escapeHtml(signal.note)}`
   ].filter(Boolean).join("\n");
 }
 
@@ -250,8 +249,7 @@ export async function sendWatchlistTelegram(item, reason) {
     `交易对：${telegramTokenLine(item.symbol)}`,
     `现价：${escapeHtml(item.currentPrice ?? "--")}`,
     `触发：${escapeHtml(reason)}`,
-    item.note ? `备注：${escapeHtml(item.note)}` : null,
-    "提示：这是关注池自定义价格提醒，不是全市场均线信号。"
+    item.note ? `备注：${escapeHtml(item.note)}` : null
   ].filter(Boolean).join("\n");
 
   const result = await postTelegram(text, signalReplyMarkup(item, "watch"));
@@ -290,8 +288,7 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
     context.oiSpike
       ? `OI：5分钟 ${escapeHtml(formatOiChange(context.oiChange5mPct))} · 1小时 ${escapeHtml(formatOiChange(context.oiChange1hPct))}`
       : null,
-    item.lastChangedAt ? `变化时间：${escapeHtml(new Date(item.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null,
-    "提示：这是 Binance USDⓈ-M fundingInfo 公开数据监控，不构成投资建议。"
+    item.lastChangedAt ? `变化时间：${escapeHtml(new Date(item.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null
   ].filter(Boolean).join("\n");
 
   const result = await postTelegram(text, fundingAlertReplyMarkup(item));
@@ -328,8 +325,7 @@ export async function sendOpenInterestSpikeTelegram(item, context = {}) {
     `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`,
     matches.length ? `同币种命中：<b>${escapeHtml(matches.join(" + "))}</b>` : "同币种命中：暂无其他信号",
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
-    `暴涨条件：5分钟 ≥ ${escapeHtml(config.openInterestMonitor.spike5mPct)}% 或 1小时 ≥ ${escapeHtml(config.openInterestMonitor.spike1hPct)}% 或 4小时 ≥ ${escapeHtml(config.openInterestMonitor.spike4hPct)}% 或 1天 ≥ ${escapeHtml(config.openInterestMonitor.spike1dPct)}%`,
-    "提示：这是 OI 暴涨与其他信号组合推送，不构成投资建议。"
+    `暴涨条件：5分钟 ≥ ${escapeHtml(config.openInterestMonitor.spike5mPct)}% 或 1小时 ≥ ${escapeHtml(config.openInterestMonitor.spike1hPct)}% 或 4小时 ≥ ${escapeHtml(config.openInterestMonitor.spike4hPct)}% 或 1天 ≥ ${escapeHtml(config.openInterestMonitor.spike1dPct)}%`
   ].filter(Boolean).join("\n");
   const result = await postTelegram(text, signalReplyMarkup(item, "oi"));
   return { skipped: false, result };
@@ -368,8 +364,7 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
     `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b> (阈值: ${config.openInterestMonitor.spike4hPct}%)`,
     `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b> (阈值: ${config.openInterestMonitor.spike1dPct}%)`,
     `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
-    `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`,
-    "提示：检测到持仓量异常增长，请密切关注市场动态。不构成投资建议。"
+    `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`
   ].filter(Boolean).join("\n");
 
   const result = await postTelegram(text, signalReplyMarkup(item, "oi"));

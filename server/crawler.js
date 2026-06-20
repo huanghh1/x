@@ -7,7 +7,6 @@ import {
   findKlineGap,
   getKlineAuditReport,
   getSignalCorrelationContext,
-  insertKlinePage,
   markHotMaSignalAlertSent,
   klineStats,
   markTokenFetching,
@@ -20,6 +19,7 @@ import {
   selectClosePrices,
   selectHotMaSignalAlert,
   selectPreviousSignals,
+  upsertKlinePage,
   upsertSignals,
   upsertTokens
 } from "./db.js";
@@ -93,8 +93,8 @@ function intervalLookbackStart(intervalCode) {
 }
 
 async function fetchKlineRange({ token, intervalCode, startTime, endTime, action, limit }) {
-  if (endTime <= startTime) return 0;
-  let insertedRows = 0;
+  if (endTime < startTime) return 0;
+  let fetchedRows = 0;
   crawlerState.lastAction = action;
   await fetchKlinesPaged({
     symbol: token.symbol,
@@ -103,13 +103,14 @@ async function fetchKlineRange({ token, intervalCode, startTime, endTime, action
     endTime,
     limit,
     onPage: async (page) => {
-      const inserted = await insertKlinePage(token, intervalCode, page);
-      insertedRows += inserted;
-      crawlerState.lastAction = `${token.symbol} ${intervalCode} 入库 ${inserted}/${page.length} 根K线`;
+      const stored = await upsertKlinePage(token, intervalCode, page);
+      fetchedRows += page.length;
+      const changeSummary = stored ? `，写入/更新 ${stored} 行` : "";
+      crawlerState.lastAction = `${token.symbol} ${intervalCode} 同步 ${page.length} 根K线${changeSummary}`;
     },
     shouldContinue: () => crawlerState.running
   });
-  return insertedRows;
+  return fetchedRows;
 }
 
 export function getCrawlerState() {

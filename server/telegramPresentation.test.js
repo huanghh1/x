@@ -50,6 +50,7 @@ test("multi-cycle Telegram alert is rendered as one aggregated message", () => {
   assert.doesNotMatch(text, /^周期：/m);
   assert.doesNotMatch(text, /^周期状态：/m);
   assert.doesNotMatch(text, /^MA100：/m);
+  assert.doesNotMatch(text, /不构成投资建议/);
 });
 
 test("Telegram signal menu shows OI spike changes as a matched combination", () => {
