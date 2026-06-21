@@ -62,7 +62,7 @@ function escapeHtml(value) {
 function formatNumber(value) {
   if (value === null || value === undefined || value === "") return "--";
   const number = Number(value);
-  if (!Number.isFinite(number)) return String(value);
+  if (!Number.isFinite(number)) return "--";
   return number.toLocaleString("en-US", { maximumFractionDigits: 12 });
 }
 
@@ -331,9 +331,13 @@ export function signalRowText(row, index) {
   const oiText = row.oiMatched
     ? `OI暴涨：${oiChangeSummary(row) || "暂无可用变化率"}`
     : null;
+  const sourceOnlySignal = !(row.intervals?.length) && (row.fundingOneHour || row.oiMatched || row.oiSpikeHit);
+  const intervalText = sourceOnlySignal
+    ? "--"
+    : (row.intervals?.length ? row.intervals : [row.intervalCode]).filter(Boolean).join(" / ") || "--";
   return [
     `${telegramTokenLine(row.symbol, `${index}. `)}${multiText}`,
-    `分类：${escapeHtml(row.categoryLabel)}｜周期：${escapeHtml((row.intervals ?? [row.intervalCode]).join(" / "))}`,
+    `分类：${escapeHtml(row.categoryLabel)}｜周期：${escapeHtml(intervalText)}`,
     `组合等级：${escapeHtml(profile.label)}`,
     oiText ? escapeHtml(oiText) : null,
     `现价：${escapeHtml(formatNumber(row.currentPrice))}`,

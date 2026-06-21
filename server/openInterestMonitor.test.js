@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildOpenInterestSnapshot } from "./openInterestMonitor.js";
+import { buildOpenInterestSnapshot, isOpenInterestHistoryUnavailable } from "./openInterestMonitor.js";
 
 test("buildOpenInterestSnapshot computes changes from aligned 5-minute history", () => {
   const base = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -32,4 +32,12 @@ test("buildOpenInterestSnapshot ignores stale baselines when history has gaps", 
   assert.equal(snapshot.change5mPct, null);
   assert.equal(snapshot.change15mPct, null);
   assert.equal(snapshot.change1hPct, 50);
+});
+
+test("OI history 403 is treated as endpoint unavailable", () => {
+  assert.equal(
+    isOpenInterestHistoryUnavailable(new Error("BTCUSDT open interest history HTTP 403: <html>Forbidden</html>")),
+    true
+  );
+  assert.equal(isOpenInterestHistoryUnavailable(new Error("BTCUSDT open interest history HTTP 500")), false);
 });

@@ -65,6 +65,23 @@ test("an OI spike can participate in page combinations", () => {
 test("source combinations are invalid without an MA alert", () => {
   assert.equal(resolveSignalProfile({ fundingOneHour: true, oiSpike: true, hotRank: true, multiCycleCount: 4 }).key, "NONE");
   assert.equal(resolveSignalProfile({ multiCycleCount: 4, alertLevel: "LEVEL2" }).label, "多周期 · 二级警报");
+  assert.equal(resolveSignalProfile({ hotRank: true, multiCycleCount: 4 }).key, "NONE");
+});
+
+test("only OI can be displayed independently without MA alerts", () => {
+  assert.equal(resolveSignalProfile({ fundingOneHour: true }).key, "NONE");
+  assert.deepEqual(
+    resolveSignalProfile({ oiSpike: true }),
+    {
+      key: "STANDALONE_4",
+      label: "OI · 独立信号",
+      priority: SIGNAL_PRIORITY.STANDALONE,
+      multi: false,
+      sourceMask: 4,
+      sources: ["OI"],
+      standalone: true
+    }
+  );
 });
 
 test("the composite profile uses the highest MA level across intervals", () => {

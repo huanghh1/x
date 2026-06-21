@@ -1139,15 +1139,21 @@ export async function cleanupAllKlineRetention(retentionLimits) {
   return results;
 }
 
+export async function cleanupTriggerHistoryRetention(
+  retentionHours = config.maintenance.triggerHistoryRetentionHours
+) {
+  const safeHours = Math.max(1, Number(retentionHours) || 4);
+  return deleteInBatches(
+    "DELETE FROM signal_trigger_history WHERE trigger_time < DATE_SUB(NOW(3), INTERVAL :retentionHours HOUR)",
+    { retentionHours: safeHours }
+  );
+}
+
 export async function cleanupExpiredData() {
-  const signalHistoryDays = Math.max(1, Number(config.maintenance.signalHistoryRetentionDays) || 180);
   const hotRankDays = Math.max(1, Number(config.maintenance.hotRankRetentionDays) || 30);
   const ioDays = Math.max(1, Number(config.maintenance.ioRetentionDays) || 30);
   const [triggerHistory, hotSnapshots, staleHotRows, staleOpenInterest, staleUnlocks] = await Promise.all([
-    deleteInBatches(
-      "DELETE FROM signal_trigger_history WHERE trigger_time < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)",
-      { retentionDays: signalHistoryDays }
-    ),
+    cleanupTriggerHistoryRetention(),
     deleteInBatches(
       "DELETE FROM hot_rank_snapshot WHERE snapshot_time < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)",
       { retentionDays: hotRankDays }
@@ -2458,6 +2464,8 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
   const bestAlertRankSql = "COALESCE(mp.bestAlertRank, 2)";
   const groupSql = `
     SELECT s.symbol,
+      MIN(t.category_type) AS categoryType,
+      MIN(t.category_label) AS categoryLabel,
       COUNT(DISTINCT s.interval_code) AS matchingIntervalCount,
       COALESCE(mp.multiMatchCount, 0) AS multiMatchCount,
       ${sourceMaskSql} AS sourceMask,
@@ -2470,15 +2478,53 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
         WHEN ${bestAlertRankSql}=0 THEN 30
         WHEN ${bestAlertRankSql}=1 THEN 31
         ELSE 99
-      END AS priorityRank
+      END AS priorityRank,
+      'COMPOSITE' AS displayKind
     FROM signal_result s
     JOIN token_list t ON t.id=s.token_id
     ${multiJoinSql}
     WHERE ${whereSql}
     GROUP BY s.symbol, mp.multiMatchCount, mp.bestAlertRank
     HAVING sourceMask > 0`;
+  const standaloneMaAlertExistsSql = alarmLevels.length
+    ? `EXISTS(
+        SELECT 1 FROM signal_result sx
+        JOIN token_list tx ON tx.id=sx.token_id
+        WHERE sx.symbol=t.symbol
+          AND sx.category_type IN (${quotedList(safeCategories)})
+          AND sx.alert_level IN (${quotedList(alarmLevels)})
+          AND sx.interval_code IN (${quotedList(safeIntervals)})
+          AND tx.is_active=1
+      )`
+    : "0";
+  const standaloneOiSql = `
+    SELECT t.symbol,
+      t.category_type AS categoryType,
+      t.category_label AS categoryLabel,
+      0 AS matchingIntervalCount,
+      0 AS multiMatchCount,
+      4 AS sourceMask,
+      oi.observed_at AS latestUpdatedAt,
+      2 AS bestLevelRank,
+      0 AS bestWeight,
+      40 AS priorityRank,
+      'STANDALONE' AS displayKind
+    FROM token_list t
+    JOIN open_interest_monitor oi
+      ON oi.symbol=t.symbol
+      AND oi.observed_at >= DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND)
+      AND (
+        oi.change_5m_pct >= :oiSpike5mPct
+        OR oi.change_1h_pct >= :oiSpike1hPct
+        OR oi.change_4h_pct >= :oiSpike4hPct
+        OR oi.change_1d_pct >= :oiSpike1dPct
+      )
+    WHERE t.category_type IN (${quotedList(safeCategories)})
+      AND t.is_active=1
+      AND NOT ${standaloneMaAlertExistsSql}`;
+  const candidateSql = `${groupSql}\nUNION ALL\n${standaloneOiSql}`;
   const [countRows] = await getPool().query(
-    `SELECT COUNT(*) AS total FROM (${groupSql}) grouped`,
+    `SELECT COUNT(*) AS total FROM (${candidateSql}) grouped`,
     {
       activeSeconds: hotRankActiveSeconds(),
       oiActiveSeconds: openInterestActiveSeconds(),
@@ -2489,7 +2535,7 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     }
   );
   const [symbolRows] = await getPool().query(
-    `${groupSql}
+    `${candidateSql}
      ORDER BY
       priorityRank,
       bestLevelRank,
@@ -2509,6 +2555,7 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     }
   );
   const symbols = symbolRows.map((row) => sanitizeDbSymbol(row.symbol)).filter(Boolean);
+  const uniqueSymbols = [...new Set(symbols)];
   if (!symbols.length) {
     return {
       signals: [],
@@ -2525,10 +2572,9 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt
      FROM signal_result s
      JOIN token_list t ON t.id=s.token_id
-     WHERE s.symbol IN (${quotedList(symbols)})
+     WHERE s.symbol IN (${quotedList(uniqueSymbols)})
        AND t.is_active=1
        AND s.category_type IN (${quotedList(safeCategories)})
-       AND s.alert_level IN (${quotedList(safeLevels)})
        AND s.interval_code IN (${quotedList(safeIntervals)})
      ORDER BY FIELD(s.interval_code, '15m', '1h', '4h', '1d')`
   );
@@ -2536,7 +2582,7 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     `SELECT t.symbol, MIN(h.last_seen_rank) AS hotRank
      FROM hot_rank_seen h
      JOIN token_list t ON ${hotRankTokenMatchSql("h", "t")}
-     WHERE t.symbol IN (${quotedList(symbols)})
+     WHERE t.symbol IN (${quotedList(uniqueSymbols)})
        AND t.is_active=1
        AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
      GROUP BY t.symbol`,
@@ -2549,14 +2595,14 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       change_4h_pct AS oiChange4hPct,
       change_1d_pct AS oiChange1dPct
      FROM open_interest_monitor
-     WHERE symbol IN (${quotedList(symbols)})
+     WHERE symbol IN (${quotedList(uniqueSymbols)})
        AND observed_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)`,
     { activeSeconds: openInterestActiveSeconds() }
   );
   const [fundingRows] = await getPool().query(
     `SELECT symbol
      FROM funding_interval_state
-     WHERE symbol IN (${quotedList(symbols)})
+     WHERE symbol IN (${quotedList(uniqueSymbols)})
        AND funding_interval_hours=1
        AND source_present=1`
   );
@@ -2568,20 +2614,38 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     if (!rowsBySymbol.has(row.symbol)) rowsBySymbol.set(row.symbol, []);
     rowsBySymbol.get(row.symbol).push(row);
   }
-  const symbolOrder = new Map(symbols.map((symbol, index) => [symbol, index]));
-  const signals = symbols.map((symbol) => {
-    const details = rowsBySymbol.get(symbol) ?? [];
-    const matchingDetails = details;
+  const signals = symbolRows.map((meta, index) => {
+    const symbol = sanitizeDbSymbol(meta.symbol);
+    const isStandalone = meta.displayKind === "STANDALONE";
+    const metaSourceMask = Number(meta.sourceMask ?? 0);
+    const rawDetails = rowsBySymbol.get(symbol) ?? [];
+    const matchingDetails = isStandalone
+      ? rawDetails.map((row) => ({ ...row, alertLevel: "NONE" }))
+      : rawDetails.filter((row) => safeLevels.includes(row.alertLevel));
     const representative =
       matchingDetails.find((row) => row.alertLevel === "LEVEL1") ??
       matchingDetails.find((row) => row.alertLevel === "LEVEL2") ??
       matchingDetails[0] ??
-      details[0] ??
-      {};
+      {
+        symbol,
+        categoryType: meta.categoryType ?? null,
+        categoryLabel: meta.categoryLabel ?? "",
+        intervalCode: safeIntervals[0] ?? null,
+        alertLevel: "NONE",
+        ma100: null,
+        ma200: null,
+        currentPrice: null,
+        proximityPct: null,
+        signalWeight: 0,
+        signalStatus: "independent",
+        note: "资金费率/OI 独立命中",
+        signalTime: meta.latestUpdatedAt ?? null,
+        updatedAt: meta.latestUpdatedAt ?? null
+      };
     const hot = hotBySymbol.get(symbol);
     const oi = oiBySymbol.get(symbol);
-    const triggeredDetails = details.filter((row) => ["LEVEL1", "LEVEL2"].includes(row.alertLevel));
-    const bestAlertLevel = resolveBestAlertLevel(triggeredDetails);
+    const triggeredDetails = isStandalone ? [] : matchingDetails.filter((row) => ["LEVEL1", "LEVEL2"].includes(row.alertLevel));
+    const bestAlertLevel = isStandalone ? null : resolveBestAlertLevel(triggeredDetails);
     const oiSpike = evaluateOpenInterestSpike(
       {
         change5mPct: oi?.oiChange5mPct,
@@ -2591,9 +2655,9 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       },
       config.openInterestMonitor
     );
-    const oiMatched = oiSpike.hit;
-    const fundingOneHour = fundingSymbols.has(symbol);
-    const oiSpikeHit = oiSpike.hit;
+    const oiMatched = isStandalone ? metaSourceMask === 4 && oiSpike.hit : oiSpike.hit;
+    const fundingOneHour = isStandalone ? metaSourceMask === 8 : fundingSymbols.has(symbol);
+    const oiSpikeHit = oiMatched;
     const compositeProfile = resolveSignalProfile({
       fundingOneHour,
       oiMatched,
@@ -2606,9 +2670,12 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       symbol,
       bestAlertLevel,
       intervals: triggeredDetails.map((row) => row.intervalCode),
-      intervalDetails: details,
+      intervalDetails: matchingDetails,
       multiMatchCount: triggeredDetails.length,
       multiMatchRequired: 3,
+      displayKind: meta.displayKind ?? "COMPOSITE",
+      displayKey: `${symbol}:${meta.displayKind ?? "COMPOSITE"}:${metaSourceMask || "MA"}:${index}`,
+      sourceMask: metaSourceMask,
       hotRankHit: hot ? 1 : 0,
       hotRank: hot?.hotRank ?? null,
       fundingOneHour,
@@ -2625,7 +2692,6 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       compositeProfile
     };
   });
-  signals.sort((a, b) => (symbolOrder.get(a.symbol) ?? 0) - (symbolOrder.get(b.symbol) ?? 0));
   return {
     signals,
     total: Number(countRows[0]?.total ?? 0),

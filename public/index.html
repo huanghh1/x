@@ -125,8 +125,6 @@
                   <summary>等级 <b id="levelFilterSummary">一级、二级</b></summary>
                   <label><input type="checkbox" data-filter="level" data-value="LEVEL1" checked /> 一级警报</label>
                   <label><input type="checkbox" data-filter="level" data-value="LEVEL2" checked /> 二级预警</label>
-                  <label><input type="checkbox" data-filter="level" data-value="NONE" /> 观察中</label>
-                  <label><input type="checkbox" data-filter="level" data-value="INSUFFICIENT" /> 样本不足</label>
                 </details>
                 <details class="filter-menu">
                   <summary>周期 <b id="intervalFilterSummary">15m、1h、4h、1d</b></summary>
@@ -197,7 +195,7 @@
           <div class="section-head">
             <div>
               <h2 id="fundingTitle">资金费率监控</h2>
-              <p>单独展示 Binance USDⓈ-M 当前结算周期为 1 小时的代币。</p>
+              <p>展示 Binance USDⓈ-M 资金费率监控代币。</p>
             </div>
             <div class="table-actions">
               <button id="refreshFundingBtn" class="ghost-button" type="button">刷新资金费率</button>
@@ -206,7 +204,7 @@
           </div>
 
           <div id="fundingRateRows">
-            <div class="heat-empty">当前没有 1 小时结算周期的代币。</div>
+            <div class="heat-empty">当前没有资金费率代币。</div>
           </div>
           <div id="fundingStatus" class="heat-rank-status">按最近变化时间排序</div>
         </section>

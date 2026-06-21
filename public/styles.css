@@ -1836,6 +1836,8 @@ td.mono span { display: block; white-space: nowrap; }
   max-height: none;
   overflow-x: auto;
   overflow-y: visible;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
   padding-bottom: 2px;
   scrollbar-gutter: stable;
 }
@@ -1880,9 +1882,11 @@ td.mono span { display: block; white-space: nowrap; }
   border-radius: var(--radius-md);
   background: var(--surface-raised);
 }
-.funding-card { grid-template-columns: minmax(170px, 1.2fr) repeat(7, minmax(120px, 1fr)) auto; min-width: 1260px; }
+.funding-card { grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(104px, 1fr)) minmax(210px, auto); min-width: 980px; }
 .io-card { grid-template-columns: minmax(170px, 1.2fr) repeat(6, minmax(120px, 1fr)) auto; min-width: 1120px; }
 .funding-symbol, .io-symbol { display: flex; align-items: center; gap: 8px; }
+.funding-card > div { min-width: 0; }
+.funding-card .heat-links { min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
 .io-observed {
   min-width: 0;
 }
@@ -1949,6 +1953,7 @@ td.mono span { display: block; white-space: nowrap; }
     min-width: 0;
   }
   .watch-actions, .funding-card .heat-links, .io-card .heat-links { grid-column: 1 / -1; }
+  .funding-card .heat-links { justify-content: flex-start; }
 }
 @media (max-width: 560px) {
   .app-nav { top: 8px; width: calc(100% - 16px); margin-top: 8px; }
@@ -1970,6 +1975,7 @@ td.mono span { display: block; white-space: nowrap; }
   }
   .watch-row, .funding-card, .io-card { grid-template-columns: 1fr; }
   .watch-actions, .funding-card .heat-links, .io-card .heat-links { grid-column: 1; }
+  .funding-card .heat-links { justify-content: flex-start; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -2274,8 +2280,27 @@ main,
 .funding-card,
 .io-card {
   width: 100%;
-  min-width: 1120px;
   min-height: 72px;
+}
+
+.funding-card {
+  min-width: 980px;
+}
+
+.io-card {
+  min-width: 1120px;
+}
+
+@media (min-width: 561px) and (max-width: 1100px) {
+  .funding-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-width: 0;
+  }
+
+  .funding-card .heat-links {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
 }
 
 .market-symbol-button {

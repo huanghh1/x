@@ -1,10 +1,10 @@
 const ALL_CATEGORIES = ["A", "B"];
-const ALL_LEVELS = ["LEVEL1", "LEVEL2", "NONE", "INSUFFICIENT"];
+const ALL_LEVELS = ["LEVEL1", "LEVEL2"];
 const ALL_INTERVALS = ["15m", "1h", "4h", "1d"];
 
 const LABELS = {
   category: { A: "A类", B: "B类" },
-  level: { LEVEL1: "一级", LEVEL2: "二级", NONE: "观察", INSUFFICIENT: "样本不足" },
+  level: { LEVEL1: "一级", LEVEL2: "二级" },
   interval: { "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d" }
 };
 
@@ -310,7 +310,7 @@ function levelBadge(level) {
 }
 
 function rowKey(row) {
-  return String(row.symbol ?? "");
+  return String(row.displayKey ?? row.symbol ?? "");
 }
 
 function baseAsset(symbol) {
@@ -350,7 +350,6 @@ function signalProfile(row) {
     : row.alertLevel === "LEVEL1" || row.alertLevel === "LEVEL2"
       ? row.alertLevel
       : null;
-  if (!alertLevel) return { label: "观察", priority: 99, classes: "", color: signalProfileColor(0) };
   const sourceMask = (funding ? 8 : 0) + (oi ? 4 : 0) + (hot ? 2 : 0) + (multi ? 1 : 0);
   const sources = [
     funding ? "资金费" : null,
@@ -358,6 +357,18 @@ function signalProfile(row) {
     hot ? "热度" : null,
     multi ? "多周期" : null
   ].filter(Boolean);
+  if (!alertLevel) {
+    const standaloneMask = (funding ? 8 : 0) + (oi ? 4 : 0);
+    if (standaloneMask === 4) {
+      return {
+        label: "OI · 独立信号",
+        priority: 40,
+        color: signalProfileColor(standaloneMask),
+        classes: "has-oi"
+      };
+    }
+    return { label: "观察", priority: 99, classes: "", color: signalProfileColor(0) };
+  }
   const levelLabel = alertLevel === "LEVEL1" ? "一级警报" : "二级警报";
   return {
     label: sources.length ? `${sources.join(" + ")} · ${levelLabel}` : levelLabel,
@@ -674,7 +685,7 @@ function fundingStatusText() {
   const positiveCount = state.fundingTokens.filter((token) => Number(token.currentFundingRate) > 0).length;
   const negativeCount = state.fundingTokens.filter((token) => Number(token.currentFundingRate) < 0).length;
   const neutralCount = state.fundingTokens.length - positiveCount - negativeCount;
-  const parts = [`当前共 ${state.fundingTokens.length} 个 1 小时结算周期代币`];
+  const parts = [`当前共 ${state.fundingTokens.length} 个资金费率代币`];
   if (positiveCount || negativeCount || neutralCount) {
     parts.push(`正费率 ${positiveCount} / 负费率 ${negativeCount} / 持平或未知 ${neutralCount}`);
   }
@@ -717,8 +728,8 @@ function renderFundingRateTokens() {
   }
 
   if (!state.fundingTokens.length) {
-    target.innerHTML = '<div class="heat-empty">当前没有 1 小时结算周期的代币。</div>';
-    setText("#fundingStatus", "当前没有 1 小时结算周期的代币");
+    target.innerHTML = '<div class="heat-empty">当前没有资金费率代币。</div>';
+    setText("#fundingStatus", "当前没有资金费率代币");
     return;
   }
 
@@ -741,13 +752,11 @@ function renderFundingRateTokens() {
         <article class="funding-card">
           <div class="funding-symbol">
             <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
-            <span class="level-badge level1">${escapeHtml(token.fundingIntervalHours ?? 1)} 小时结算</span>
           </div>
           <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(token.symbol)}">${formatNumber(token.currentPrice)}</b></div>
           <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
           <div><span>当前资金费率</span><b class="mono funding-rate ${rateTone}">${formatFundingPercent(token.currentFundingRate)}</b></div>
-          <div><span>下次结算</span><b>${formatTime(token.nextFundingTime)}</b></div>
           <div><span>最近变化</span><b>${formatTime(token.lastChangedAt || token.lastSeenAt)}</b></div>
           <div class="heat-links">
             ${copyButton(token.symbol)}
@@ -1440,9 +1449,12 @@ function renderSignals() {
           : triggered.some((item) => item.alertLevel === "LEVEL2")
             ? "LEVEL2"
             : row.alertLevel);
+      const sourceOnlySignal = !triggered.length && (Boolean(row.fundingOneHour) || Boolean(row.oiMatched ?? row.oiSpikeHit));
       const intervalBadges = triggered.length
         ? triggered.map((item) => `<span class="interval-badge interval-${escapeHtml(item.intervalCode)} ${item.alertLevel === "LEVEL1" ? "is-level1" : "is-level2"}">${escapeHtml(item.intervalCode)}</span>`).join("")
-        : `<span class="interval-badge interval-${escapeHtml(row.intervalCode || "")}">${escapeHtml(row.intervalCode || "--")}</span>`;
+        : sourceOnlySignal
+          ? '<span class="interval-badge">--</span>'
+          : `<span class="interval-badge interval-${escapeHtml(row.intervalCode || "")}">${escapeHtml(row.intervalCode || "--")}</span>`;
       const signalRow = `
         <tr class="signal-row priority-${profile.priority} ${expanded ? "is-expanded" : ""} ${multiQualified ? "is-multi-hit" : ""} ${hotRankHit ? "is-hot-ma-hit" : ""}" data-key="${escapeHtml(key)}">
           <td>

@@ -126,10 +126,17 @@ export const config = {
     cleanupIntervalDays: numberEnv("KLINE_CLEANUP_INTERVAL_DAYS", 7),
     checkIntervalMs: numberEnv("MAINTENANCE_CHECK_INTERVAL_MS", 60 * 60 * 1000),
     deleteBatchSize: numberEnv("MAINTENANCE_DELETE_BATCH_SIZE", 5000),
-    signalHistoryRetentionDays: numberEnv("SIGNAL_HISTORY_RETENTION_DAYS", 180),
+    recordCleanupIntervalHours: Math.max(1, numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4)),
+    triggerHistoryRetentionHours: Math.max(
+      1,
+      numberEnv("TRIGGER_HISTORY_RETENTION_HOURS", numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4))
+    ),
     hotRankRetentionDays: numberEnv("HOT_RANK_RETENTION_DAYS", 30),
     ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 30),
-    runtimeLogCleanupHour: Math.max(0, Math.min(23, numberEnv("RUNTIME_LOG_CLEANUP_HOUR", 0)))
+    runtimeLogCleanupIntervalHours: Math.max(
+      1,
+      numberEnv("RUNTIME_LOG_CLEANUP_INTERVAL_HOURS", numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4))
+    )
   },
   fundingMonitor: {
     enabled: boolEnv("FUNDING_INTERVAL_MONITOR_ENABLED", true),

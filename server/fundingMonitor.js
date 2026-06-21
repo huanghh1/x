@@ -60,6 +60,15 @@ function scheduleNext(delayMs) {
   timer.unref?.();
 }
 
+function settledValue(result, fallback) {
+  return result.status === "fulfilled" ? result.value : fallback;
+}
+
+function settledErrorMessage(result) {
+  if (result.status === "fulfilled") return null;
+  return result.reason instanceof Error ? result.reason.message : String(result.reason);
+}
+
 export function getFundingIntervalMonitorState() {
   return {
     enabled: config.fundingMonitor.enabled,
@@ -92,15 +101,43 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
   try {
     const baselineState = await getMaintenanceState(BASELINE_TASK);
     const baselineOnly = !baselineState;
-    const [fundingInfo, currentRates] = await Promise.all([
+    const [fundingInfoResult, currentRatesResult] = await Promise.allSettled([
       fetchFundingInfo(),
       fetchCurrentFundingRates()
     ]);
+    const fundingInfo = settledValue(fundingInfoResult, []);
+    const currentRates = settledValue(currentRatesResult, []);
+    const fundingInfoError = settledErrorMessage(fundingInfoResult);
+    const currentRatesError = settledErrorMessage(currentRatesResult);
+
+    if (fundingInfoError) {
+      const result = {
+        ok: false,
+        skipped: true,
+        reason: `Binance funding info unavailable: ${fundingInfoError}`,
+        baselineOnly,
+        seenCount: 0,
+        missingCount: 0,
+        pendingCount: 0,
+        sentSymbols: [],
+        skippedAlerts: [fundingInfoError]
+      };
+      fundingMonitorState.lastSeenCount = 0;
+      fundingMonitorState.lastMissingCount = 0;
+      fundingMonitorState.lastPendingCount = 0;
+      fundingMonitorState.lastAlertedSymbols = [];
+      fundingMonitorState.lastSkippedAlerts = result.skippedAlerts;
+      await markMaintenanceState(CHECK_TASK, JSON.stringify(result));
+      return result;
+    }
+
     if (!hasReliableFundingIntervalSnapshot(fundingInfo, currentRates)) {
       const result = {
         ok: false,
         skipped: true,
-        reason: "Empty Binance funding snapshot",
+        reason: currentRatesError
+          ? `Empty Binance funding snapshot; premium index unavailable: ${currentRatesError}`
+          : "Empty Binance funding snapshot",
         baselineOnly,
         seenCount: 0,
         missingCount: 0,
@@ -108,12 +145,11 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
         sentSymbols: [],
         skippedAlerts: []
       };
-      fundingMonitorState.lastError = result.reason;
       fundingMonitorState.lastSeenCount = 0;
       fundingMonitorState.lastMissingCount = 0;
       fundingMonitorState.lastPendingCount = 0;
       fundingMonitorState.lastAlertedSymbols = [];
-      fundingMonitorState.lastSkippedAlerts = ["Empty Binance funding snapshot"];
+      fundingMonitorState.lastSkippedAlerts = [result.reason];
       await markMaintenanceState(CHECK_TASK, JSON.stringify(result));
       return result;
     }
@@ -188,7 +224,10 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
     fundingMonitorState.lastMissingCount = missingCount;
     fundingMonitorState.lastPendingCount = pendingAlerts.length;
     fundingMonitorState.lastAlertedSymbols = sentSymbols;
-    fundingMonitorState.lastSkippedAlerts = skippedAlerts.slice(0, 20);
+    fundingMonitorState.lastSkippedAlerts = [
+      ...skippedAlerts,
+      ...(currentRatesError ? [`premiumIndex: ${currentRatesError}`] : [])
+    ].slice(0, 20);
 
     const result = {
       ok: true,
@@ -197,7 +236,7 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
       missingCount,
       pendingCount: pendingAlerts.length,
       sentSymbols,
-      skippedAlerts
+      skippedAlerts: fundingMonitorState.lastSkippedAlerts
     };
     await markMaintenanceState(CHECK_TASK, JSON.stringify(result));
     return result;

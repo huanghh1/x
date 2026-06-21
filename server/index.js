@@ -199,6 +199,9 @@ function runtimeStateErrors(services) {
   pushStateError(items, "scheduler", "maintenance", scheduler.maintenance?.lastError, {
     updatedAt: scheduler.maintenance?.lastRunAt ?? null
   });
+  pushStateError(items, "scheduler", "triggerHistoryCleanup", scheduler.maintenance?.triggerHistoryCleanup?.lastError, {
+    updatedAt: scheduler.maintenance?.triggerHistoryCleanup?.lastRunAt ?? null
+  });
   pushStateError(items, "scheduler", "runtimeLogCleanup", scheduler.maintenance?.runtimeLogCleanup?.lastError, {
     updatedAt: scheduler.maintenance?.runtimeLogCleanup?.lastRunAt ?? null
   });

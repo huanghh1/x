@@ -40,6 +40,8 @@ const monitorState = {
   alertedSymbols: [],
   errors: [],
   failedSymbols: [],
+  unavailableSymbols: [],
+  unavailableCount: 0,
   retryPendingCount: 0,
   lastRetryMode: false,
   alertPendingCount: 0
@@ -59,6 +61,11 @@ function baselineAt(rows, targetTime, maxLagMs = HISTORY_PERIOD_MS) {
   if (!match) return null;
   if (targetTime - match.timestamp >= maxLagMs) return null;
   return match;
+}
+
+export function isOpenInterestHistoryUnavailable(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bopen interest history HTTP 403\b/i.test(message);
 }
 
 export function buildOpenInterestSnapshot(symbol, rows) {
@@ -263,6 +270,8 @@ export async function runOpenInterestCheck({ force = false } = {}) {
   monitorState.errors = [];
   monitorState.alertedSymbols = [];
   monitorState.failedSymbols = [];
+  monitorState.unavailableSymbols = [];
+  monitorState.unavailableCount = 0;
   monitorState.retryPendingCount = retryQueue.size;
   monitorState.lastRetryMode = false;
   monitorState.alertPendingCount = alertQueue.size;
@@ -276,6 +285,7 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     const alertedSymbols = [];
     const errors = [];
     const failedSymbols = [];
+    const unavailableSymbols = [];
 
     const worker = async () => {
       while (cursor < scanTokens.length) {
@@ -288,6 +298,10 @@ export async function runOpenInterestCheck({ force = false } = {}) {
           if (result.spike) spikeCount += 1;
           if (result.alerted) alertedSymbols.push(token.symbol);
         } catch (error) {
+          if (isOpenInterestHistoryUnavailable(error)) {
+            unavailableSymbols.push(token.symbol);
+            continue;
+          }
           failedSymbols.push(token.symbol);
           errors.push(`${token.symbol}: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -312,6 +326,8 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     monitorState.alertedSymbols = alertedSymbols;
     monitorState.errors = errors.slice(0, 30);
     monitorState.failedSymbols = failedSymbols.slice(0, 100);
+    monitorState.unavailableSymbols = unavailableSymbols.slice(0, 100);
+    monitorState.unavailableCount = unavailableSymbols.length;
     monitorState.retryPendingCount = retryQueue.size;
     monitorState.lastRetryMode = Boolean(retryMode);
     monitorState.alertPendingCount = alertQueue.size;
@@ -327,6 +343,8 @@ export async function runOpenInterestCheck({ force = false } = {}) {
       spikeCount,
       alertedSymbols,
       failedSymbols: monitorState.failedSymbols,
+      unavailableSymbols: monitorState.unavailableSymbols,
+      unavailableCount: monitorState.unavailableCount,
       retryPendingCount: retryQueue.size,
       errors: monitorState.errors
     };

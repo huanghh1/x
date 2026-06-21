@@ -307,7 +307,6 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
     `结算周期：<b>${escapeHtml(changeText)}</b>`,
     `当前资金费率：<b>${escapeHtml(formatFundingRate(item.currentFundingRate))}</b>`,
     Number(item.oneHourAlertCount ?? 0) > 0 ? `重复提醒：第 ${escapeHtml(Number(item.oneHourAlertCount) + 1)} 次，确认后停止循环推送` : "确认状态：待确认，5分钟后仍未确认会重复推送",
-    item.nextFundingTime ? `下次结算：${escapeHtml(new Date(Number(item.nextFundingTime)).toLocaleString("zh-CN", { hour12: false }))}` : null,
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
     context.oiSpike
       ? `OI：${escapeHtml(oiChangeSummary(context) || "暂无可用变化率")}`

@@ -2,6 +2,7 @@ export const SIGNAL_PRIORITY = Object.freeze({
   HIGHEST: 0,
   LEVEL1: 30,
   LEVEL2: 31,
+  STANDALONE: 40,
   NONE: 99
 });
 
@@ -26,6 +27,18 @@ export function resolveSignalProfile({
   const oi = oiMatched === null ? Boolean(oiSpike) : Boolean(oiMatched);
   const validAlertLevel = alertLevel === "LEVEL1" || alertLevel === "LEVEL2" ? alertLevel : null;
   if (!validAlertLevel) {
+    const sourceMask = (fundingOneHour ? 8 : 0) + (oi ? 4 : 0);
+    if (sourceMask === 4) {
+      return {
+        key: "STANDALONE_4",
+        label: "OI · 独立信号",
+        priority: SIGNAL_PRIORITY.STANDALONE,
+        multi,
+        sourceMask,
+        sources: ["OI"],
+        standalone: true
+      };
+    }
     return { key: "NONE", label: "观察", priority: SIGNAL_PRIORITY.NONE, multi, sourceMask: 0, sources: [] };
   }
   const sourceMask =
