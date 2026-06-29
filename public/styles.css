@@ -1081,6 +1081,52 @@ tbody tr:hover {
   background: var(--chart-chip-ma200-bg);
 }
 
+.chart-codex-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: var(--surface-soft);
+}
+
+.chart-codex-panel.is-error {
+  border-color: color-mix(in oklch, var(--negative) 32%, var(--line));
+  background: color-mix(in oklch, var(--negative) 6%, var(--surface-raised));
+}
+
+.chart-codex-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chart-codex-head strong {
+  color: var(--ink-strong);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.chart-codex-head span {
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.chart-codex-panel pre {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  color: var(--ink-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
 .kline-canvas {
   display: block;
   width: 100%;

@@ -720,6 +720,20 @@ function errorSource(id, error) {
   };
 }
 
+function snapshotSourceResults(connectionStatus = []) {
+  return connectionStatus.map((connection) => ({
+    id: connection.id,
+    label: connection.label,
+    configured: connection.configured,
+    ok: connection.configured,
+    missing: connection.missing ?? [],
+    error: connection.configured ? "" : `缺少 ${(connection.missing ?? []).join("、")}`,
+    eventCount: 0,
+    positionCount: 0,
+    rangeNote: connection.configured ? "先显示本地数据库记录，后台同步最新数据。" : ""
+  }));
+}
+
 function emptyGroup(source, symbol) {
   return {
     source: source ?? "",
@@ -911,11 +925,97 @@ function currentPositionEvent(position) {
   };
 }
 
-export async function getTradeAnalysis(config, { start, end, symbol, page = 1, pageSize = 20 } = {}) {
+function normalizeTradeAnalysisMode(value) {
+  const mode = String(value ?? "").trim().toLowerCase();
+  return ["snapshot", "history", "local"].includes(mode) ? "snapshot" : "refresh";
+}
+
+function buildTradeAnalysisPayload({
+  window,
+  safeSymbol,
+  connectionStatus,
+  sourceResults,
+  history,
+  positions,
+  maxEventRows,
+  mode
+}) {
+  const safePositions = Array.isArray(positions) ? positions : [];
+  const historyEvents = Array.isArray(history?.events) ? history.events : [];
+  const events = uniqueById([...historyEvents, ...safePositions.map(currentPositionEvent)])
+    .sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
+  const positionSummary = summarizePositions(safePositions, sourceResults);
+  return {
+    ok: true,
+    mode,
+    snapshot: mode === "snapshot",
+    generatedAt: new Date().toISOString(),
+    window: {
+      startTime: new Date(window.startMs).toISOString(),
+      endTime: new Date(window.endMs).toISOString()
+    },
+    symbol: safeSymbol,
+    connections: connectionStatus,
+    sources: sourceResults.map(({ events: _events, positions: _positions, ...source }) => source),
+    summary: history.summary,
+    symbolSummary: history.symbolSummary,
+    tradeRows: {
+      items: history.summary.bySymbol,
+      total: history.symbolSummary.total,
+      page: history.symbolSummary.page,
+      pageSize: history.symbolSummary.pageSize
+    },
+    positionSummary,
+    positions: safePositions,
+    persistence: {
+      enabled: history.persisted,
+      error: history.persisted ? "" : history.persistError
+    },
+    eventCount: history.eventCount + safePositions.length,
+    eventLimit: maxEventRows,
+    events: events.slice(0, maxEventRows)
+  };
+}
+
+export async function getTradeAnalysis(config, { start, end, symbol, page = 1, pageSize = 20, mode } = {}) {
   const window = normalizeWindow({ start, end, defaultLookbackDays: config.tradeAnalysis.defaultLookbackDays });
   const safeSymbol = String(symbol ?? "").trim().toUpperCase().replace(/[^A-Z0-9:_-]/g, "");
   const safePage = Math.max(1, Number(page) || 1);
   const safePageSize = Math.max(1, Math.min(100, Number(pageSize) || 20));
+  const analysisMode = normalizeTradeAnalysisMode(mode);
+  const connectionStatus = sourceConnectionStatus(config);
+
+  if (analysisMode === "snapshot") {
+    const sourceResults = snapshotSourceResults(connectionStatus);
+    const history = await readTradeEventHistoryAnalysis({
+      startMs: window.startMs,
+      endMs: window.endMs,
+      symbol: safeSymbol,
+      page: safePage,
+      pageSize: safePageSize,
+      eventLimit: config.tradeAnalysis.maxEventRows
+    });
+    const snapshotHistory = {
+      ...history,
+      summary: {
+        ...history.summary,
+        bySource: mergeSourceSummaries(history.summary.bySource, sourceResults)
+      },
+      persisted: true,
+      persistError: ""
+    };
+    return buildTradeAnalysisPayload({
+      window,
+      safeSymbol,
+      connectionStatus,
+      sourceResults,
+      history: snapshotHistory,
+      positions: [],
+      maxEventRows: config.tradeAnalysis.maxEventRows,
+      mode: "snapshot"
+    });
+  }
+
   const cacheKey = JSON.stringify({
     start: start ?? "",
     end: end ?? "",
@@ -924,7 +1024,6 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
   const cached = tradeAnalysisCache.get(cacheKey);
   const cachedSync = cached && Date.now() - cached.cachedAt < TRADE_ANALYSIS_CACHE_MS ? cached : null;
 
-  const connectionStatus = sourceConnectionStatus(config);
   let sourceResults;
   let tradeEvents;
   let positions;
@@ -979,36 +1078,14 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
     pageSize: safePageSize,
     eventLimit: config.tradeAnalysis.maxEventRows
   });
-  const events = uniqueById([...history.events, ...positions.map(currentPositionEvent)])
-    .sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
-  const positionSummary = summarizePositions(positions, sourceResults);
-  const payload = {
-    ok: true,
-    generatedAt: new Date().toISOString(),
-    window: {
-      startTime: new Date(window.startMs).toISOString(),
-      endTime: new Date(window.endMs).toISOString()
-    },
-    symbol: safeSymbol,
-    connections: connectionStatus,
-    sources: sourceResults.map(({ events: _events, positions: _positions, ...source }) => source),
-    summary: history.summary,
-    symbolSummary: history.symbolSummary,
-    tradeRows: {
-      items: history.summary.bySymbol,
-      total: history.symbolSummary.total,
-      page: history.symbolSummary.page,
-      pageSize: history.symbolSummary.pageSize
-    },
-    positionSummary,
+  return buildTradeAnalysisPayload({
+    window,
+    safeSymbol,
+    connectionStatus,
+    sourceResults,
+    history,
     positions,
-    persistence: {
-      enabled: history.persisted,
-      error: history.persisted ? "" : history.persistError
-    },
-    eventCount: history.eventCount + positions.length,
-    eventLimit: config.tradeAnalysis.maxEventRows,
-    events: events.slice(0, config.tradeAnalysis.maxEventRows)
-  };
-  return payload;
+    maxEventRows: config.tradeAnalysis.maxEventRows,
+    mode: "refresh"
+  });
 }

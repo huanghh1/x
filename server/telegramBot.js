@@ -40,7 +40,14 @@ const botStatus = {
   lastUpdateAt: null,
   lastError: null,
   lockPath,
-  conflictCount: 0
+  conflictCount: 0,
+  pollingErrorCount: 0,
+  suppressedPollingErrors: 0
+};
+const pollingErrorLog = {
+  key: null,
+  lastLoggedAt: 0,
+  suppressed: 0
 };
 const OI_TIME_WINDOWS = new Set(["5m", "15m", "1h", "4h", "1d"]);
 const OI_SORTS = new Set(["asc", "desc"]);
@@ -50,6 +57,37 @@ const TELEGRAM_OI_LIMIT = 10;
 
 export function getTelegramBotState() {
   return { ...botStatus };
+}
+
+function pollingErrorKey(message) {
+  const text = String(message ?? "");
+  if (/(connect timeout|und_err|etimedout|econnreset|enotfound|eai_again|fetch failed)/i.test(text)) {
+    return "network";
+  }
+  if (/too many requests|429|rate limit/i.test(text)) return "rate_limit";
+  if (/conflict/i.test(text)) return "conflict";
+  return text.slice(0, 160);
+}
+
+function logPollingError(message) {
+  const now = Date.now();
+  const key = pollingErrorKey(message);
+  const shouldLog =
+    pollingErrorLog.key !== key ||
+    pollingErrorLog.lastLoggedAt === 0 ||
+    now - pollingErrorLog.lastLoggedAt >= 5 * 60 * 1000;
+  if (!shouldLog) {
+    pollingErrorLog.suppressed += 1;
+    botStatus.suppressedPollingErrors += 1;
+    return;
+  }
+  const suffix = pollingErrorLog.suppressed > 0
+    ? ` (suppressed ${pollingErrorLog.suppressed} similar polling errors)`
+    : "";
+  console.error("telegram bot polling failed:", `${message}${suffix}`);
+  pollingErrorLog.key = key;
+  pollingErrorLog.lastLoggedAt = now;
+  pollingErrorLog.suppressed = 0;
 }
 
 function escapeHtml(value) {
@@ -766,7 +804,8 @@ export function startTelegramBot() {
         }
         botStatus.state = "error";
         botStatus.lastError = message;
-        console.error("telegram bot polling failed:", message);
+        botStatus.pollingErrorCount += 1;
+        logPollingError(message);
         consecutiveErrors += 1;
         const delayMs = Math.min(60_000, 3000 * 2 ** Math.min(4, consecutiveErrors - 1));
         await new Promise((resolve) => setTimeout(resolve, delayMs));

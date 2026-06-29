@@ -141,7 +141,7 @@ function shouldPersistPrice(symbol, eventTime) {
 }
 
 function shouldPersistKline(symbol, interval, isClosed) {
-  if (isClosed) return true;
+  if (!isClosed) return false;
   const key = `${symbol}|${interval}`;
   const now = Date.now();
   const last = state.lastKlinePersistedAt.get(key) ?? 0;

@@ -34,6 +34,11 @@ function latestClosedKlineOpenTime(intervalCode) {
   return Math.floor(Date.now() / ms) * ms - ms;
 }
 
+function closedKlinesOnly(klines, intervalCode) {
+  const latestClosedOpenTime = latestClosedKlineOpenTime(intervalCode);
+  return klines.filter((kline) => Number(kline?.[0]) <= latestClosedOpenTime);
+}
+
 async function fetchRange(token, intervalCode, startTime, endTime) {
   if (endTime < startTime) return 0;
   let fetchedRows = 0;
@@ -56,7 +61,7 @@ async function repairGaps(token, intervalCode) {
   const startTime = targetStart(intervalCode);
   const endTime = latestClosedKlineOpenTime(intervalCode);
   const stats = await klineStats(token.symbol, intervalCode);
-  if (stats.minOpenTime === null || stats.minOpenTime > startTime + ms) {
+  if (stats.minOpenTime === null || stats.minOpenTime > startTime) {
     await fetchRange(
       token,
       intervalCode,
@@ -82,7 +87,10 @@ export async function refreshWatchlistMarketData({ force = false, full = false }
     const intervals = fullRefresh ? INTERVALS : ["15m"];
     for (const token of tokens) {
       for (const intervalCode of intervals) {
-        const klines = await fetchRecentKlines({ symbol: token.symbol, intervalCode, limit: 2 });
+        const klines = closedKlinesOnly(
+          await fetchRecentKlines({ symbol: token.symbol, intervalCode, limit: 2 }),
+          intervalCode
+        );
         if (klines.length) await upsertKlinePage(token, intervalCode, klines);
         if (fullRefresh) await repairGaps(token, intervalCode);
         const closes = await selectClosePrices(token.symbol, intervalCode);

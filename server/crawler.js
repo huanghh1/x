@@ -7,6 +7,7 @@ import {
   getActiveTokenBySymbol,
   getKlineAuditReport,
   getSignalCorrelationContext,
+  listKlineTailRefreshTargets,
   listKlineGaps,
   markHotMaSignalAlertSent,
   klineStats,
@@ -47,7 +48,17 @@ const crawlerState = {
   lastAction: "等待启动",
   lastError: null,
   startedAt: null,
-  lastTokenDelayMs: null
+  lastTokenDelayMs: null,
+  tailRefresh: {
+    running: false,
+    lastStartedAt: null,
+    lastCompletedAt: null,
+    targetCount: 0,
+    tokenCount: 0,
+    refreshedRows: 0,
+    errorCount: 0,
+    lastError: null
+  }
 };
 
 const auditState = {
@@ -68,7 +79,51 @@ function randomTokenDelay() {
   return Math.floor(tokenDelayMinMs + Math.random() * Math.max(0, tokenDelayMaxMs - tokenDelayMinMs));
 }
 
+function isRetryableDatabaseError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error?.code ?? error?.errno;
+  return (
+    code === "ER_LOCK_DEADLOCK" ||
+    code === "ER_LOCK_WAIT_TIMEOUT" ||
+    code === 1213 ||
+    code === 1205 ||
+    /deadlock|lock wait timeout/i.test(message)
+  );
+}
+
+async function withRetryableDatabaseOperation(label, operation, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableDatabaseError(error) || attempt >= attempts) break;
+      const delayMs = 250 * 2 ** (attempt - 1);
+      crawlerState.lastAction = `${label} 遇到数据库锁冲突，${delayMs}ms 后重试`;
+      await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 const activeWorkers = new Map();
+
+function normalizeCrawlerToken(token) {
+  if (!token) return token;
+  const baseAsset = token.base_asset ?? token.baseAsset ?? "";
+  const categoryType = token.category_type ?? token.categoryType ?? null;
+  const categoryLabel = token.category_label ?? token.categoryLabel ?? "";
+  return {
+    ...token,
+    base_asset: baseAsset,
+    baseAsset,
+    category_type: categoryType,
+    categoryType,
+    category_label: categoryLabel,
+    categoryLabel
+  };
+}
 
 function setWorkerActivity(workerId, token, intervalCode = null) {
   if (token) {
@@ -126,6 +181,20 @@ async function fetchKlineRange({ token, intervalCode, startTime, endTime, action
     shouldContinue: shouldContinue ?? (() => crawlerState.running)
   });
   return fetchedRows;
+}
+
+async function runConcurrent(items, concurrency, worker) {
+  const safeConcurrency = Math.max(1, Math.min(items.length || 1, Number(concurrency) || 1));
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: safeConcurrency }, async (_, workerIndex) => {
+      while (cursor < items.length) {
+        const itemIndex = cursor;
+        cursor += 1;
+        await worker(items[itemIndex], workerIndex + 1);
+      }
+    })
+  );
 }
 
 export function getCrawlerState() {
@@ -203,6 +272,7 @@ export async function runDailyKlineAudit({ syncUniverse = true } = {}) {
 }
 
 async function recomputeAndNotifyToken(token) {
+  token = normalizeCrawlerToken(token);
   const [previousByInterval, closeGroups] = await Promise.all([
     selectPreviousSignals(token.symbol),
     Promise.all(
@@ -350,6 +420,7 @@ async function recomputeAndNotifyToken(token) {
 }
 
 async function fetchToken(token, workerId) {
+  token = normalizeCrawlerToken(token);
   setWorkerActivity(workerId, token);
   crawlerState.lastAction = `开始处理 ${token.symbol}`;
 
@@ -372,6 +443,7 @@ async function fetchToken(token, workerId) {
 }
 
 async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, shouldContinue = () => true } = {}) {
+  token = normalizeCrawlerToken(token);
   await markTokenFetching(token.id, intervalCode);
 
   const targetStartTime = intervalLookbackStart(intervalCode);
@@ -380,7 +452,7 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
   const hasEnoughCoverage =
     stats.count > 0 &&
     stats.minOpenTime !== null &&
-    stats.minOpenTime <= targetStartTime + intervalMs(intervalCode);
+    stats.minOpenTime <= targetStartTime;
   let coverageRows = 0;
   let gapRows = 0;
   let recentRows = 0;
@@ -426,7 +498,7 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
     attemptedHistoricalCoverage &&
     shouldContinue() &&
     latestStats.minOpenTime !== null &&
-    latestStats.minOpenTime > targetStartTime + intervalMs(intervalCode)
+    latestStats.minOpenTime > targetStartTime
   ) {
     await markKlineAvailabilityStart(token.symbol, intervalCode, latestStats.minOpenTime);
   }
@@ -460,11 +532,119 @@ async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, sh
   };
 }
 
+export async function refreshLatestKlineTails({ force = false, shouldContinue = () => true } = {}) {
+  if (!config.crawler.tailRefreshEnabled && !force) {
+    return { skipped: true, reason: "tail refresh disabled" };
+  }
+  if (crawlerState.tailRefresh.running) {
+    return { skipped: true, reason: "tail refresh already running", ...crawlerState.tailRefresh };
+  }
+
+  crawlerState.tailRefresh.running = true;
+  crawlerState.tailRefresh.lastStartedAt = new Date().toISOString();
+  crawlerState.tailRefresh.lastCompletedAt = null;
+  crawlerState.tailRefresh.targetCount = 0;
+  crawlerState.tailRefresh.tokenCount = 0;
+  crawlerState.tailRefresh.refreshedRows = 0;
+  crawlerState.tailRefresh.errorCount = 0;
+  crawlerState.tailRefresh.lastError = null;
+
+  try {
+    const targets = await listKlineTailRefreshTargets({ limit: config.crawler.tailRefreshLimit });
+    const bySymbol = new Map();
+    for (const target of targets) {
+      if (!bySymbol.has(target.symbol)) {
+        bySymbol.set(target.symbol, normalizeCrawlerToken({
+          id: target.id,
+          symbol: target.symbol,
+          baseAsset: target.baseAsset,
+          categoryType: target.categoryType,
+          categoryLabel: target.categoryLabel,
+          intervals: []
+        }));
+      }
+      bySymbol.get(target.symbol).intervals.push(target);
+    }
+    const groups = [...bySymbol.values()];
+    crawlerState.tailRefresh.targetCount = targets.length;
+    crawlerState.tailRefresh.tokenCount = groups.length;
+    if (!groups.length) {
+      crawlerState.lastAction = "快速追最新K线完成，所有活跃交易对已是最新";
+      return { ok: true, targetCount: 0, tokenCount: 0, refreshedRows: 0, errorCount: 0 };
+    }
+
+    let refreshedRows = 0;
+    let errorCount = 0;
+    const errors = [];
+    await runConcurrent(groups, config.crawler.concurrentTokens, async (token, workerId) => {
+      const activityId = `tail-${workerId}`;
+      let tokenRows = 0;
+      setWorkerActivity(activityId, token);
+      try {
+        for (const target of token.intervals) {
+          if (!shouldContinue()) break;
+          const ms = intervalMs(target.intervalCode);
+          const startTime = target.latestOpenTime === null
+            ? Math.max(0, Number(target.targetEndTime) - (config.crawler.tailRefreshKlineLimit - 1) * ms)
+            : Math.min(Number(target.latestOpenTime) + ms, Number(target.targetEndTime));
+          const endTime = Number(target.targetEndTime);
+          if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime > endTime) continue;
+
+          setWorkerActivity(activityId, token, target.intervalCode);
+          try {
+            const rows = await fetchKlineRange({
+              token,
+              intervalCode: target.intervalCode,
+              startTime,
+              endTime,
+              limit: config.crawler.tailRefreshKlineLimit,
+              action: `${token.symbol} ${target.intervalCode} 快速追最新K线`,
+              shouldContinue
+            });
+            tokenRows += rows;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            errorCount += 1;
+            errors.push(`${token.symbol} ${target.intervalCode}: ${message}`);
+            crawlerState.tailRefresh.lastError = message;
+            crawlerState.lastError = message;
+          }
+        }
+        if (tokenRows > 0) {
+          await withRetryableDatabaseOperation(`${token.symbol} 快速追尾信号刷新`, async () => {
+            await refreshTokenFetchState(token.id);
+            await recomputeAndNotifyToken(token);
+          });
+          refreshedRows += tokenRows;
+        }
+      } finally {
+        setWorkerActivity(activityId, null);
+      }
+    });
+
+    crawlerState.tailRefresh.refreshedRows = refreshedRows;
+    crawlerState.tailRefresh.errorCount = errorCount;
+    crawlerState.tailRefresh.lastError = errors.at(-1) ?? null;
+    crawlerState.lastAction = `快速追最新K线完成：${groups.length} 个交易对，写入/更新 ${refreshedRows} 行`;
+    return {
+      ok: true,
+      targetCount: targets.length,
+      tokenCount: groups.length,
+      refreshedRows,
+      errorCount,
+      errors: errors.slice(-20)
+    };
+  } finally {
+    crawlerState.tailRefresh.running = false;
+    crawlerState.tailRefresh.lastCompletedAt = new Date().toISOString();
+  }
+}
+
 export async function refreshKlineCacheForSymbol(symbol, intervalCode) {
   if (!INTERVALS.includes(intervalCode)) {
     return { ok: false, reason: "invalid interval" };
   }
-  const token = await getActiveTokenBySymbol(symbol);
+  const token = normalizeCrawlerToken(await getActiveTokenBySymbol(symbol));
   if (!token) return { ok: false, reason: "symbol not active" };
   setWorkerActivity("on-demand", token, intervalCode);
   try {
@@ -485,7 +665,7 @@ async function runCrawlerWorker(workerId, { incrementalCutoffAt = null } = {}) {
     if (!token) return;
 
     try {
-      await fetchToken(token, workerId);
+      await withRetryableDatabaseOperation(`${token.symbol} 抓取`, () => fetchToken(token, workerId));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       crawlerState.lastError = message;
@@ -541,6 +721,9 @@ export async function startCrawler({ mode = "incremental", reason = null, includ
           crawlerState.lastError = error instanceof Error ? error.message : String(error);
           crawlerState.lastAction = `同步交易对失败，使用本地 ${activeCount} 个活跃交易对继续增量抓取`;
         }
+      }
+      if (includeIncremental) {
+        await refreshLatestKlineTails({ shouldContinue: () => crawlerState.running });
       }
       const workerCount = Math.max(1, config.crawler.concurrentTokens);
       await Promise.all(

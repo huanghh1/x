@@ -13,6 +13,7 @@ import {
   getHotMaSignalsPage,
   getSignalGroupsPage,
   listMultiCycleHistory,
+  listKlineTailRefreshTargets,
   getOverview,
   getSignals,
   getKlineAuditReport,
@@ -30,6 +31,7 @@ import { cleanupRuntimeLogFiles, RUNTIME_ERROR_LOG_FILES, RUNTIME_LOG_FILES, run
 import { telegramState } from "./telegram.js";
 import { getTradeAnalysis } from "./tradeAnalysis.js";
 import { normalizeCodexScope, prepareCodexTradeAnalysis, runCodexTradeAnalysis } from "./codexTradeAnalysis.js";
+import { normalizeTokenInterval, prepareCodexTokenAnalysis } from "./codexTokenAnalysis.js";
 import { requestService, serviceStates, serviceUrl } from "./serviceClient.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -44,17 +46,28 @@ function isLoopbackAddress(value) {
   return address === "127.0.0.1" || address === "::1" || address === "localhost";
 }
 
-function requireLocalMutation(request, response, next) {
+function hasLocalOrTokenAccess(request) {
   const configuredToken = config.app.mutationToken;
   if (configuredToken && request.get("X-API-Mutation-Token") === configuredToken) {
-    next();
-    return;
+    return true;
   }
-  if (isLoopbackAddress(request.ip) || isLoopbackAddress(request.socket?.remoteAddress)) {
+  return isLoopbackAddress(request.ip) || isLoopbackAddress(request.socket?.remoteAddress);
+}
+
+function requireLocalMutation(request, response, next) {
+  if (hasLocalOrTokenAccess(request)) {
     next();
     return;
   }
   response.status(403).json({ ok: false, error: "mutating API is only available from localhost" });
+}
+
+function requireSensitiveRead(request, response, next) {
+  if (hasLocalOrTokenAccess(request)) {
+    next();
+    return;
+  }
+  response.status(403).json({ ok: false, error: "sensitive API is only available from localhost" });
 }
 
 app.get("/api/health", async (_request, response) => {
@@ -350,11 +363,35 @@ app.post("/api/kline-audit", requireLocalMutation, async (_request, response) =>
   }));
 });
 
+app.post("/api/kline-tails", requireLocalMutation, async (_request, response) => {
+  response.json(await requestService("crawler", "/internal/kline/tails", {
+    method: "POST",
+    body: "{}",
+    timeoutMs: 10 * 60 * 1000
+  }));
+});
+
 app.get("/api/kline-health", async (_request, response) => {
   try {
     response.json({ ok: true, ...(await getKlineAuditReport(config.crawler.retentionLimits)) });
   } catch (error) {
     console.error("get kline health failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/kline-tail-health", async (_request, response) => {
+  try {
+    const targets = await listKlineTailRefreshTargets({ limit: 10_000 });
+    response.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      targetIntervalCount: targets.length,
+      targetTokenCount: new Set(targets.map((item) => item.symbol)).size,
+      targets
+    });
+  } catch (error) {
+    console.error("get kline tail health failed", error);
     response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
@@ -374,14 +411,15 @@ app.get("/api/overview", async (_request, response) => {
   });
 });
 
-app.get("/api/trade-analysis", async (request, response) => {
+app.get("/api/trade-analysis", requireSensitiveRead, async (request, response) => {
   try {
     response.json(await getTradeAnalysis(config, {
       start: request.query.start,
       end: request.query.end,
       symbol: request.query.symbol,
       page: request.query.page,
-      pageSize: request.query.pageSize
+      pageSize: request.query.pageSize,
+      mode: request.query.mode
     }));
   } catch (error) {
     console.error("get trade analysis failed", error);
@@ -394,7 +432,7 @@ app.post("/api/trade-analysis/codex", requireLocalMutation, async (request, resp
     const body = request.body ?? {};
     const scope = normalizeCodexScope(body.scope);
     if (scope === "trade" && !body.tradeKey && (!body.source || !body.symbol)) {
-      response.status(400).json({ ok: false, error: "请先在交易记录表中选择一笔单笔交易。" });
+      response.status(400).json({ ok: false, error: "请先在交易记录表中选择一个交易组。" });
       return;
     }
     if (scope === "symbol" && !body.symbol) {
@@ -427,6 +465,56 @@ app.post("/api/trade-analysis/codex", requireLocalMutation, async (request, resp
     });
   } catch (error) {
     console.error("run codex trade analysis failed", error);
+    response.status(error.statusCode || 500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/token-analysis/codex", requireLocalMutation, async (request, response) => {
+  try {
+    const body = request.body ?? {};
+    const symbol = sanitizeSymbol(body.symbol);
+    const intervalCode = normalizeTokenInterval(body.intervalCode ?? body.interval);
+    if (!symbol) {
+      response.status(400).json({ ok: false, error: "symbol is required" });
+      return;
+    }
+
+    const limit = body.klineLimit === undefined || body.klineLimit === null || body.klineLimit === "" || body.klineLimit === "all"
+      ? "all"
+      : Math.max(120, Number(body.klineLimit) || 360);
+    const klinePayload = await getKlines({ symbol, intervalCode, limit });
+    if (klinePayload.needsRefresh && shouldRequestKlineRefresh(symbol, intervalCode, klinePayload.refreshReason)) {
+      void requestService("crawler", "/internal/kline/refresh", {
+        method: "POST",
+        body: JSON.stringify({ symbol, intervalCode }),
+        timeoutMs: 10 * 60 * 1000
+      })
+        .catch((error) => console.error("token codex kline refresh failed", symbol, intervalCode, error));
+      void queueSymbolsForKlineRefresh(symbol, `Codex 分析前补齐 ${intervalCode} K线：${klinePayload.refreshReason || "cache_refresh"}`)
+        .catch((error) => console.error("token codex kline queue failed", symbol, intervalCode, error));
+    }
+
+    const prepared = prepareCodexTokenAnalysis({
+      symbol,
+      intervalCode,
+      klinePayload,
+      context: body.context,
+      contextKlineLimit: body.contextKlineLimit
+    });
+    const codexResult = await runCodexTradeAnalysis(prepared.prompt, {
+      command: config.tradeAnalysis.codex.command,
+      timeoutMs: config.tradeAnalysis.codex.timeoutMs
+    });
+    response.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      scope: prepared.report.scope,
+      title: prepared.report.title,
+      report: prepared.report,
+      analysis: codexResult.text
+    });
+  } catch (error) {
+    console.error("run codex token analysis failed", error);
     response.status(error.statusCode || 500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });

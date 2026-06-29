@@ -4,6 +4,7 @@ const ALL_INTERVALS = ["15m", "1h", "4h", "1d"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const TRADE_MAX_LOOKBACK_DAYS = 90;
+const API_MUTATION_TOKEN_STORAGE_KEY = "signal.monitor.apiMutationToken";
 
 const LABELS = {
   category: { A: "A类", B: "B类" },
@@ -42,6 +43,7 @@ const state = {
   signalChartIntervals: new Map(),
   chartCache: new Map(),
   chartState: new Map(),
+  tokenCodex: new Map(),
   chartRefreshTimers: new Map(),
   chartRefreshAttempts: new Map(),
   realtimeKlines: new Map(),
@@ -105,8 +107,10 @@ const state = {
   runtimeLogsGeneratedAt: null,
   tradeAnalysis: null,
   tradeAnalysisLoading: false,
+  tradeAnalysisRefreshing: false,
   tradeAnalysisError: "",
   tradeAnalysisInitialized: false,
+  tradeAnalysisRequestId: 0,
   tradeCodexScope: "all",
   tradeCodexLoading: false,
   tradeCodexError: "",
@@ -533,8 +537,49 @@ function chartElementId(key) {
   return `chart-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-async function api(path, options) {
-  const response = await fetch(path, options);
+function storedApiMutationToken() {
+  try {
+    return localStorage.getItem(API_MUTATION_TOKEN_STORAGE_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveApiMutationToken(token) {
+  try {
+    const clean = String(token ?? "").trim();
+    if (clean) localStorage.setItem(API_MUTATION_TOKEN_STORAGE_KEY, clean);
+    else localStorage.removeItem(API_MUTATION_TOKEN_STORAGE_KEY);
+  } catch {
+    // localStorage can be unavailable in restricted browser contexts.
+  }
+}
+
+function promptApiMutationToken() {
+  if (typeof window.prompt !== "function") return "";
+  const current = storedApiMutationToken();
+  const token = window.prompt("请输入 API_MUTATION_TOKEN 后重试", current);
+  if (token === null) return "";
+  saveApiMutationToken(token);
+  return String(token).trim();
+}
+
+function withApiAuthHeaders(options = {}) {
+  const init = { ...options };
+  const headers = new Headers(options.headers || {});
+  const token = storedApiMutationToken();
+  if (token && !headers.has("X-API-Mutation-Token")) {
+    headers.set("X-API-Mutation-Token", token);
+  }
+  init.headers = headers;
+  return init;
+}
+
+async function api(path, options = {}) {
+  let response = await fetch(path, withApiAuthHeaders(options));
+  if (response.status === 403 && promptApiMutationToken()) {
+    response = await fetch(path, withApiAuthHeaders(options));
+  }
   const contentType = response.headers.get("content-type") || "";
   if (!response.ok) {
     let message = `${path} ${response.status}`;
@@ -1405,7 +1450,7 @@ function ensureTradeAnalysisInputs() {
   updateTradeWindowButtons("max");
 }
 
-function tradeAnalysisQuery() {
+function tradeAnalysisQuery(extraParams = {}) {
   ensureTradeAnalysisInputs();
   const params = new URLSearchParams();
   const { start, end, symbol } = tradeFilterValues();
@@ -1414,6 +1459,9 @@ function tradeAnalysisQuery() {
   if (symbol) params.set("symbol", symbol);
   params.set("page", String(state.tradeSymbolPage));
   params.set("pageSize", String(state.tradeSymbolPageSize));
+  Object.entries(extraParams).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  });
   return params.toString();
 }
 
@@ -1426,32 +1474,66 @@ function tradeFilterValues() {
   };
 }
 
-async function loadTradeAnalysis() {
+function applyTradeAnalysisPayload(payload) {
+  state.tradeAnalysis = payload;
+  state.tradeSymbolTotal = Number(payload?.tradeRows?.total ?? payload?.symbolSummary?.total ?? tradeAnalysisRows().length);
+  state.tradeSymbolPage = Number(payload?.tradeRows?.page ?? payload?.symbolSummary?.page ?? state.tradeSymbolPage);
+  state.tradeSymbolPageSize = Number(payload?.tradeRows?.pageSize ?? payload?.symbolSummary?.pageSize ?? state.tradeSymbolPageSize);
+  if (state.selectedTradeSymbolKey && !tradeSymbolRowByKey(state.selectedTradeSymbolKey)) {
+    state.selectedTradeSymbolKey = "";
+  }
+  state.tradeCodexError = "";
+  state.tradeCodexResult = null;
+}
+
+async function loadTradeAnalysis({ refresh = true } = {}) {
   ensureTradeAnalysisInputs();
+  const requestId = state.tradeAnalysisRequestId + 1;
+  state.tradeAnalysisRequestId = requestId;
   state.tradeAnalysisLoading = true;
+  state.tradeAnalysisRefreshing = false;
   state.tradeAnalysisError = "";
   renderTradeAnalysis();
+  let snapshotShown = false;
   try {
-    const query = tradeAnalysisQuery();
-    state.tradeAnalysis = await api(`/api/trade-analysis${query ? `?${query}` : ""}`);
-    state.tradeSymbolTotal = Number(state.tradeAnalysis?.tradeRows?.total ?? state.tradeAnalysis?.symbolSummary?.total ?? tradeAnalysisRows().length);
-    state.tradeSymbolPage = Number(state.tradeAnalysis?.tradeRows?.page ?? state.tradeAnalysis?.symbolSummary?.page ?? state.tradeSymbolPage);
-    state.tradeSymbolPageSize = Number(state.tradeAnalysis?.tradeRows?.pageSize ?? state.tradeAnalysis?.symbolSummary?.pageSize ?? state.tradeSymbolPageSize);
-    const totalPages = Math.max(1, Math.ceil(state.tradeSymbolTotal / state.tradeSymbolPageSize));
-    if (state.tradeSymbolPage > totalPages) {
-      state.tradeSymbolPage = totalPages;
-      await loadTradeAnalysis();
+    const snapshotQuery = tradeAnalysisQuery({ mode: "snapshot" });
+    const snapshot = await api(`/api/trade-analysis${snapshotQuery ? `?${snapshotQuery}` : ""}`);
+    if (requestId !== state.tradeAnalysisRequestId) return;
+    applyTradeAnalysisPayload(snapshot);
+    snapshotShown = true;
+    state.tradeAnalysisLoading = false;
+    state.tradeAnalysisRefreshing = refresh;
+    renderTradeAnalysis();
+  } catch (error) {
+    if (requestId !== state.tradeAnalysisRequestId) return;
+    const message = error instanceof Error ? error.message : String(error);
+    if (!refresh) {
+      state.tradeAnalysisError = message;
+      state.tradeAnalysisLoading = false;
+      state.tradeAnalysisRefreshing = false;
+      renderTradeAnalysis();
       return;
     }
-    if (state.selectedTradeSymbolKey && !tradeSymbolRowByKey(state.selectedTradeSymbolKey)) {
-      state.selectedTradeSymbolKey = "";
-    }
-    state.tradeCodexError = "";
-    state.tradeCodexResult = null;
+    state.tradeAnalysisError = `本地记录读取失败：${message}`;
+    renderTradeAnalysis();
+  }
+
+  if (!refresh) return;
+
+  try {
+    const query = tradeAnalysisQuery();
+    const payload = await api(`/api/trade-analysis${query ? `?${query}` : ""}`);
+    if (requestId !== state.tradeAnalysisRequestId) return;
+    applyTradeAnalysisPayload(payload);
+    state.tradeAnalysisError = "";
   } catch (error) {
-    state.tradeAnalysisError = error instanceof Error ? error.message : String(error);
+    if (requestId !== state.tradeAnalysisRequestId) return;
+    const message = error instanceof Error ? error.message : String(error);
+    state.tradeAnalysisError = snapshotShown ? `最新同步失败：${message}` : message;
   } finally {
+    if (requestId !== state.tradeAnalysisRequestId) return;
     state.tradeAnalysisLoading = false;
+    state.tradeAnalysisRefreshing = false;
     renderTradeAnalysis();
   }
 }
@@ -1492,14 +1574,14 @@ function tradeCodexSymbolTarget() {
 
 function tradeCodexScopeLabel(scope = state.tradeCodexScope) {
   if (scope === "all") return "全部交易记录";
-  if (scope === "trade") return "单笔交易";
+  if (scope === "trade") return "交易组";
   if (scope === "range") return "时间段";
   if (scope === "symbol") return "选中币种";
   return "全部交易记录";
 }
 
 function tradeCodexCanRun() {
-  if (state.tradeCodexLoading || state.tradeAnalysisLoading || !state.tradeAnalysis) return false;
+  if (state.tradeCodexLoading || state.tradeAnalysisLoading || state.tradeAnalysisRefreshing || !state.tradeAnalysis) return false;
   if (state.tradeCodexScope === "trade") return Boolean(selectedTradeSymbolRow());
   if (state.tradeCodexScope === "symbol") return Boolean(tradeCodexSymbolTarget());
   return true;
@@ -1507,7 +1589,7 @@ function tradeCodexCanRun() {
 
 function setTradeCodexScope(scope) {
   state.tradeCodexScope = ["all", "trade", "range", "symbol"].includes(scope) ? scope : "all";
-  if (state.tradeCodexScope !== "trade") state.selectedTradeSymbolKey = "";
+  if (!["trade", "symbol"].includes(state.tradeCodexScope)) state.selectedTradeSymbolKey = "";
   state.tradeCodexError = "";
   state.tradeCodexResult = null;
 }
@@ -1521,18 +1603,24 @@ function renderTradeSymbolSelect() {
   if (!select) return;
   const rows = sortTradeSymbolRowsByTime(tradeAnalysisRows());
   const selected = selectedTradeSymbolRow();
-  const canSelectTrade = state.tradeCodexScope === "trade";
-  select.disabled = !canSelectTrade || state.tradeAnalysisLoading || !rows.length;
-  const placeholder = canSelectTrade
-    ? rows.length ? "选择一笔交易记录" : "暂无可选交易记录"
+  const canSelectRow = ["trade", "symbol"].includes(state.tradeCodexScope);
+  const label = $("#tradeSymbolSelectLabel");
+  if (label) {
+    label.textContent = state.tradeCodexScope === "symbol" ? "选择币种汇总" : "选择交易组";
+  }
+  select.disabled = !canSelectRow || state.tradeAnalysisLoading || state.tradeAnalysisRefreshing || !rows.length;
+  const placeholder = canSelectRow
+    ? rows.length
+      ? state.tradeCodexScope === "symbol" ? "选择一个币种汇总" : "选择一个交易组"
+      : "暂无可选交易记录"
     : state.tradeCodexScope === "all"
-      ? "全部复盘不需要选择单笔"
-      : "当前复盘范围不需要选择单笔";
+      ? "全部复盘不需要选择"
+      : "当前复盘范围不需要选择";
   select.innerHTML = [
     `<option value="">${placeholder}</option>`,
     ...rows.map((row) => `<option value="${escapeHtml(tradeSymbolRowKey(row))}">${escapeHtml(tradeSymbolOptionLabel(row))}</option>`)
   ].join("");
-  select.value = canSelectTrade && selected ? tradeSymbolRowKey(selected) : "";
+  select.value = canSelectRow && selected ? tradeSymbolRowKey(selected) : "";
 }
 
 function renderTradeCodexPanel() {
@@ -1557,9 +1645,9 @@ function renderTradeCodexPanel() {
     const filters = tradeFilterValues();
     if (state.tradeCodexScope === "trade") {
       selection.textContent = selected
-        ? `已选单笔交易 ${selected.sourceLabel || selected.source || "--"} · ${selected.symbol || "--"} · ${formatTime(selected.firstTime)} → ${formatTime(selected.lastTime)} · 净收益 ${formatUsd(selected.net)}`
+        ? `已选交易组 ${selected.sourceLabel || selected.source || "--"} · ${selected.symbol || "--"} · ${formatTime(selected.firstTime)} → ${formatTime(selected.lastTime)} · 净收益 ${formatUsd(selected.net)}`
         : tradeAnalysisRows().length
-          ? "请选择下方交易记录表的一行，或在下拉框选择一笔交易记录。"
+          ? "请选择下方交易记录表的一行，或在下拉框选择一个交易组。"
           : "当前时间窗口暂无可选交易记录。";
     } else if (state.tradeCodexScope === "range") {
       selection.textContent = `时间段 ${formatTime(filters.start)} → ${formatTime(filters.end)}${filters.symbol ? ` · ${filters.symbol}` : ""}`;
@@ -1570,7 +1658,7 @@ function renderTradeCodexPanel() {
           ? "当前未选中币种。可以在下拉框选择，或点击下方交易记录行。"
           : "当前筛选没有可选币种。";
     } else {
-      selection.textContent = "将复盘最大记录窗口内的全部交易记录。";
+      selection.textContent = `将复盘近 ${TRADE_MAX_LOOKBACK_DAYS} 天最大窗口内的全部交易记录。`;
     }
   }
 
@@ -1602,7 +1690,7 @@ function renderTradeCodexPanel() {
 
 async function runTradeCodexAnalysis() {
   if (!tradeCodexCanRun()) {
-    if (state.tradeCodexScope === "trade") state.tradeCodexError = "请先在交易记录表中选择一笔单笔交易。";
+    if (state.tradeCodexScope === "trade") state.tradeCodexError = "请先在交易记录表中选择一个交易组。";
     else if (state.tradeCodexScope === "symbol") state.tradeCodexError = "请先在上方选择一个币种汇总，或输入币种。";
     renderTradeCodexPanel();
     return;
@@ -1640,6 +1728,8 @@ async function runTradeCodexAnalysis() {
 function updateTradeAnalysisStatus(payload) {
   const parts = [];
   if (state.tradeAnalysisLoading) parts.push("读取中");
+  else if (state.tradeAnalysisRefreshing) parts.push("同步最新");
+  if (payload?.snapshot) parts.push("本地记录");
   if (payload?.generatedAt) parts.push(`更新时间 ${formatTime(payload.generatedAt)}`);
   if (payload?.window?.startTime && payload?.window?.endTime) {
     parts.push(`${formatTime(payload.window.startTime)} → ${formatTime(payload.window.endTime)}`);
@@ -1650,14 +1740,16 @@ function updateTradeAnalysisStatus(payload) {
   if (errorCount) parts.push(`异常 ${errorCount} 个来源`);
   if (payload?.positions) parts.push(`${payload.positions.length} 个持仓`);
   if (payload?.tradeRows) parts.push(`交易记录 ${payload.tradeRows.total ?? 0} 项`);
-  if (payload?.persistence?.enabled) parts.push("已入库");
+  if (payload?.persistence?.enabled) parts.push(payload?.snapshot ? "来自数据库" : "已入库");
   else if (payload?.persistence?.error) parts.push(`入库失败：${payload.persistence.error}`);
   if (state.tradeAnalysisError) parts.push(`失败：${state.tradeAnalysisError}`);
   setText("#tradeAnalysisStatus", parts.join(" · ") || "等待读取");
   const refreshButton = $("#refreshTradeAnalysisBtn");
   if (refreshButton) {
-    refreshButton.disabled = state.tradeAnalysisLoading;
-    refreshButton.textContent = state.tradeAnalysisLoading ? "读取中" : "刷新交易分析";
+    refreshButton.disabled = state.tradeAnalysisLoading || state.tradeAnalysisRefreshing;
+    refreshButton.textContent = state.tradeAnalysisLoading
+      ? "读取中"
+      : state.tradeAnalysisRefreshing ? "同步中" : "刷新交易分析";
   }
 }
 
@@ -1754,7 +1846,7 @@ function renderTradePositions(positions, summary = {}) {
   if (notionalTarget) notionalTarget.textContent = formatUsd(summary.notional ?? 0);
   setTradeMetric("#tradePositionPnl", Number(summary.unrealizedPnl ?? 0));
 
-  if (state.tradeAnalysisLoading && !positions.length) {
+  if ((state.tradeAnalysisLoading || state.tradeAnalysisRefreshing) && !positions.length) {
     target.innerHTML = '<tr><td colspan="11" class="empty">正在读取当前持仓。</td></tr>';
     return;
   }
@@ -1798,7 +1890,7 @@ function sortTradeSymbolRowsByTime(rows = []) {
 function renderTradeSymbolRows(rows) {
   const target = $("#tradeSymbolRows");
   if (!target) return;
-  if (state.tradeAnalysisLoading && !rows.length) {
+  if ((state.tradeAnalysisLoading || state.tradeAnalysisRefreshing) && !rows.length) {
     target.innerHTML = '<tr><td colspan="8" class="empty">正在读取交易分析。</td></tr>';
     return;
   }
@@ -1808,10 +1900,10 @@ function renderTradeSymbolRows(rows) {
   }
   target.innerHTML = sortTradeSymbolRowsByTime(rows).map((row) => {
     const key = tradeSymbolRowKey(row);
-    const tradeSelectable = state.tradeCodexScope === "trade";
-    const selected = tradeSelectable && state.selectedTradeSymbolKey === key;
+    const rowSelectable = ["trade", "symbol"].includes(state.tradeCodexScope);
+    const selected = rowSelectable && state.selectedTradeSymbolKey === key;
     return `
-    <tr class="${[tradeSelectable ? "is-trade-selectable" : "", selected ? "is-selected-trade-symbol" : ""].filter(Boolean).join(" ")}" data-trade-symbol-key="${escapeHtml(key)}">
+    <tr class="${[rowSelectable ? "is-trade-selectable" : "", selected ? "is-selected-trade-symbol" : ""].filter(Boolean).join(" ")}" data-trade-symbol-key="${escapeHtml(key)}">
       <td>${escapeHtml(row.sourceLabel || row.source || "--")}</td>
       <td><span class="mono">${escapeHtml(row.symbol || "--")}</span></td>
       <td>${formatTime(row.firstTime)}</td>
@@ -1837,8 +1929,8 @@ function updateTradeSymbolPagination() {
 
   const prevBtn = $("#prevTradeSymbolPageBtn");
   const nextBtn = $("#nextTradeSymbolPageBtn");
-  if (prevBtn) prevBtn.disabled = state.tradeAnalysisLoading || page <= 1;
-  if (nextBtn) nextBtn.disabled = state.tradeAnalysisLoading || page >= totalPages;
+  if (prevBtn) prevBtn.disabled = state.tradeAnalysisLoading || state.tradeAnalysisRefreshing || page <= 1;
+  if (nextBtn) nextBtn.disabled = state.tradeAnalysisLoading || state.tradeAnalysisRefreshing || page >= totalPages;
 
   document.querySelectorAll("[data-trade-symbol-pagesize]").forEach((btn) => {
     btn.classList.toggle("active", Number(btn.dataset.tradeSymbolPagesize) === pageSize);
@@ -1848,7 +1940,7 @@ function updateTradeSymbolPagination() {
 function bindTradeSymbolSelection(root) {
   root.querySelectorAll("[data-trade-symbol-key]").forEach((row) => {
     row.addEventListener("click", () => {
-      if (state.tradeCodexScope !== "trade") return;
+      if (!["trade", "symbol"].includes(state.tradeCodexScope)) return;
       state.selectedTradeSymbolKey = state.selectedTradeSymbolKey === row.dataset.tradeSymbolKey ? "" : row.dataset.tradeSymbolKey || "";
       state.tradeCodexError = "";
       state.tradeCodexResult = null;
@@ -2926,6 +3018,164 @@ function chartKlineLength(payload) {
   return chartKlines(payload).length;
 }
 
+function tokenCodexKey(symbol, intervalCode) {
+  return `${String(symbol ?? "").toUpperCase()}|${intervalCode || "1h"}`;
+}
+
+function signalContextForToken(symbol, intervalCode) {
+  const row = state.signals.find((item) => String(item.symbol ?? "").toUpperCase() === String(symbol ?? "").toUpperCase());
+  if (!row) return null;
+  const details = Array.isArray(row.intervalDetails) ? row.intervalDetails : [];
+  const selectedDetail = details.find((item) => item.intervalCode === intervalCode) ?? details[0] ?? row;
+  const triggered = details
+    .filter((item) => ["LEVEL1", "LEVEL2"].includes(item.alertLevel))
+    .map((item) => ({
+      intervalCode: item.intervalCode,
+      alertLevel: item.alertLevel,
+      currentPrice: item.currentPrice,
+      ma100: item.ma100,
+      ma200: item.ma200,
+      signalTime: item.signalTime || item.updatedAt
+    }));
+  return {
+    categoryLabel: row.categoryLabel,
+    bestAlertLevel: row.bestAlertLevel || row.alertLevel,
+    profile: signalProfile(row).label,
+    multiMatchCount: row.multiMatchCount,
+    hotRankHit: Boolean(Number(row.hotRankHit ?? 0)),
+    fundingOneHour: Boolean(row.fundingOneHour),
+    oiMatched: Boolean(row.oiMatched ?? row.oiSpikeHit),
+    oiChange: oiChangeSummary(row),
+    selectedInterval: selectedDetail.intervalCode || intervalCode,
+    selectedPrice: selectedDetail.currentPrice,
+    selectedMa100: selectedDetail.ma100,
+    selectedMa200: selectedDetail.ma200,
+    triggered
+  };
+}
+
+function tokenCodexContext(symbol, intervalCode) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const funding = state.fundingTokens.find((item) => String(item.symbol ?? "").toUpperCase() === safeSymbol);
+  const oi = state.ioData.find((item) => String(item.symbol ?? "").toUpperCase() === safeSymbol);
+  const watch = state.watchlist.find((item) => String(item.symbol ?? "").toUpperCase() === safeSymbol);
+  const signal = signalContextForToken(safeSymbol, intervalCode);
+  return {
+    chartInterval: intervalCode,
+    page: state.currentView,
+    signal,
+    funding: funding
+      ? {
+          currentFundingRate: funding.currentFundingRate,
+          fundingIntervalHours: funding.fundingIntervalHours,
+          intervals: funding.intervals,
+          multiCycleCount: funding.multiCycleCount,
+          hotRank: Boolean(funding.hotRank),
+          oiSpike: Boolean(funding.oiSpike),
+          lastChangedAt: funding.lastChangedAt || funding.lastSeenAt
+        }
+      : null,
+    openInterest: oi
+      ? {
+          window: state.ioWindow,
+          changePercent: oi.changePercent,
+          currentOpenInterest: oi.currentOpenInterest,
+          currentOpenInterestValue: oi.currentOpenInterestValue,
+          observedAt: oi.observedAt,
+          isStale: Boolean(oi.isStale),
+          matches: {
+            hotRankHit: Boolean(oi.hotRankHit),
+            fundingOneHour: Boolean(oi.fundingOneHour),
+            multiCycleCount: oi.multiCycleCount
+          }
+        }
+      : null,
+    watchlist: watch
+      ? {
+          note: watch.note,
+          alertEnabled: Boolean(watch.alertEnabled),
+          alertAbove: watch.alertAbove,
+          alertBelow: watch.alertBelow,
+          latestInterval: watch.latestInterval,
+          unlockStatus: watch.unlockStatus,
+          nextUnlockAt: watch.nextUnlockAt
+        }
+      : null
+  };
+}
+
+function tokenCodexPanelHtml(symbol, intervalCode) {
+  const key = tokenCodexKey(symbol, intervalCode);
+  const entry = state.tokenCodex.get(key);
+  if (!entry) return "";
+  const status = entry.loading
+    ? "分析中"
+    : entry.error
+      ? "失败"
+      : entry.result?.generatedAt
+        ? `完成 ${formatTime(entry.result.generatedAt)}`
+        : "等待";
+  const content = entry.loading
+    ? "Codex 正在结合当前 K 线和页面信号分析这个币，请稍等。"
+    : entry.error
+      ? entry.error
+      : entry.result?.analysis || "暂无分析结果。";
+  return `
+    <section class="chart-codex-panel ${entry.error ? "is-error" : ""}" data-token-codex-panel="${escapeHtml(key)}">
+      <div class="chart-codex-head">
+        <strong>Codex 看币</strong>
+        <span>${escapeHtml(status)}</span>
+      </div>
+      <pre>${escapeHtml(content)}</pre>
+    </section>
+  `;
+}
+
+async function runTokenCodexAnalysis(symbol, intervalCode) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const safeInterval = intervalCode || "1h";
+  if (!safeSymbol) return;
+  const key = tokenCodexKey(safeSymbol, safeInterval);
+  const requestId = Number(state.tokenCodex.get(key)?.requestId ?? 0) + 1;
+  state.tokenCodex.set(key, {
+    loading: true,
+    error: "",
+    result: null,
+    requestId
+  });
+  await loadAndRenderChart({ symbol: safeSymbol, intervalCode: safeInterval });
+  try {
+    const payload = await api("/api/token-analysis/codex", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: safeSymbol,
+        intervalCode: safeInterval,
+        context: tokenCodexContext(safeSymbol, safeInterval)
+      })
+    });
+    if (state.tokenCodex.get(key)?.requestId !== requestId) return;
+    state.tokenCodex.set(key, {
+      loading: false,
+      error: "",
+      result: payload,
+      requestId
+    });
+  } catch (error) {
+    if (state.tokenCodex.get(key)?.requestId !== requestId) return;
+    state.tokenCodex.set(key, {
+      loading: false,
+      error: error instanceof Error ? error.message : String(error),
+      result: null,
+      requestId
+    });
+  } finally {
+    if (state.tokenCodex.get(key)?.requestId === requestId) {
+      await loadAndRenderChart({ symbol: safeSymbol, intervalCode: safeInterval });
+    }
+  }
+}
+
 async function loadAndRenderChart(row, { force = false } = {}) {
   const key = `${row.symbol}|${row.intervalCode}`;
   const shell = document.getElementById(chartElementId(key));
@@ -2962,17 +3212,19 @@ async function loadAndRenderChart(row, { force = false } = {}) {
     const currentStatus = payload.hasCurrentKline
       ? " · 含当前未收盘K线"
       : " · 等待当前K线实时推送";
+    const codexEntry = state.tokenCodex.get(key);
     shell.innerHTML = `
       <div class="chart-toolbar">
         <div class="chart-title-block">
           <strong>${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} K线</strong>
-          <span>已收盘 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${currentStatus}${payload.gapCount ? ` · 历史缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""}${payload.isStale ? " · 最新已收盘K线落后，已后台补齐" : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
+          <span>已收盘 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${currentStatus}${payload.gapCount ? ` · 历史缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""}${payload.isStale ? " · 最新已收盘K线落后，已请求后台补齐" : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
         </div>
         <div class="chart-tools" role="toolbar" aria-label="K线工具">
           <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair" title="显示或隐藏十字线">十字线</button>
           <button class="${settings.volume ? "active" : ""}" type="button" data-tool="volume" title="显示或隐藏成交量">成交量</button>
           <button class="${settings.ma100 ? "active" : ""}" type="button" data-tool="ma100" title="显示或隐藏 MA100">MA100</button>
           <button class="${settings.ma200 ? "active" : ""}" type="button" data-tool="ma200" title="显示或隐藏 MA200">MA200</button>
+          <button class="${codexEntry ? "active" : ""}" type="button" data-tool="token-codex" data-token-codex-symbol="${escapeHtml(row.symbol)}" data-token-codex-interval="${escapeHtml(row.intervalCode)}" title="让 Codex 看这个币的图表和信号" ${codexEntry?.loading ? "disabled" : ""}>${codexEntry?.loading ? "分析中" : "Codex看币"}</button>
           <a href="https://www.tradingview.com/chart/?symbol=${tvSymbol}" target="_blank" rel="noreferrer">TradingView</a>
         </div>
       </div>
@@ -2987,6 +3239,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
         ${last?.isOpen ? '<span class="chart-meta-chip">当前K线</span>' : ""}
       </div>
       <canvas class="kline-canvas" data-key="${escapeHtml(key)}"></canvas>
+      ${tokenCodexPanelHtml(row.symbol, row.intervalCode)}
     `;
 
     bindChartTools(shell, key);
@@ -3025,6 +3278,10 @@ function bindChartTools(shell, key) {
       const settings = state.chartState.get(key);
       if (!settings) return;
       const tool = button.dataset.tool;
+      if (tool === "token-codex") {
+        void runTokenCodexAnalysis(button.dataset.tokenCodexSymbol, button.dataset.tokenCodexInterval);
+        return;
+      }
       if (["crosshair", "volume", "ma100", "ma200"].includes(tool)) settings[tool] = !settings[tool];
       loadAndRenderChart({ symbol: state.chartCache.get(key)?.symbol, intervalCode: state.chartCache.get(key)?.intervalCode });
     });
@@ -3761,7 +4018,7 @@ $("#applyTradeFilterBtn")?.addEventListener("click", () => {
 });
 $("#runTradeCodexBtn")?.addEventListener("click", () => runTradeCodexAnalysis());
 $("#tradeSymbolSelect")?.addEventListener("change", (event) => {
-  if (state.tradeCodexScope !== "trade") {
+  if (!["trade", "symbol"].includes(state.tradeCodexScope)) {
     event.currentTarget.value = "";
     state.selectedTradeSymbolKey = "";
     renderTradeAnalysis();
@@ -3793,20 +4050,20 @@ document.querySelectorAll("[data-trade-symbol-pagesize]").forEach((btn) => {
   btn.addEventListener("click", () => {
     state.tradeSymbolPageSize = Number(btn.dataset.tradeSymbolPagesize);
     state.tradeSymbolPage = 1;
-    loadTradeAnalysis();
+    loadTradeAnalysis({ refresh: false });
   });
 });
 $("#prevTradeSymbolPageBtn")?.addEventListener("click", () => {
   if (state.tradeSymbolPage > 1) {
     state.tradeSymbolPage -= 1;
-    loadTradeAnalysis();
+    loadTradeAnalysis({ refresh: false });
   }
 });
 $("#nextTradeSymbolPageBtn")?.addEventListener("click", () => {
   const totalPages = Math.ceil(state.tradeSymbolTotal / state.tradeSymbolPageSize) || 1;
   if (state.tradeSymbolPage < totalPages) {
     state.tradeSymbolPage += 1;
-    loadTradeAnalysis();
+    loadTradeAnalysis({ refresh: false });
   }
 });
 $("#tradeSymbolInput")?.addEventListener("keydown", (event) => {

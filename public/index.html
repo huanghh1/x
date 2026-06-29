@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260629-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260629-2" />
   </head>
   <body>
     <header class="app-nav">
@@ -388,7 +388,7 @@
               <input id="tradeSymbolInput" type="text" placeholder="BTCUSDT 或 BTC" autocomplete="off" />
             </label>
             <div class="trade-filter-actions">
-              <button class="page-size-btn active" type="button" data-trade-window="max">最大记录</button>
+              <button class="page-size-btn active" type="button" data-trade-window="max">近 90 天（最大）</button>
               <button class="page-size-btn" type="button" data-trade-window="90d">近 90 天</button>
               <button class="page-size-btn" type="button" data-trade-window="30d">近 30 天</button>
               <button id="applyTradeFilterBtn" class="ghost-button primary" type="button">应用筛选</button>
@@ -431,12 +431,13 @@
             </div>
             <div class="trade-codex-controls">
               <button class="page-size-btn active" type="button" data-trade-codex-scope="all">全部交易记录</button>
-              <button class="page-size-btn" type="button" data-trade-codex-scope="trade">单笔交易</button>
+              <button class="page-size-btn" type="button" data-trade-codex-scope="trade">交易组</button>
+              <button class="page-size-btn" type="button" data-trade-codex-scope="symbol">选中币种</button>
               <button class="page-size-btn" type="button" data-trade-codex-scope="range">时间段</button>
               <button id="runTradeCodexBtn" class="ghost-button primary" type="button">生成 Codex 复盘</button>
             </div>
             <label class="trade-codex-picker">
-              <span>选择单笔交易记录</span>
+              <span id="tradeSymbolSelectLabel">选择交易组</span>
               <select id="tradeSymbolSelect">
                 <option value="">暂无可选交易记录</option>
               </select>
@@ -450,7 +451,7 @@
                 <button class="page-size-btn" type="button" data-trade-codex-window="90d">近 90 天</button>
               </div>
             </div>
-            <div id="tradeCodexSelection" class="trade-codex-selection">将复盘最大记录窗口内的全部交易记录。</div>
+            <div id="tradeCodexSelection" class="trade-codex-selection">将复盘近 90 天最大窗口内的全部交易记录。</div>
             <pre id="tradeCodexResult" class="trade-codex-result">Codex 复盘结果会显示在这里。</pre>
           </div>
 
@@ -537,6 +538,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260629-2" type="module"></script>
+    <script src="/app.js?v=20260629-4" type="module"></script>
   </body>
 </html>

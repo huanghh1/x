@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import {
   getCrawlerState,
   initializeTokenUniverse,
+  refreshLatestKlineTails,
   refreshKlineCacheForSymbol,
   runDailyKlineAudit,
   setDailyAuditNextRunAt,
@@ -48,6 +49,10 @@ app.post("/internal/watchlist/refresh", async (request, response) => {
 
 app.post("/internal/kline/audit", async (_request, response) => {
   response.json(await runDailyKlineAudit({ syncUniverse: true }));
+});
+
+app.post("/internal/kline/tails", async (_request, response) => {
+  response.json(await refreshLatestKlineTails({ force: true }));
 });
 
 app.post("/internal/kline/refresh", async (request, response) => {

@@ -224,7 +224,7 @@ function limitedEvents(events, { limit }) {
 function scopeTitle(scope, symbol, selectedTrade, dataWindow) {
   if (scope === "trade") {
     const source = selectedTrade?.sourceLabel || selectedTrade?.source || "--";
-    return `单笔交易复盘：${source} · ${selectedTrade?.symbol || symbol || "--"}`;
+    return `交易组复盘：${source} · ${selectedTrade?.symbol || symbol || "--"}`;
   }
   if (scope === "symbol") return `币种复盘：${symbol || "--"}`;
   if (scope === "range") {
@@ -242,7 +242,7 @@ export function prepareCodexTradeAnalysis(analysis, options = {}) {
   const selectedTrade = scope === "trade" ? findTradeRow(analysis, options) : null;
 
   if (scope === "trade" && !selectedTrade) {
-    throw requestError("请先在交易记录表中选择一笔单笔交易。");
+    throw requestError("请先在交易记录表中选择一个交易组。");
   }
 
   const requestedSymbol = cleanSymbol(options.symbol || analysis?.symbol || selectedTrade?.symbol || "");
@@ -292,16 +292,18 @@ export function prepareCodexTradeAnalysis(analysis, options = {}) {
   };
 
   const prompt = [
-    "你是我的交易复盘教练。只根据下面 JSON 里的交易数据复盘，不要读取本地文件，不要执行命令，不要索要或猜测任何 API Key/Secret。",
-    "用中文回答，语气直接、具体、短一点，像在帮我复盘一笔真实交易。不要写空话，不要保证收益。",
-    "当 scope 为 trade 时，单笔交易指 selectedTrade 这条交易记录表行，不是单条账单/成交流水；events 只是这条记录的明细上下文。",
+    "你是我的交易复盘教练，只复盘我的交易行为和盈亏归因，不分析这个币未来会不会涨跌。只根据下面 JSON 里的交易数据复盘，不要读取本地文件，不要执行命令，不要索要或猜测任何 API Key/Secret。",
+    "用中文回答，语气直接、具体、短一点，像在帮我复盘一笔真实交易。不要写空话，不要保证收益，不要输出确定性买卖建议。",
+    "当 scope 为 trade 时，交易组指 selectedTrade 这条交易记录表行，不是单条账单/成交流水；events 只是这条记录的明细上下文。",
+    "不要把未实现盈亏当成已实现结果；如果持仓仍未平仓，要把已实现盈亏和当前持仓风险分开说。",
     "",
-    "先判断这笔交易/这个时间段/全部记录是赚在哪里、亏在哪里，再指出最明显的 1-3 个问题，最后给出下次可执行的改法。",
+    "先判断这笔交易/这个时间段/全部记录主要赚在哪里、亏在哪里，是方向、仓位、持仓时间、手续费/资金费，还是执行问题；再按影响大小指出最明显的问题，最后给出下次可执行的规则。",
     "请按这个格式输出，不要额外扩展长篇报告：",
-    "结论：1-3 句话，直接说这次做得好还是不好，主要原因是什么。",
-    "问题：列 1-3 条最明显的问题，必须结合数据，比如净收益、已实现、手续费、资金费、明细数、持仓。",
-    "原因：说明这些问题可能来自什么交易行为。没有足够证据就写“证据不足”，不要硬猜。",
-    "下次怎么做：给 3 条以内具体规则，尽量能直接执行。",
+    "复盘结论：1-3 句话，直接说这次主要赚/亏在哪里，是方向、仓位、持仓时间、手续费/资金费，还是执行问题。",
+    "盈亏归因：列 2-4 条，必须结合净收益、已实现盈亏、手续费、资金费、交易次数、持仓或成交明细。",
+    "主要问题：列 1-3 条最影响结果的问题，按影响大小排序。不要写性格评价，只写交易行为。",
+    "证据不足：如果无法判断入场、止损、加仓、减仓原因，明确写证据不足，不要脑补。",
+    "下次规则：给 3 条以内具体规则，例如单笔亏损限制、加仓条件、止盈/止损条件、手续费过高时减少交易频率。",
     "",
     "<trade_data_json>",
     JSON.stringify(report, null, 2),

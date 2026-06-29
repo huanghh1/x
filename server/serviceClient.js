@@ -37,12 +37,21 @@ export async function requestService(service, pathname, options = {}) {
   }
 }
 
+function isLoopbackAddress(value) {
+  const address = String(value ?? "").replace(/^::ffff:/, "");
+  return address === "127.0.0.1" || address === "::1" || address === "localhost";
+}
+
 export function requireInternalService(request, response, next) {
   if (
     config.service.internalToken &&
     request.get("X-Internal-Service-Token") !== config.service.internalToken
   ) {
     response.status(403).json({ ok: false, error: "forbidden" });
+    return;
+  }
+  if (!config.service.internalToken && !isLoopbackAddress(request.ip) && !isLoopbackAddress(request.socket?.remoteAddress)) {
+    response.status(403).json({ ok: false, error: "internal service API requires INTERNAL_SERVICE_TOKEN for non-local access" });
     return;
   }
   next();

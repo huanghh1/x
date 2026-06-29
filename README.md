@@ -37,7 +37,9 @@ npm start
 | `8789` | 关注池实时 WebSocket |
 | `8790` | 资金费率、OI、热度、解锁、清理、Telegram |
 
-默认 `API_HOST=127.0.0.1`，只允许本机访问页面与公开 API。确实需要局域网访问时再改成 `0.0.0.0`，同时建议设置 `API_MUTATION_TOKEN`；写入、删除、触发扫描和 Codex 复盘等敏感接口只允许本机请求，或带 `X-API-Mutation-Token` 请求头访问。
+默认 `API_HOST=127.0.0.1`，只允许本机访问页面与公开 API。确实需要局域网访问时再改成 `0.0.0.0`，同时设置 `API_MUTATION_TOKEN`；写入、删除、触发扫描、交易分析读取和 Codex 复盘等敏感接口只允许本机请求，或带 `X-API-Mutation-Token` 请求头访问。前端遇到受保护接口返回 403 时会提示输入 token，并保存在当前浏览器本地存储中。
+
+内部服务默认只绑定本机。若确实要把 `SERVICE_HOST` 暴露到非本机地址，必须设置 `INTERNAL_SERVICE_TOKEN`，否则非本机请求会被拒绝。
 
 5. 打开页面：
 
@@ -116,8 +118,9 @@ TRADE_ANALYSIS_CODEX_EVENT_LIMIT=80
 
 当前接口：
 
-- `GET /api/trade-analysis?start=<ISO>&end=<ISO>&symbol=<BTCUSDT>`：返回连接状态、当前持仓、交易所汇总、币种汇总和最多 `TRADE_ANALYSIS_EVENT_LIMIT` 条费用/盈亏流水。
-- `POST /api/trade-analysis/codex`：按全部交易记录、交易记录表里的单笔交易，或指定时间段生成 Codex 复盘；本机或 `API_MUTATION_TOKEN` 保护。
+- `GET /api/trade-analysis?start=<ISO>&end=<ISO>&symbol=<BTCUSDT>`：返回连接状态、当前持仓、交易所汇总、币种汇总和最多 `TRADE_ANALYSIS_EVENT_LIMIT` 条费用/盈亏流水；本机或 `API_MUTATION_TOKEN` 保护。
+- `POST /api/trade-analysis/codex`：按全部交易记录、交易组、选中币种或指定时间段生成 Codex 复盘；本机或 `API_MUTATION_TOKEN` 保护。
+- `POST /api/token-analysis/codex`：按图表里的代币和周期，把 K 线、MA100/MA200、数据质量和页面上下文交给 Codex 做代币分析；本机或 `API_MUTATION_TOKEN` 保护。
 - Binance 使用 USD-M Futures `/fapi/v1/income`、`/fapi/v1/userTrades`、`/fapi/v1/fundingRate` 和 `/fapi/v3/positionRisk`。
 - Hyperliquid 使用 Info endpoint 的 `userFillsByTime`、`userFunding` 和 `clearinghouseState`。
 
@@ -174,13 +177,25 @@ curl -s http://127.0.0.1:8787/api/overview | jq '.overview.totals, .overview.cur
 
 其中 `overview.totals.pendingTokens` 表示 `token_list.fetch_status` 还没有变成 `completed` 的活跃代币数量，适合看 crawler 队列还剩多少。
 
-查看真实 K 线完整性缺口：
+快速查看最新 K 线是否追上：
+
+```bash
+curl -s http://127.0.0.1:8787/api/kline-tail-health | jq '{targetTokenCount, targetIntervalCount, tokens:(.targets | map(.symbol) | unique | .[0:20])}'
+```
+
+手动触发一轮快速追最新 K 线：
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/kline-tails
+```
+
+查看完整 K 线完整性缺口：
 
 ```bash
 curl -s http://127.0.0.1:8787/api/kline-health | jq '{deficientTokenCount, deficientIntervalCount, tokens:(.deficient | map(.symbol) | unique)}'
 ```
 
-其中 `deficientTokenCount` 表示仍有 K 线需要补齐的代币数量，`deficientIntervalCount` 表示这些代币合计还有多少个周期存在缺口。这个结果比 `pendingTokens` 更适合判断 K 线是否真正补齐。
+其中 `targetTokenCount` 适合日常判断最新行情是否落后；`deficientTokenCount` 表示仍有 K 线需要补齐的代币数量，`deficientIntervalCount` 表示这些代币合计还有多少个周期存在缺口。完整检查会扫描更多 K 线，适合排查历史中间缺口。
 
 ## 首次回填提速参数
 
@@ -196,6 +211,11 @@ KLINE_REQUEST_LIMIT=499
 
 # 普通增量补最新 K 线每页条数；50 是 1 weight 档，适合每轮只补少量 K 线
 KLINE_INCREMENTAL_REQUEST_LIMIT=50
+
+# 每轮增量开始前先快速补最新尾部 K 线，避免历史补洞挡住最新行情
+KLINE_TAIL_REFRESH_ENABLED=true
+KLINE_TAIL_REFRESH_LIMIT=2500
+KLINE_TAIL_REFRESH_REQUEST_LIMIT=20
 
 # OI 历史接口官方限制为 1000 requests/5min/IP；默认每轮最多扫 900 个币，超出滚动分批
 OPEN_INTEREST_SCAN_MS=180000

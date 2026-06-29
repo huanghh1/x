@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   collectHotRankFundingSymbols,
+  detectKlineTailGap,
   isNaturalKlineHistoryShortfall,
   normalizeFundingIntervalSnapshotItems,
   normalizeHotRankSeenTokens,
@@ -93,4 +94,31 @@ test("natural kline history shortfall is not treated as a repairable gap", () =>
     }),
     false
   );
+
+  assert.equal(
+    isNaturalKlineHistoryShortfall({
+      cachedCount: 2189,
+      expectedCount: 2190,
+      earliestOpenTime: targetStartTime + intervalMs,
+      firstAvailableOpenTime: targetStartTime + intervalMs,
+      targetStartTime,
+      intervalMsValue: intervalMs
+    }),
+    true
+  );
+});
+
+test("tail kline gaps are detected when latest cached candle is stale", () => {
+  const intervalMs = 60 * 60 * 1000;
+  const latestOpenTime = Date.UTC(2026, 5, 29, 8);
+  const targetEndTime = Date.UTC(2026, 5, 29, 11);
+
+  assert.deepEqual(detectKlineTailGap(latestOpenTime, targetEndTime, intervalMs), {
+    startTime: Date.UTC(2026, 5, 29, 9),
+    endTime: targetEndTime,
+    missingCount: 3
+  });
+
+  assert.equal(detectKlineTailGap(targetEndTime, targetEndTime, intervalMs), null);
+  assert.equal(detectKlineTailGap(null, targetEndTime, intervalMs), null);
 });

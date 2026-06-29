@@ -109,5 +109,8 @@ test("trade scope includes the selected table record and its same-row detail", (
   assert.equal(prepared.report.scope, "trade");
   assert.equal(prepared.report.selectedTrade.symbol, "BTCUSDT");
   assert.deepEqual(prepared.report.events.map((item) => item.id).sort(), ["btc-1", "btc-2"]);
+  assert.match(prepared.prompt, /盈亏归因/);
+  assert.match(prepared.prompt, /未实现盈亏/);
+  assert.match(prepared.prompt, /证据不足/);
   assert.ok(!prepared.prompt.includes("test-secret"));
 });
