@@ -208,15 +208,6 @@ async function searchUnlockSources(symbol, baseAsset) {
         foundDate: found?.date?.toISOString() ?? null,
         context: found?.context ?? null
       });
-      if (found?.date) {
-        return {
-          provider: `search:${source.provider}`,
-          sourceUrl: source.url,
-          status: "available",
-          nextUnlockAt: found.date,
-          rawPayload: { checked, symbol, baseAsset }
-        };
-      }
     } catch (error) {
       checked.push({
         provider: source.provider,
@@ -226,11 +217,14 @@ async function searchUnlockSources(symbol, baseAsset) {
       });
     }
   }
+  const firstUnverifiedDate = checked.find((item) => item.foundDate);
   return {
     provider: "public-search",
-    sourceUrl: sources[1].url,
+    sourceUrl: firstUnverifiedDate?.url ?? sources[1].url,
     status: "undated",
-    error: "已实际检查币安广场、网页搜索和推特搜索，未找到可自动核验的未来解锁日期",
+    error: firstUnverifiedDate
+      ? "公开搜索发现疑似未来解锁日期，但来源未通过官方核验，已按未公布精确日期处理"
+      : "已实际检查币安广场、网页搜索和推特搜索，未找到可自动核验的未来解锁日期",
     rawPayload: { checked, symbol, baseAsset }
   };
 }
@@ -255,10 +249,8 @@ async function fetchOfficial(baseAsset) {
   const searched = await searchUnlockSources(`${baseAsset}USDT`, baseAsset);
   return {
     ...searched,
-    provider: searched.status === "available" ? searched.provider : "binance+public-search",
-    error: searched.status === "available"
-      ? searched.error
-      : "币安已确认代币，但官方渠道尚未发布可核验的精确解锁日期；已实际检查币安广场、网页搜索和推特搜索",
+    provider: "binance+public-search",
+    error: "币安已确认代币，但官方渠道尚未发布可核验的精确解锁日期；已实际检查币安广场、网页搜索和推特搜索",
     rawPayload: {
       ...(searched.rawPayload ?? {}),
       binance: {

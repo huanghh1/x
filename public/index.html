@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260621-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260629-1" />
   </head>
   <body>
     <header class="app-nav">
@@ -20,6 +20,7 @@
           <a class="nav-tab" href="#watchPage" data-nav-page="watch">关注池</a>
           <a class="nav-tab" href="#fundingPage" data-nav-page="funding">资金费率</a>
           <a class="nav-tab" href="#ioPage" data-nav-page="io">OI监控</a>
+          <a class="nav-tab" href="#tradeAnalysisPage" data-nav-page="trade-analysis">交易分析</a>
           <a class="nav-tab" href="#triggerHistoryPage" data-nav-page="trigger-history">触发历史</a>
           <a class="nav-tab" href="#runtimeLogsPage" data-nav-page="runtime-logs">运行日志</a>
         </nav>
@@ -29,6 +30,7 @@
           <option value="watch">关注池</option>
           <option value="funding">资金费率</option>
           <option value="io">OI监控</option>
+          <option value="trade-analysis">交易分析</option>
           <option value="trigger-history">触发历史</option>
           <option value="runtime-logs">运行日志</option>
         </select>
@@ -65,6 +67,14 @@
           <article>
             <span>总监控币种</span>
             <strong id="totalTokensMirror">--</strong>
+          </article>
+          <article>
+            <span>crawler状态</span>
+            <strong id="crawlerStatus">--</strong>
+          </article>
+          <article>
+            <span>最近动作</span>
+            <strong id="crawlerAction">--</strong>
           </article>
         </section>
 
@@ -352,6 +362,170 @@
           </div>
         </section>
 
+        <section id="tradeAnalysisPage" class="section page-section trade-analysis-section" aria-labelledby="tradeAnalysisTitle" data-page-section="trade-analysis">
+          <div class="section-head">
+            <div>
+              <h2 id="tradeAnalysisTitle">交易分析</h2>
+              <p>接入 Hyperliquid 和 Binance 的成交、账单、资金费和当前持仓，自动汇总方向、价格、手续费、资金费率和净收益。</p>
+            </div>
+            <div class="table-actions">
+              <span id="tradeAnalysisStatus" class="selection-count">等待读取</span>
+              <button id="refreshTradeAnalysisBtn" class="ghost-button" type="button">刷新交易分析</button>
+            </div>
+          </div>
+
+          <div class="trade-filter-panel" aria-label="trade analysis filters">
+            <label>
+              <span>开始时间</span>
+              <input id="tradeStartInput" type="datetime-local" />
+            </label>
+            <label>
+              <span>结束时间</span>
+              <input id="tradeEndInput" type="datetime-local" />
+            </label>
+            <label>
+              <span>交易对 / 币种</span>
+              <input id="tradeSymbolInput" type="text" placeholder="BTCUSDT 或 BTC" autocomplete="off" />
+            </label>
+            <div class="trade-filter-actions">
+              <button class="page-size-btn active" type="button" data-trade-window="max">最大记录</button>
+              <button class="page-size-btn" type="button" data-trade-window="90d">近 90 天</button>
+              <button class="page-size-btn" type="button" data-trade-window="30d">近 30 天</button>
+              <button id="applyTradeFilterBtn" class="ghost-button primary" type="button">应用筛选</button>
+            </div>
+          </div>
+
+          <div id="tradeConnectionCards" class="trade-connection-grid">
+            <div class="heat-empty">等待配置检查。</div>
+          </div>
+
+          <div class="trade-summary-grid" aria-label="trade analysis summary">
+            <article>
+              <span>净收益</span>
+              <strong id="tradeNetPnl">--</strong>
+            </article>
+            <article>
+              <span>已实现盈亏</span>
+              <strong id="tradeRealizedPnl">--</strong>
+            </article>
+            <article>
+              <span>手续费成本</span>
+              <strong id="tradeFeeCost">--</strong>
+            </article>
+            <article>
+              <span>资金费</span>
+              <strong id="tradeFundingPnl">--</strong>
+            </article>
+          </div>
+
+          <div id="tradeSourceCards" class="trade-source-grid">
+            <div class="heat-empty">暂无交易所汇总。</div>
+          </div>
+
+          <div class="trade-codex-panel">
+            <div class="trade-codex-head">
+              <div>
+                <h3>Codex 复盘</h3>
+              </div>
+              <span id="tradeCodexStatus" class="selection-count">等待生成</span>
+            </div>
+            <div class="trade-codex-controls">
+              <button class="page-size-btn active" type="button" data-trade-codex-scope="all">全部交易记录</button>
+              <button class="page-size-btn" type="button" data-trade-codex-scope="trade">单笔交易</button>
+              <button class="page-size-btn" type="button" data-trade-codex-scope="range">时间段</button>
+              <button id="runTradeCodexBtn" class="ghost-button primary" type="button">生成 Codex 复盘</button>
+            </div>
+            <label class="trade-codex-picker">
+              <span>选择单笔交易记录</span>
+              <select id="tradeSymbolSelect">
+                <option value="">暂无可选交易记录</option>
+              </select>
+            </label>
+            <div id="tradeCodexRangeControls" class="trade-codex-range-controls" hidden>
+              <span>时间范围</span>
+              <div class="trade-codex-window-buttons">
+                <button class="page-size-btn" type="button" data-trade-codex-window="24h">近 24 小时</button>
+                <button class="page-size-btn" type="button" data-trade-codex-window="7d">近 7 天</button>
+                <button class="page-size-btn" type="button" data-trade-codex-window="30d">近 30 天</button>
+                <button class="page-size-btn" type="button" data-trade-codex-window="90d">近 90 天</button>
+              </div>
+            </div>
+            <div id="tradeCodexSelection" class="trade-codex-selection">将复盘最大记录窗口内的全部交易记录。</div>
+            <pre id="tradeCodexResult" class="trade-codex-result">Codex 复盘结果会显示在这里。</pre>
+          </div>
+
+          <div class="trade-position-head">
+            <div>
+              <h3>当前持仓</h3>
+              <p>未平仓仓位不受上方时间筛选影响；这里展示当前数量、名义价值和未实现盈亏。</p>
+            </div>
+            <div class="trade-position-metrics">
+              <span>持仓数 <b id="tradePositionCount">--</b></span>
+              <span>名义价值 <b id="tradePositionNotional">--</b></span>
+              <span>未实现盈亏 <b id="tradePositionPnl">--</b></span>
+            </div>
+          </div>
+
+          <div class="table-card trade-position-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源</th>
+                  <th>币种</th>
+                  <th>方向</th>
+                  <th>数量</th>
+                  <th>开仓均价</th>
+                  <th>标记价</th>
+                  <th>名义价值</th>
+                  <th>未实现盈亏</th>
+                  <th>杠杆</th>
+                  <th>强平价</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="tradePositionRows">
+                <tr><td colspan="11" class="empty">等待持仓数据。</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-card trade-symbol-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源</th>
+                  <th>币种</th>
+                  <th>开始</th>
+                  <th>结束</th>
+                  <th>净收益</th>
+                  <th>已实现</th>
+                  <th>手续费</th>
+                  <th>资金费</th>
+                </tr>
+              </thead>
+              <tbody id="tradeSymbolRows">
+                <tr><td colspan="8" class="empty">等待交易数据。</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="pagination-bar" aria-label="trade symbol pagination">
+            <span id="tradeSymbolPaginationSummary">--</span>
+            <div class="page-size">
+              <span>每页</span>
+              <button class="page-size-btn active" type="button" data-trade-symbol-pagesize="20">20</button>
+              <button class="page-size-btn" type="button" data-trade-symbol-pagesize="50">50</button>
+              <button class="page-size-btn" type="button" data-trade-symbol-pagesize="100">100</button>
+            </div>
+            <div class="page-buttons">
+              <button id="prevTradeSymbolPageBtn" class="ghost-button" type="button">上一页</button>
+              <strong id="tradeSymbolPageIndicator">1 / 1</strong>
+              <button id="nextTradeSymbolPageBtn" class="ghost-button" type="button">下一页</button>
+            </div>
+          </div>
+
+        </section>
+
         <section id="rules" class="section rules-inline" data-page-section="signals">
           <h2>后期更新策略</h2>
           <p>前期全量 K 线缓存完成后，后续只需要补每个周期最新未入库的 K 线，并按权重限速轮询；全市场秒级实时 K 线不建议用 REST 暴力轮询。</p>
@@ -363,6 +537,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260621-2" type="module"></script>
+    <script src="/app.js?v=20260629-2" type="module"></script>
   </body>
 </html>

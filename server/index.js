@@ -28,6 +28,8 @@ import {
 import { getHotRank } from "./hotRank.js";
 import { cleanupRuntimeLogFiles, RUNTIME_ERROR_LOG_FILES, RUNTIME_LOG_FILES, runtimeLogPath } from "./runtimeLogs.js";
 import { telegramState } from "./telegram.js";
+import { getTradeAnalysis } from "./tradeAnalysis.js";
+import { normalizeCodexScope, prepareCodexTradeAnalysis, runCodexTradeAnalysis } from "./codexTradeAnalysis.js";
 import { requestService, serviceStates, serviceUrl } from "./serviceClient.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,6 +38,24 @@ const app = express();
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.resolve(__dirname, "../public")));
+
+function isLoopbackAddress(value) {
+  const address = String(value ?? "").replace(/^::ffff:/, "");
+  return address === "127.0.0.1" || address === "::1" || address === "localhost";
+}
+
+function requireLocalMutation(request, response, next) {
+  const configuredToken = config.app.mutationToken;
+  if (configuredToken && request.get("X-API-Mutation-Token") === configuredToken) {
+    next();
+    return;
+  }
+  if (isLoopbackAddress(request.ip) || isLoopbackAddress(request.socket?.remoteAddress)) {
+    next();
+    return;
+  }
+  response.status(403).json({ ok: false, error: "mutating API is only available from localhost" });
+}
 
 app.get("/api/health", async (_request, response) => {
   try {
@@ -285,7 +305,7 @@ app.get("/api/runtime-logs", async (request, response) => {
   }
 });
 
-app.delete("/api/runtime-logs", async (request, response) => {
+app.delete("/api/runtime-logs", requireLocalMutation, async (request, response) => {
   try {
     const requestedFiles = Array.isArray(request.body?.files)
       ? Array.from(new Set(request.body.files.map((file) => String(file ?? "")).filter(Boolean)))
@@ -306,7 +326,7 @@ app.delete("/api/runtime-logs", async (request, response) => {
   }
 });
 
-app.post("/api/bootstrap", async (_request, response) => {
+app.post("/api/bootstrap", requireLocalMutation, async (_request, response) => {
   try {
     response.json(await requestService("crawler", "/internal/bootstrap", { method: "POST", body: "{}" }));
   } catch (error) {
@@ -314,15 +334,15 @@ app.post("/api/bootstrap", async (_request, response) => {
   }
 });
 
-app.post("/api/crawl/start", async (_request, response) => {
+app.post("/api/crawl/start", requireLocalMutation, async (_request, response) => {
   response.json(await requestService("crawler", "/internal/crawl/start", { method: "POST", body: "{}" }));
 });
 
-app.post("/api/crawl/stop", async (_request, response) => {
+app.post("/api/crawl/stop", requireLocalMutation, async (_request, response) => {
   response.json(await requestService("crawler", "/internal/crawl/stop", { method: "POST", body: "{}" }));
 });
 
-app.post("/api/kline-audit", async (_request, response) => {
+app.post("/api/kline-audit", requireLocalMutation, async (_request, response) => {
   response.json(await requestService("crawler", "/internal/kline/audit", {
     method: "POST",
     body: "{}",
@@ -352,6 +372,63 @@ app.get("/api/overview", async (_request, response) => {
     telegram: { ...telegramState(), bot: services.scheduler?.telegramBot ?? null },
     database: "connected"
   });
+});
+
+app.get("/api/trade-analysis", async (request, response) => {
+  try {
+    response.json(await getTradeAnalysis(config, {
+      start: request.query.start,
+      end: request.query.end,
+      symbol: request.query.symbol,
+      page: request.query.page,
+      pageSize: request.query.pageSize
+    }));
+  } catch (error) {
+    console.error("get trade analysis failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/trade-analysis/codex", requireLocalMutation, async (request, response) => {
+  try {
+    const body = request.body ?? {};
+    const scope = normalizeCodexScope(body.scope);
+    if (scope === "trade" && !body.tradeKey && (!body.source || !body.symbol)) {
+      response.status(400).json({ ok: false, error: "请先在交易记录表中选择一笔单笔交易。" });
+      return;
+    }
+    if (scope === "symbol" && !body.symbol) {
+      response.status(400).json({ ok: false, error: "请先选择一个币种汇总，或输入币种。" });
+      return;
+    }
+    const analysis = await getTradeAnalysis(config, {
+      start: scope === "all" ? "" : body.start,
+      end: scope === "all" ? "" : body.end,
+      symbol: scope === "range" || scope === "symbol" || scope === "trade" ? body.symbol : ""
+    });
+    const prepared = prepareCodexTradeAnalysis(analysis, {
+      scope: body.scope,
+      symbol: body.symbol,
+      source: body.source,
+      tradeKey: body.tradeKey,
+      contextEventLimit: config.tradeAnalysis.codex.contextEventLimit
+    });
+    const codexResult = await runCodexTradeAnalysis(prepared.prompt, {
+      command: config.tradeAnalysis.codex.command,
+      timeoutMs: config.tradeAnalysis.codex.timeoutMs
+    });
+    response.json({
+      ok: true,
+      generatedAt: new Date().toISOString(),
+      scope: prepared.report.scope,
+      title: prepared.report.title,
+      report: prepared.report,
+      analysis: codexResult.text
+    });
+  } catch (error) {
+    console.error("run codex trade analysis failed", error);
+    response.status(error.statusCode || 500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.get("/api/signals", async (request, response) => {
@@ -446,7 +523,7 @@ app.get("/api/hot-rank", async (request, response) => {
   }
 });
 
-app.post("/api/funding-interval/check", async (_request, response) => {
+app.post("/api/funding-interval/check", requireLocalMutation, async (_request, response) => {
   try {
     response.json(await requestService("scheduler", "/internal/funding/check", { method: "POST", body: "{}" }));
   } catch (error) {
@@ -457,7 +534,7 @@ app.post("/api/funding-interval/check", async (_request, response) => {
   }
 });
 
-app.post("/api/open-interest/check", async (_request, response) => {
+app.post("/api/open-interest/check", requireLocalMutation, async (_request, response) => {
   try {
     response.json(await requestService("scheduler", "/internal/open-interest/check", { method: "POST", body: "{}" }));
   } catch (error) {
@@ -502,7 +579,7 @@ app.get("/api/watchlist/events", async (request, response) => {
   request.on("close", () => stream.destroy());
 });
 
-app.post("/api/watchlist", async (request, response) => {
+app.post("/api/watchlist", requireLocalMutation, async (request, response) => {
   try {
     const items = await upsertWatchlistItem(request.body ?? {});
     const symbol = sanitizeSymbol(request.body?.symbol);
@@ -526,7 +603,7 @@ app.post("/api/watchlist", async (request, response) => {
   }
 });
 
-app.delete("/api/watchlist/:symbol", async (request, response) => {
+app.delete("/api/watchlist/:symbol", requireLocalMutation, async (request, response) => {
   const deleted = await deleteWatchlistItem(request.params.symbol);
   void requestService("realtime", "/internal/refresh", { method: "POST", body: "{}" })
     .catch((error) => console.error("watchlist realtime refresh failed", error));
@@ -537,7 +614,7 @@ app.get("/api/watchlist/:symbol/unlock", async (request, response) => {
   response.json({ ok: true, item: await getTokenUnlockCache(request.params.symbol) });
 });
 
-app.post("/api/watchlist/unlock/refresh", async (_request, response) => {
+app.post("/api/watchlist/unlock/refresh", requireLocalMutation, async (_request, response) => {
   response.json(await requestService("scheduler", "/internal/unlock/check", {
     method: "POST",
     body: "{}",
@@ -692,7 +769,7 @@ app.get("/api/trigger-history", async (request, response) => {
   }
 });
 
-app.delete("/api/trigger-history/:id", async (request, response) => {
+app.delete("/api/trigger-history/:id", requireLocalMutation, async (request, response) => {
   try {
     const deleted = await deleteTriggerHistory(request.params.id);
     response.json({ ok: true, deleted });
@@ -702,7 +779,7 @@ app.delete("/api/trigger-history/:id", async (request, response) => {
   }
 });
 
-app.delete("/api/trigger-history", async (request, response) => {
+app.delete("/api/trigger-history", requireLocalMutation, async (request, response) => {
   try {
     const ids = Array.isArray(request.body?.ids) ? request.body.ids : [];
     const deleted = ids.length ? await deleteTriggerHistory(ids) : await clearTriggerHistory();

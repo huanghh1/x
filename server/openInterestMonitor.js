@@ -208,7 +208,7 @@ export function startOpenInterestMonitor() {
   return getOpenInterestMonitorState();
 }
 
-function selectScanBatch(tokens) {
+export function selectScanBatch(tokens) {
   if (!tokens.length) {
     monitorState.scanCursor = 0;
     return { batch: [], startOffset: 0, deferredCount: 0 };
@@ -243,13 +243,13 @@ function selectScanBatch(tokens) {
   }
   const normalLimit = limit - retryBatch.length;
   const normalBatch = [];
-  for (const token of tokens) {
+  const startOffset = Math.max(0, Math.min(tokens.length - 1, monitorState.scanCursor % tokens.length));
+  for (let offset = 0; offset < tokens.length && normalBatch.length < normalLimit; offset += 1) {
+    const token = tokens[(startOffset + offset) % tokens.length];
     if (!retrySymbols.has(token.symbol)) normalBatch.push(token);
-    if (normalBatch.length >= normalLimit) break;
   }
   const batch = [...retryBatch, ...normalBatch];
-  const startOffset = 0;
-  monitorState.scanCursor = (monitorState.scanCursor + normalLimit) % tokens.length;
+  monitorState.scanCursor = (startOffset + Math.max(1, normalLimit)) % tokens.length;
   return {
     batch,
     startOffset,

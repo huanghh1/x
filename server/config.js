@@ -14,13 +14,6 @@ function boolEnv(name, fallback) {
   return value === "true";
 }
 
-function listEnv(name) {
-  return String(process.env[name] ?? "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 const intervalLookbackDays = {
   "15m": numberEnv("KLINE_15M_LOOKBACK_DAYS", 60),
   "1h": numberEnv("KLINE_1H_LOOKBACK_DAYS", 183),
@@ -37,13 +30,6 @@ const retentionLimits = {
 
 const openInterestScanIntervalMs = numberEnv("OPEN_INTEREST_SCAN_MS", 3 * 60 * 1000);
 const realtimeStreamLimit = Math.max(5, Math.min(1024, numberEnv("REALTIME_STREAM_LIMIT", 900)));
-
-const twitterTokenPool = Array.from(new Set([
-  ...listEnv("OPENNEWS_TOKENS"),
-  ...listEnv("TWITTER_TOKENS"),
-  process.env.TWITTER_TOKEN?.trim() ?? "",
-  process.env.OPENNEWS_TOKEN?.trim() ?? ""
-].filter(Boolean)));
 
 const SERVICE_ROLES = new Set(["api", "crawler", "realtime", "scheduler"]);
 const requestedServiceRole = process.env.SERVICE_ROLE?.trim() || "api";
@@ -64,7 +50,7 @@ export const config = {
   service: {
     role: serviceRole,
     host: process.env.SERVICE_HOST?.trim() || "127.0.0.1",
-    apiHost: process.env.API_HOST?.trim() || "0.0.0.0",
+    apiHost: process.env.API_HOST?.trim() || "127.0.0.1",
     apiPort: numberEnv("API_PORT", 8787),
     crawlerPort: numberEnv("CRAWLER_PORT", 8788),
     realtimePort: numberEnv("REALTIME_PORT", 8789),
@@ -76,7 +62,7 @@ export const config = {
     host: process.env.MYSQL_HOST ?? "127.0.0.1",
     port: numberEnv("MYSQL_PORT", 3306),
     user: process.env.MYSQL_USER ?? "root",
-    password: process.env.MYSQL_PASSWORD ?? "Wozh138286@",
+    password: process.env.MYSQL_PASSWORD ?? "",
     database: process.env.MYSQL_DATABASE ?? "binance_ma_monitor",
     connectionLimit,
     maxIdle: Math.min(connectionLimit, numberEnv("MYSQL_MAX_IDLE", defaultConnectionLimits[serviceRole] ?? 3)),
@@ -99,6 +85,26 @@ export const config = {
     requestRetries: numberEnv("BINANCE_REQUEST_RETRIES", 4),
     retryDelayMs: numberEnv("BINANCE_RETRY_DELAY_MS", 1000),
     requestWeightBudgetPerMinute: numberEnv("BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE", 1800)
+  },
+  tradeAnalysis: {
+    requestTimeoutMs: numberEnv("TRADE_ANALYSIS_REQUEST_TIMEOUT_MS", numberEnv("REQUEST_TIMEOUT_MS", 15000)),
+    defaultLookbackDays: Math.max(1, numberEnv("TRADE_ANALYSIS_DEFAULT_LOOKBACK_DAYS", 90)),
+    maxEventRows: Math.max(100, numberEnv("TRADE_ANALYSIS_EVENT_LIMIT", 5000)),
+    codex: {
+      command: process.env.CODEX_CLI_PATH?.trim() || "/Applications/Codex.app/Contents/Resources/codex",
+      timeoutMs: Math.max(30_000, numberEnv("TRADE_ANALYSIS_CODEX_TIMEOUT_MS", 180_000)),
+      contextEventLimit: Math.max(10, Math.min(180, numberEnv("TRADE_ANALYSIS_CODEX_EVENT_LIMIT", 80)))
+    },
+    binance: {
+      apiKey: process.env.BINANCE_API_KEY?.trim() ?? "",
+      apiSecret: process.env.BINANCE_API_SECRET?.trim() ?? "",
+      futuresBaseUrl: process.env.BINANCE_FUTURES_BASE_URL ?? "https://fapi.binance.com",
+      recvWindowMs: numberEnv("BINANCE_RECV_WINDOW_MS", 5000)
+    },
+    hyperliquid: {
+      walletAddress: process.env.HYPERLIQUID_WALLET_ADDRESS?.trim() ?? "",
+      infoBaseUrl: process.env.HYPERLIQUID_INFO_BASE_URL?.trim() || "https://api.hyperliquid.xyz/info"
+    }
   },
   crawler: {
     autoStart: boolEnv("AUTO_START_CRAWLER", true),
@@ -141,6 +147,7 @@ export const config = {
   fundingMonitor: {
     enabled: boolEnv("FUNDING_INTERVAL_MONITOR_ENABLED", true),
     scanIntervalMs: numberEnv("FUNDING_INTERVAL_SCAN_MS", 60 * 60 * 1000),
+    alertPollMs: Math.max(10 * 1000, numberEnv("FUNDING_INTERVAL_ALERT_POLL_MS", 60 * 1000)),
     initialDelayMs: numberEnv("FUNDING_INTERVAL_INITIAL_DELAY_MS", 10 * 1000),
     targetIntervalHours: numberEnv("FUNDING_INTERVAL_TARGET_HOURS", 1),
     defaultIntervalHours: numberEnv("FUNDING_INTERVAL_DEFAULT_HOURS", 4)
@@ -169,19 +176,8 @@ export const config = {
     tokenLimit: Math.max(1, Math.min(Math.floor(realtimeStreamLimit / 5), numberEnv("REALTIME_KLINE_TOKEN_LIMIT", Math.floor(realtimeStreamLimit / 5))))
   },
   app: {
-    publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() ?? ""
-  },
-  twitter: {
-    token: process.env.TWITTER_TOKEN?.trim() ?? process.env.OPENNEWS_TOKEN?.trim() ?? "",
-    tokens: twitterTokenPool,
-    heatEnabled: false,
-    tokenCooldownMs: numberEnv("TWITTER_TOKEN_COOLDOWN_MS", 10 * 60 * 1000),
-    heatCacheMs: numberEnv("TWITTER_HEAT_CACHE_MS", 30 * 60 * 1000),
-    failureCacheMs: numberEnv("TWITTER_HEAT_FAILURE_CACHE_MS", 2 * 60 * 1000),
-    maxFreshPerRank: numberEnv("TWITTER_HEAT_MAX_FRESH_PER_RANK", 8),
-    concurrentRequests: numberEnv("TWITTER_HEAT_CONCURRENT_REQUESTS", 1),
-    requestSpacingMs: Math.max(0, numberEnv("TWITTER_REQUEST_SPACING_MS", 1600)),
-    timeoutMs: numberEnv("TWITTER_REQUEST_TIMEOUT_MS", 12000)
+    publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() ?? "",
+    mutationToken: process.env.API_MUTATION_TOKEN?.trim() ?? ""
   },
   hotRank: {
     activeMs: numberEnv("HOT_RANK_ACTIVE_MS", Math.max(30 * 60 * 1000, numberEnv("BINANCE_HOT_RANK_CACHE_MS", 5 * 60 * 1000) * 3)),
@@ -206,8 +202,6 @@ export const config = {
     enabled: boolEnv("TELEGRAM_ALERTS_ENABLED", false),
     botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "",
     chatId: process.env.TELEGRAM_CHAT_ID?.trim() ?? "",
-    level1Enabled: boolEnv("TELEGRAM_LEVEL1_ENABLED", false),
-    level2Enabled: boolEnv("TELEGRAM_LEVEL2_ENABLED", false),
     timeoutMs: numberEnv("TELEGRAM_REQUEST_TIMEOUT_MS", 12000),
     retries: Math.max(1, numberEnv("TELEGRAM_REQUEST_RETRIES", 4)),
     retryDelayMs: Math.max(250, numberEnv("TELEGRAM_RETRY_DELAY_MS", 900)),

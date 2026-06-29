@@ -16,15 +16,22 @@ import { sendFundingIntervalTelegram } from "./telegram.js";
 
 const BASELINE_TASK = "funding_interval_monitor_baseline";
 const CHECK_TASK = "funding_interval_monitor";
+const ALERT_TASK = "funding_interval_pending_alerts";
 
-let timer = null;
+let scanTimer = null;
+let alertTimer = null;
 
 const fundingMonitorState = {
   running: false,
+  alertRunning: false,
   lastStartedAt: null,
   lastSuccessAt: null,
   lastError: null,
   nextRunAt: null,
+  lastAlertStartedAt: null,
+  lastAlertSuccessAt: null,
+  lastAlertError: null,
+  nextAlertRunAt: null,
   lastSeenCount: 0,
   lastMissingCount: 0,
   lastPendingCount: 0,
@@ -40,24 +47,44 @@ export function hasReliableFundingIntervalSnapshot(fundingInfo, currentRates) {
   return Array.isArray(fundingInfo) && Array.isArray(currentRates) && (fundingInfo.length > 0 || currentRates.length > 0);
 }
 
-function scheduleNext(delayMs) {
+function scheduleNextScan(delayMs) {
   if (!config.fundingMonitor.enabled) {
     fundingMonitorState.nextRunAt = null;
     return;
   }
-  if (timer) clearTimeout(timer);
+  if (scanTimer) clearTimeout(scanTimer);
   const safeDelay = Math.max(1000, Number(delayMs) || config.fundingMonitor.scanIntervalMs);
   fundingMonitorState.nextRunAt = new Date(Date.now() + safeDelay).toISOString();
-  timer = setTimeout(async () => {
+  scanTimer = setTimeout(async () => {
     try {
       await runFundingIntervalCheck();
     } catch (error) {
       console.error("funding interval monitor failed", error);
     } finally {
-      scheduleNext(config.fundingMonitor.scanIntervalMs);
+      scheduleNextScan(config.fundingMonitor.scanIntervalMs);
     }
   }, safeDelay);
-  timer.unref?.();
+  scanTimer.unref?.();
+}
+
+function scheduleNextAlert(delayMs) {
+  if (!config.fundingMonitor.enabled) {
+    fundingMonitorState.nextAlertRunAt = null;
+    return;
+  }
+  if (alertTimer) clearTimeout(alertTimer);
+  const safeDelay = Math.max(1000, Number(delayMs) || config.fundingMonitor.alertPollMs);
+  fundingMonitorState.nextAlertRunAt = new Date(Date.now() + safeDelay).toISOString();
+  alertTimer = setTimeout(async () => {
+    try {
+      await runFundingPendingAlertCheck();
+    } catch (error) {
+      console.error("funding interval pending alert check failed", error);
+    } finally {
+      scheduleNextAlert(config.fundingMonitor.alertPollMs);
+    }
+  }, safeDelay);
+  alertTimer.unref?.();
 }
 
 function settledValue(result, fallback) {
@@ -73,6 +100,7 @@ export function getFundingIntervalMonitorState() {
   return {
     enabled: config.fundingMonitor.enabled,
     scanIntervalMs: config.fundingMonitor.scanIntervalMs,
+    alertPollMs: config.fundingMonitor.alertPollMs,
     targetIntervalHours: config.fundingMonitor.targetIntervalHours,
     defaultIntervalHours: config.fundingMonitor.defaultIntervalHours,
     ...fundingMonitorState
@@ -81,9 +109,77 @@ export function getFundingIntervalMonitorState() {
 
 export function startFundingIntervalMonitor() {
   if (!config.fundingMonitor.enabled) return getFundingIntervalMonitorState();
-  if (timer) return getFundingIntervalMonitorState();
-  scheduleNext(config.fundingMonitor.initialDelayMs);
+  if (!scanTimer) scheduleNextScan(config.fundingMonitor.initialDelayMs);
+  if (!alertTimer) scheduleNextAlert(config.fundingMonitor.initialDelayMs);
   return getFundingIntervalMonitorState();
+}
+
+async function sendPendingFundingIntervalAlerts({ recordState = true } = {}) {
+  if (fundingMonitorState.alertRunning) {
+    return {
+      skipped: true,
+      reason: "Funding interval pending alert check already running",
+      pendingCount: fundingMonitorState.lastPendingCount,
+      sentSymbols: [],
+      skippedAlerts: []
+    };
+  }
+
+  fundingMonitorState.alertRunning = true;
+  fundingMonitorState.lastAlertStartedAt = isoNow();
+  fundingMonitorState.lastAlertError = null;
+
+  try {
+    const pendingAlerts = await listPendingFundingIntervalAlerts(config.fundingMonitor.targetIntervalHours);
+    const sentSymbols = [];
+    const skippedAlerts = [];
+
+    for (const alert of pendingAlerts) {
+      try {
+        const context = await getSignalCorrelationContext(alert.symbol);
+        const result = await sendFundingIntervalTelegram(alert, context);
+        if (result.skipped) {
+          skippedAlerts.push(`${alert.symbol}: ${result.reason}`);
+        } else {
+          sentSymbols.push(alert.symbol);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        skippedAlerts.push(`${alert.symbol}: ${message}`);
+        console.error("funding interval telegram alert failed", alert.symbol, error);
+      }
+    }
+
+    if (sentSymbols.length) await markFundingIntervalAlertSent(sentSymbols);
+
+    fundingMonitorState.lastAlertSuccessAt = isoNow();
+    fundingMonitorState.lastPendingCount = pendingAlerts.length;
+    fundingMonitorState.lastAlertedSymbols = sentSymbols;
+    fundingMonitorState.lastSkippedAlerts = skippedAlerts.slice(0, 20);
+
+    const result = {
+      ok: true,
+      pendingCount: pendingAlerts.length,
+      sentSymbols,
+      skippedAlerts: fundingMonitorState.lastSkippedAlerts
+    };
+    if (recordState) await markMaintenanceState(ALERT_TASK, JSON.stringify(result));
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    fundingMonitorState.lastAlertError = message;
+    if (recordState) await markMaintenanceState(ALERT_TASK, `failed: ${message}`).catch(() => {});
+    throw error;
+  } finally {
+    fundingMonitorState.alertRunning = false;
+  }
+}
+
+export async function runFundingPendingAlertCheck({ force = false } = {}) {
+  if (!config.fundingMonitor.enabled && !force) {
+    return { skipped: true, reason: "Funding interval monitor disabled" };
+  }
+  return sendPendingFundingIntervalAlerts();
 }
 
 export async function runFundingIntervalCheck({ force = false } = {}) {
@@ -195,37 +291,17 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
       );
     }
 
-    const pendingAlerts = baselineOnly
-      ? []
-      : await listPendingFundingIntervalAlerts(config.fundingMonitor.targetIntervalHours);
-    const sentSymbols = [];
-    const skippedAlerts = [];
-
-    for (const alert of pendingAlerts) {
-      try {
-        const context = await getSignalCorrelationContext(alert.symbol);
-        const result = await sendFundingIntervalTelegram(alert, context);
-        if (result.skipped) {
-          skippedAlerts.push(`${alert.symbol}: ${result.reason}`);
-        } else {
-          sentSymbols.push(alert.symbol);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        skippedAlerts.push(`${alert.symbol}: ${message}`);
-        console.error("funding interval telegram alert failed", alert.symbol, error);
-      }
-    }
-
-    if (sentSymbols.length) await markFundingIntervalAlertSent(sentSymbols);
+    const alertResult = baselineOnly
+      ? { pendingCount: 0, sentSymbols: [], skippedAlerts: [] }
+      : await sendPendingFundingIntervalAlerts({ recordState: false });
 
     fundingMonitorState.lastSuccessAt = isoNow();
     fundingMonitorState.lastSeenCount = snapshot.seenCount;
     fundingMonitorState.lastMissingCount = missingCount;
-    fundingMonitorState.lastPendingCount = pendingAlerts.length;
-    fundingMonitorState.lastAlertedSymbols = sentSymbols;
+    fundingMonitorState.lastPendingCount = alertResult.pendingCount ?? 0;
+    fundingMonitorState.lastAlertedSymbols = alertResult.sentSymbols ?? [];
     fundingMonitorState.lastSkippedAlerts = [
-      ...skippedAlerts,
+      ...(alertResult.skippedAlerts ?? []),
       ...(currentRatesError ? [`premiumIndex: ${currentRatesError}`] : [])
     ].slice(0, 20);
 
@@ -234,8 +310,8 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
       baselineOnly,
       seenCount: snapshot.seenCount,
       missingCount,
-      pendingCount: pendingAlerts.length,
-      sentSymbols,
+      pendingCount: alertResult.pendingCount ?? 0,
+      sentSymbols: alertResult.sentSymbols ?? [],
       skippedAlerts: fundingMonitorState.lastSkippedAlerts
     };
     await markMaintenanceState(CHECK_TASK, JSON.stringify(result));

@@ -210,6 +210,48 @@ CREATE TABLE IF NOT EXISTS signal_trigger_history (
   KEY idx_trigger_type_time_id (trigger_type, trigger_time, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 交易历史事件表：保存交易所可抓取窗口内拉到的标准化成交/账单/资金费事件，后续从库里分页复盘
+CREATE TABLE IF NOT EXISTS trade_event_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  event_key VARCHAR(191) NOT NULL,
+  source VARCHAR(32) NOT NULL,
+  source_label VARCHAR(80) NULL,
+  symbol VARCHAR(64) NOT NULL,
+  asset VARCHAR(32) NULL,
+  event_time_ms BIGINT UNSIGNED NULL,
+  event_time DATETIME(3) NULL,
+  event_type VARCHAR(64) NULL,
+  side VARCHAR(32) NULL,
+  direction VARCHAR(80) NULL,
+  position_side VARCHAR(32) NULL,
+  quantity DECIMAL(38,12) NULL,
+  price DECIMAL(38,12) NULL,
+  mark_price DECIMAL(38,12) NULL,
+  notional DECIMAL(38,12) NULL,
+  funding_rate DECIMAL(24,12) NULL,
+  realized_pnl DECIMAL(38,12) NOT NULL DEFAULT 0,
+  unrealized_pnl DECIMAL(38,12) NOT NULL DEFAULT 0,
+  funding DECIMAL(38,12) NOT NULL DEFAULT 0,
+  commission DECIMAL(38,12) NOT NULL DEFAULT 0,
+  fee_asset VARCHAR(32) NULL,
+  net DECIMAL(38,12) NOT NULL DEFAULT 0,
+  order_id VARCHAR(128) NULL,
+  trade_id VARCHAR(128) NULL,
+  liquidity VARCHAR(32) NULL,
+  note VARCHAR(1000) NULL,
+  pnl_included TINYINT(1) NOT NULL DEFAULT 1,
+  raw_type VARCHAR(64) NULL,
+  details JSON NULL,
+  first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_trade_event (event_key),
+  KEY idx_trade_time_id (event_time_ms, id),
+  KEY idx_trade_source_time (source, event_time_ms, id),
+  KEY idx_trade_symbol_time (symbol, event_time_ms, id),
+  KEY idx_trade_source_symbol_time (source, symbol, event_time_ms, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- OI（Open Interest，持仓量）监控表
 CREATE TABLE IF NOT EXISTS open_interest_monitor (
   symbol VARCHAR(32) NOT NULL,

@@ -37,6 +37,13 @@ const crawlerState = {
   currentInterval: null,
   activeTokens: [],
   workerCount: config.crawler.concurrentTokens,
+  runMode: "idle",
+  runReason: null,
+  runStartedAt: null,
+  runCompletedAt: null,
+  incrementalCutoffAt: null,
+  includeIncremental: false,
+  processedTokenCount: 0,
   lastAction: "等待启动",
   lastError: null,
   startedAt: null,
@@ -159,7 +166,15 @@ export async function runDailyKlineAudit({ syncUniverse = true } = {}) {
     ]);
     const deficientSymbols = [...new Set(report.deficient.map((item) => item.symbol))];
     const queuedTokenCount = await queueActiveTokensForKlineAudit(deficientSymbols);
-    await startCrawler();
+    if (deficientSymbols.length > 0) {
+      await startCrawler({
+        mode: "repair",
+        reason: "K线完整性审计修复",
+        includeIncremental: false
+      });
+    } else if (!crawlerState.running) {
+      crawlerState.lastAction = "K线完整性审计完成，未发现需要修复的缺口";
+    }
     const result = {
       ok: true,
       universeCount: universe?.count ?? null,
@@ -464,9 +479,9 @@ export async function refreshKlineCacheForSymbol(symbol, intervalCode) {
   }
 }
 
-async function runCrawlerWorker(workerId) {
+async function runCrawlerWorker(workerId, { incrementalCutoffAt = null } = {}) {
   while (crawlerState.running) {
-    const token = await claimNextTokenForFetch();
+    const token = await claimNextTokenForFetch({ incrementalCutoffAt });
     if (!token) return;
 
     try {
@@ -477,6 +492,7 @@ async function runCrawlerWorker(workerId) {
       crawlerState.lastAction = `${token.symbol} 抓取中断，保留断点`;
       await markTokenPartial(token.id, message);
     } finally {
+      crawlerState.processedTokenCount += 1;
       setWorkerActivity(workerId, null);
     }
 
@@ -490,16 +506,30 @@ async function runCrawlerWorker(workerId) {
   }
 }
 
-export async function startCrawler() {
+export async function startCrawler({ mode = "incremental", reason = null, includeIncremental = true } = {}) {
   if (crawlerState.running) return crawlerState;
+  const runStartedAt = new Date();
+  const incrementalCutoffAt = includeIncremental
+    ? new Date(runStartedAt.getTime() - config.crawler.incrementalRefreshMs)
+    : null;
   crawlerState.running = true;
   crawlerState.startedAt = crawlerState.startedAt ?? Date.now();
+  crawlerState.runMode = mode;
+  crawlerState.runReason = reason;
+  crawlerState.runStartedAt = runStartedAt.toISOString();
+  crawlerState.runCompletedAt = null;
+  crawlerState.incrementalCutoffAt = incrementalCutoffAt?.toISOString() ?? null;
+  crawlerState.includeIncremental = Boolean(includeIncremental);
+  crawlerState.processedTokenCount = 0;
   crawlerState.lastError = null;
   crawlerState.workerCount = config.crawler.concurrentTokens;
 
   queueMicrotask(async () => {
     try {
-      await resetInterruptedFetchingTokens(config.crawler.staleFetchingAfterMs);
+      const restoredFetchingCount = await resetInterruptedFetchingTokens(0);
+      if (restoredFetchingCount > 0) {
+        crawlerState.lastAction = `已恢复 ${restoredFetchingCount} 个上轮中断的抓取任务`;
+      }
       if (!crawlerState.initializedTokens) {
         try {
           await initializeTokenUniverse();
@@ -513,13 +543,25 @@ export async function startCrawler() {
         }
       }
       const workerCount = Math.max(1, config.crawler.concurrentTokens);
-      await Promise.all(Array.from({ length: workerCount }, (_, index) => runCrawlerWorker(index + 1)));
-      if (crawlerState.running) crawlerState.lastAction = "所有目标币种已完成本地缓存";
+      await Promise.all(
+        Array.from({ length: workerCount }, (_, index) =>
+          runCrawlerWorker(index + 1, { incrementalCutoffAt })
+        )
+      );
+      if (crawlerState.running) {
+        crawlerState.lastAction = includeIncremental
+          ? "本轮增量刷新已完成"
+          : "本轮K线缺口修复已完成";
+      }
       crawlerState.currentSymbol = null;
       crawlerState.currentInterval = null;
       crawlerState.activeTokens = [];
       activeWorkers.clear();
       crawlerState.running = false;
+      crawlerState.runMode = "idle";
+      crawlerState.runCompletedAt = new Date().toISOString();
+      crawlerState.includeIncremental = false;
+      crawlerState.incrementalCutoffAt = null;
     } catch (error) {
       crawlerState.lastError = error instanceof Error ? error.message : String(error);
       crawlerState.lastAction = "抓取服务异常停止";
@@ -529,6 +571,10 @@ export async function startCrawler() {
       crawlerState.activeTokens = [];
       activeWorkers.clear();
       crawlerState.running = false;
+      crawlerState.runMode = "idle";
+      crawlerState.runCompletedAt = new Date().toISOString();
+      crawlerState.includeIncremental = false;
+      crawlerState.incrementalCutoffAt = null;
     }
   });
 
@@ -537,6 +583,10 @@ export async function startCrawler() {
 
 export function stopCrawler() {
   crawlerState.running = false;
+  crawlerState.runMode = "idle";
+  crawlerState.runCompletedAt = new Date().toISOString();
+  crawlerState.includeIncremental = false;
+  crawlerState.incrementalCutoffAt = null;
   crawlerState.lastAction = "抓取服务已手动暂停";
   return crawlerState;
 }

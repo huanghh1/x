@@ -24,11 +24,18 @@ app.get("/internal/health", (_request, response) => {
 
 app.post("/internal/bootstrap", async (_request, response) => {
   const universe = await initializeTokenUniverse();
-  response.json({ ok: true, universe: { count: universe.count }, crawler: await startCrawler() });
+  response.json({
+    ok: true,
+    universe: { count: universe.count },
+    crawler: await startCrawler({ mode: "manual", reason: "手动初始化", includeIncremental: true })
+  });
 });
 
 app.post("/internal/crawl/start", async (_request, response) => {
-  response.json({ ok: true, crawler: await startCrawler() });
+  response.json({
+    ok: true,
+    crawler: await startCrawler({ mode: "manual", reason: "手动启动", includeIncremental: true })
+  });
 });
 
 app.post("/internal/crawl/stop", (_request, response) => {
@@ -85,7 +92,8 @@ setInterval(() => {
   initializeTokenUniverse().catch((error) => console.error("token universe sync failed", error));
 }, config.crawler.tokenUniverseSyncMs).unref?.();
 setInterval(() => {
-  startCrawler().catch((error) => console.error("incremental crawler failed", error));
+  startCrawler({ mode: "incremental", reason: "定时增量刷新", includeIncremental: true })
+    .catch((error) => console.error("incremental crawler failed", error));
 }, config.crawler.incrementalRefreshMs).unref?.();
 setInterval(runRecoveryKlineAudit, config.crawler.recoveryAuditMs).unref?.();
 setInterval(() => {
@@ -95,5 +103,8 @@ scheduleDailyKlineAudit();
 
 app.listen(config.service.crawlerPort, config.service.host, () => {
   console.log(`Crawler service running at http://${config.service.host}:${config.service.crawlerPort}`);
-  if (config.crawler.autoStart) startCrawler().catch((error) => console.error("auto crawler failed", error));
+  if (config.crawler.autoStart) {
+    startCrawler({ mode: "incremental", reason: "服务启动自动刷新", includeIncremental: true })
+      .catch((error) => console.error("auto crawler failed", error));
+  }
 });

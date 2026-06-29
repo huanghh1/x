@@ -2,7 +2,7 @@ export const SIGNAL_PRIORITY = Object.freeze({
   HIGHEST: 0,
   LEVEL1: 30,
   LEVEL2: 31,
-  STANDALONE: 40,
+  STANDALONE: 23,
   NONE: 99
 });
 

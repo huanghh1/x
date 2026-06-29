@@ -1,6 +1,9 @@
 const ALL_CATEGORIES = ["A", "B"];
 const ALL_LEVELS = ["LEVEL1", "LEVEL2"];
 const ALL_INTERVALS = ["15m", "1h", "4h", "1d"];
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const TRADE_MAX_LOOKBACK_DAYS = 90;
 
 const LABELS = {
   category: { A: "A类", B: "B类" },
@@ -41,6 +44,7 @@ const state = {
   chartState: new Map(),
   chartRefreshTimers: new Map(),
   chartRefreshAttempts: new Map(),
+  realtimeKlines: new Map(),
   currentView: "signals",
   watchlist: [],
   watchLoaded: false,
@@ -62,7 +66,6 @@ const state = {
   hotRankRequestId: 0,
   hotRankController: null,
   hotRankRefreshTimer: null,
-  hotRankTwitterPending: 0,
   hotRankPage: 1,
   hotRankPageSize: 20,
   hotRankTotal: 0,
@@ -100,6 +103,18 @@ const state = {
   runtimeLogsError: "",
   runtimeLogsNotice: "",
   runtimeLogsGeneratedAt: null,
+  tradeAnalysis: null,
+  tradeAnalysisLoading: false,
+  tradeAnalysisError: "",
+  tradeAnalysisInitialized: false,
+  tradeCodexScope: "all",
+  tradeCodexLoading: false,
+  tradeCodexError: "",
+  tradeCodexResult: null,
+  selectedTradeSymbolKey: "",
+  tradeSymbolPage: 1,
+  tradeSymbolPageSize: 20,
+  tradeSymbolTotal: 0,
   selectedRuntimeLogIds: new Set(),
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
@@ -177,6 +192,35 @@ function formatFundingBand(floor, cap) {
   return `${floorText} / ${capText}`;
 }
 
+function formatUsd(value, digits = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  const sign = number < 0 ? "-" : "";
+  return `${sign}$${Math.abs(number).toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  })}`;
+}
+
+function pnlClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "is-neutral";
+  return number > 0 ? "is-positive" : "is-negative";
+}
+
+function toDatetimeLocal(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function datetimeLocalToIso(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 function fundingRateTone(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number === 0) return "is-neutral";
@@ -226,6 +270,37 @@ function formatTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--";
   return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function crawlerStatusLabel(crawler = {}) {
+  if (!crawler.running) return "空闲";
+  if (crawler.runMode === "repair") return "缺口修复中";
+  if (crawler.runMode === "manual") return crawler.includeIncremental ? "手动刷新中" : "手动修复中";
+  return "增量刷新中";
+}
+
+function crawlerMetaText(crawler = {}) {
+  const status = crawlerStatusLabel(crawler);
+  if (!crawler.running) return status;
+  const symbol = crawler.currentSymbol || "等待队列";
+  const interval = crawler.currentInterval ? ` ${crawler.currentInterval}` : "";
+  return `${status} · ${symbol}${interval}`;
+}
+
+function crawlerDetailText(crawler = {}) {
+  const parts = [];
+  if (crawler.lastError) parts.push(crawler.lastError);
+  else if (crawler.lastAction) parts.push(crawler.lastAction);
+  if (crawler.running && Number(crawler.processedTokenCount ?? 0) > 0) {
+    parts.push(`本轮已处理 ${crawler.processedTokenCount} 个`);
+  }
+  if (crawler.running && crawler.incrementalCutoffAt) {
+    parts.push(`增量截止 ${formatTime(crawler.incrementalCutoffAt)}`);
+  }
+  if (!crawler.running && crawler.runCompletedAt) {
+    parts.push(`完成 ${formatTime(crawler.runCompletedAt)}`);
+  }
+  return parts.join(" · ") || "正常";
 }
 
 function formatCompactTime(value) {
@@ -362,7 +437,7 @@ function signalProfile(row) {
     if (standaloneMask === 4) {
       return {
         label: "OI · 独立信号",
-        priority: 40,
+        priority: 23,
         color: signalProfileColor(standaloneMask),
         classes: "has-oi"
       };
@@ -497,7 +572,7 @@ async function bootstrap() {
 }
 
 function renderOverview(payload) {
-  const { overview, database } = payload;
+  const { overview, database, crawler } = payload;
   const totals = overview.totals;
   setText("#totalTokens", totals.totalTokens);
   setText("#level1Signals", totals.level1Signals);
@@ -518,6 +593,8 @@ function renderOverview(payload) {
   setText("#dbBadge", database === "connected" ? "正常" : "异常");
   setText("#footerDb", `数据库连接状态：${database === "connected" ? "正常" : "异常"}`);
   setText("#footerTime", formatTime(overview.lastUpdatedAt));
+  setText("#crawlerStatus", crawlerMetaText(crawler ?? {}));
+  setText("#crawlerAction", crawlerDetailText(crawler ?? {}));
 }
 
 function sentimentLabel(value) {
@@ -525,23 +602,6 @@ function sentimentLabel(value) {
   if (value === "Negative") return "负向";
   if (value === "Neutral") return "中性";
   return value || "未知";
-}
-
-function twitterStatusLabel(token) {
-  if (!token.twitterStatus) return "推特未启用";
-  if (token.twitterStatus === "ok") return `推特 ${formatNumber(token.twitterHeat, 0)}`;
-  if (token.twitterStatus === "no_results") return "推特暂无结果";
-  if (token.twitterStatus === "not_configured") return "推特未配置";
-  if (token.twitterStatus === "rate_limited_retrying") return "推特限频，自动重试中";
-  if (token.twitterStatus === "quota_pool_exhausted") return "推特额度池暂不可用";
-  if (token.twitterStatus === "token_pool_cooling_down") return "推特额度池暂不可用";
-  if (token.twitterStatus.includes("insufficient quota")) return "推特额度不足";
-  if (token.twitterStatus.startsWith("token_pool_failed")) return "推特请求失败";
-  if (token.twitterStatus === "pending_refresh") return "推特待刷新";
-  if (token.twitterStatus === "stale_cache") return `推特缓存 ${formatNumber(token.twitterHeat, 0)}`;
-  if (token.twitterStatus === "failed") return "推特请求失败";
-  if (token.twitterStatus === "empty_symbol") return "推特无关键词";
-  return `推特${token.twitterStatus}`;
 }
 
 function hotRankChainLabel(chain = state.hotRankChain) {
@@ -598,7 +658,6 @@ function renderHotRank() {
     const flags = [];
     if (state.hotRankStale) flags.push("使用上次缓存");
     else if (state.hotRankPartial) flags.push("部分链失败");
-    if (state.hotRankTwitterPending > 0) flags.push(`推特后台更新 ${state.hotRankTwitterPending} 项`);
     if (state.hotRankErrors.length) flags.push(`错误 ${state.hotRankErrors.length} 条`);
     status.textContent = `来源：${state.hotRankSource || "Binance Web3 Social Hype"} · 更新时间 ${formatTime(state.hotRankFetchedAt)}${flags.length ? ` · ${flags.join(" · ")}` : ""}`;
     status.title = state.hotRankErrors.join("\n");
@@ -1125,8 +1184,8 @@ function serviceRuntimeSummary(service, payload) {
     return {
       ok: !crawler.lastError,
       title: "crawler",
-      meta: crawler.running ? `运行中 · ${crawler.currentSymbol || "空闲"}` : "未运行",
-      detail: crawler.lastError || crawler.lastAction || "正常"
+      meta: crawlerMetaText(crawler),
+      detail: crawlerDetailText(crawler)
     };
   }
   if (service === "realtime") {
@@ -1334,6 +1393,512 @@ function runtimeLogCategoryCounts(items) {
   return Array.from(counts.values()).sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
 }
 
+function ensureTradeAnalysisInputs() {
+  if (state.tradeAnalysisInitialized) return;
+  state.tradeAnalysisInitialized = true;
+  const end = new Date();
+  const start = new Date(end.getTime() - TRADE_MAX_LOOKBACK_DAYS * DAY_MS);
+  const startInput = $("#tradeStartInput");
+  const endInput = $("#tradeEndInput");
+  if (startInput && !startInput.value) startInput.value = toDatetimeLocal(start);
+  if (endInput && !endInput.value) endInput.value = toDatetimeLocal(end);
+  updateTradeWindowButtons("max");
+}
+
+function tradeAnalysisQuery() {
+  ensureTradeAnalysisInputs();
+  const params = new URLSearchParams();
+  const { start, end, symbol } = tradeFilterValues();
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  if (symbol) params.set("symbol", symbol);
+  params.set("page", String(state.tradeSymbolPage));
+  params.set("pageSize", String(state.tradeSymbolPageSize));
+  return params.toString();
+}
+
+function tradeFilterValues() {
+  ensureTradeAnalysisInputs();
+  return {
+    start: datetimeLocalToIso($("#tradeStartInput")?.value),
+    end: datetimeLocalToIso($("#tradeEndInput")?.value),
+    symbol: String($("#tradeSymbolInput")?.value ?? "").trim().toUpperCase()
+  };
+}
+
+async function loadTradeAnalysis() {
+  ensureTradeAnalysisInputs();
+  state.tradeAnalysisLoading = true;
+  state.tradeAnalysisError = "";
+  renderTradeAnalysis();
+  try {
+    const query = tradeAnalysisQuery();
+    state.tradeAnalysis = await api(`/api/trade-analysis${query ? `?${query}` : ""}`);
+    state.tradeSymbolTotal = Number(state.tradeAnalysis?.tradeRows?.total ?? state.tradeAnalysis?.symbolSummary?.total ?? tradeAnalysisRows().length);
+    state.tradeSymbolPage = Number(state.tradeAnalysis?.tradeRows?.page ?? state.tradeAnalysis?.symbolSummary?.page ?? state.tradeSymbolPage);
+    state.tradeSymbolPageSize = Number(state.tradeAnalysis?.tradeRows?.pageSize ?? state.tradeAnalysis?.symbolSummary?.pageSize ?? state.tradeSymbolPageSize);
+    const totalPages = Math.max(1, Math.ceil(state.tradeSymbolTotal / state.tradeSymbolPageSize));
+    if (state.tradeSymbolPage > totalPages) {
+      state.tradeSymbolPage = totalPages;
+      await loadTradeAnalysis();
+      return;
+    }
+    if (state.selectedTradeSymbolKey && !tradeSymbolRowByKey(state.selectedTradeSymbolKey)) {
+      state.selectedTradeSymbolKey = "";
+    }
+    state.tradeCodexError = "";
+    state.tradeCodexResult = null;
+  } catch (error) {
+    state.tradeAnalysisError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.tradeAnalysisLoading = false;
+    renderTradeAnalysis();
+  }
+}
+
+function renderTradeAnalysis() {
+  const payload = state.tradeAnalysis;
+  renderTradeConnections(payload?.connections ?? []);
+  renderTradeTotals(payload?.summary?.totals);
+  renderTradeSources(payload?.summary?.bySource ?? [], payload?.sources ?? []);
+  renderTradePositions(payload?.positions ?? [], payload?.positionSummary);
+  renderTradeSymbolRows(tradeAnalysisRows());
+  renderTradeCodexPanel();
+  updateTradeSymbolPagination();
+  updateTradeAnalysisStatus(payload);
+}
+
+function tradeAnalysisRows() {
+  return state.tradeAnalysis?.tradeRows?.items ?? state.tradeAnalysis?.summary?.bySymbol ?? [];
+}
+
+function tradeSymbolRowKey(row = {}) {
+  return JSON.stringify([row.source || "", row.symbol || "", row.firstTime ?? null, row.lastTime ?? null]);
+}
+
+function tradeSymbolRowByKey(key) {
+  if (!key) return null;
+  return tradeAnalysisRows().find((row) => tradeSymbolRowKey(row) === key) ?? null;
+}
+
+function selectedTradeSymbolRow() {
+  return tradeSymbolRowByKey(state.selectedTradeSymbolKey);
+}
+
+function tradeCodexSymbolTarget() {
+  const { symbol } = tradeFilterValues();
+  return selectedTradeSymbolRow()?.symbol || symbol || "";
+}
+
+function tradeCodexScopeLabel(scope = state.tradeCodexScope) {
+  if (scope === "all") return "全部交易记录";
+  if (scope === "trade") return "单笔交易";
+  if (scope === "range") return "时间段";
+  if (scope === "symbol") return "选中币种";
+  return "全部交易记录";
+}
+
+function tradeCodexCanRun() {
+  if (state.tradeCodexLoading || state.tradeAnalysisLoading || !state.tradeAnalysis) return false;
+  if (state.tradeCodexScope === "trade") return Boolean(selectedTradeSymbolRow());
+  if (state.tradeCodexScope === "symbol") return Boolean(tradeCodexSymbolTarget());
+  return true;
+}
+
+function setTradeCodexScope(scope) {
+  state.tradeCodexScope = ["all", "trade", "range", "symbol"].includes(scope) ? scope : "all";
+  if (state.tradeCodexScope !== "trade") state.selectedTradeSymbolKey = "";
+  state.tradeCodexError = "";
+  state.tradeCodexResult = null;
+}
+
+function tradeSymbolOptionLabel(row) {
+  return `${row.sourceLabel || row.source || "--"} · ${row.symbol || "--"} · ${formatTime(row.firstTime)} → ${formatTime(row.lastTime)} · 净收益 ${formatUsd(row.net)}`;
+}
+
+function renderTradeSymbolSelect() {
+  const select = $("#tradeSymbolSelect");
+  if (!select) return;
+  const rows = sortTradeSymbolRowsByTime(tradeAnalysisRows());
+  const selected = selectedTradeSymbolRow();
+  const canSelectTrade = state.tradeCodexScope === "trade";
+  select.disabled = !canSelectTrade || state.tradeAnalysisLoading || !rows.length;
+  const placeholder = canSelectTrade
+    ? rows.length ? "选择一笔交易记录" : "暂无可选交易记录"
+    : state.tradeCodexScope === "all"
+      ? "全部复盘不需要选择单笔"
+      : "当前复盘范围不需要选择单笔";
+  select.innerHTML = [
+    `<option value="">${placeholder}</option>`,
+    ...rows.map((row) => `<option value="${escapeHtml(tradeSymbolRowKey(row))}">${escapeHtml(tradeSymbolOptionLabel(row))}</option>`)
+  ].join("");
+  select.value = canSelectTrade && selected ? tradeSymbolRowKey(selected) : "";
+}
+
+function renderTradeCodexPanel() {
+  document.querySelectorAll("[data-trade-codex-scope]").forEach((button) => {
+    const active = button.dataset.tradeCodexScope === state.tradeCodexScope;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  renderTradeSymbolSelect();
+
+  const rangeControls = $("#tradeCodexRangeControls");
+  if (rangeControls) {
+    rangeControls.hidden = state.tradeCodexScope !== "range";
+    rangeControls.querySelectorAll("button").forEach((button) => {
+      button.disabled = state.tradeCodexScope !== "range" || state.tradeCodexLoading;
+    });
+  }
+
+  const selected = selectedTradeSymbolRow();
+  const selection = $("#tradeCodexSelection");
+  if (selection) {
+    const filters = tradeFilterValues();
+    if (state.tradeCodexScope === "trade") {
+      selection.textContent = selected
+        ? `已选单笔交易 ${selected.sourceLabel || selected.source || "--"} · ${selected.symbol || "--"} · ${formatTime(selected.firstTime)} → ${formatTime(selected.lastTime)} · 净收益 ${formatUsd(selected.net)}`
+        : tradeAnalysisRows().length
+          ? "请选择下方交易记录表的一行，或在下拉框选择一笔交易记录。"
+          : "当前时间窗口暂无可选交易记录。";
+    } else if (state.tradeCodexScope === "range") {
+      selection.textContent = `时间段 ${formatTime(filters.start)} → ${formatTime(filters.end)}${filters.symbol ? ` · ${filters.symbol}` : ""}`;
+    } else if (state.tradeCodexScope === "symbol") {
+      selection.textContent = selected
+        ? `已选币种 ${selected.sourceLabel || selected.source || "--"} · ${selected.symbol || "--"} · 净收益 ${formatUsd(selected.net)}`
+        : tradeAnalysisRows().length
+          ? "当前未选中币种。可以在下拉框选择，或点击下方交易记录行。"
+          : "当前筛选没有可选币种。";
+    } else {
+      selection.textContent = "将复盘最大记录窗口内的全部交易记录。";
+    }
+  }
+
+  const statusParts = [];
+  if (state.tradeCodexLoading) statusParts.push("分析中");
+  statusParts.push(tradeCodexScopeLabel());
+  if (state.tradeCodexResult?.generatedAt) statusParts.push(formatTime(state.tradeCodexResult.generatedAt));
+  if (state.tradeCodexError) statusParts.push(`失败：${state.tradeCodexError}`);
+  setText("#tradeCodexStatus", statusParts.join(" · ") || "等待生成");
+
+  const runButton = $("#runTradeCodexBtn");
+  if (runButton) {
+    runButton.disabled = !tradeCodexCanRun();
+    runButton.textContent = state.tradeCodexLoading ? "Codex 分析中" : "生成 Codex 复盘";
+  }
+
+  const result = $("#tradeCodexResult");
+  if (!result) return;
+  if (state.tradeCodexLoading) {
+    result.textContent = "Codex 正在分析交易数据，请稍等。";
+    return;
+  }
+  if (state.tradeCodexError) {
+    result.textContent = state.tradeCodexError;
+    return;
+  }
+  result.textContent = state.tradeCodexResult?.analysis || "Codex 复盘结果会显示在这里。";
+}
+
+async function runTradeCodexAnalysis() {
+  if (!tradeCodexCanRun()) {
+    if (state.tradeCodexScope === "trade") state.tradeCodexError = "请先在交易记录表中选择一笔单笔交易。";
+    else if (state.tradeCodexScope === "symbol") state.tradeCodexError = "请先在上方选择一个币种汇总，或输入币种。";
+    renderTradeCodexPanel();
+    return;
+  }
+
+  const filters = tradeFilterValues();
+  const selected = selectedTradeSymbolRow();
+  const scope = state.tradeCodexScope;
+  state.tradeCodexLoading = true;
+  state.tradeCodexError = "";
+  state.tradeCodexResult = null;
+  renderTradeCodexPanel();
+  try {
+    const payload = await api("/api/trade-analysis/codex", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scope,
+        start: scope === "all" ? "" : filters.start,
+        end: scope === "all" ? "" : filters.end,
+        symbol: scope === "trade" ? selected?.symbol || "" : scope === "symbol" ? tradeCodexSymbolTarget() : scope === "range" ? filters.symbol : "",
+        source: scope === "trade" ? selected?.source || "" : "",
+        tradeKey: scope === "trade" && selected ? tradeSymbolRowKey(selected) : ""
+      })
+    });
+    state.tradeCodexResult = payload;
+  } catch (error) {
+    state.tradeCodexError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.tradeCodexLoading = false;
+    renderTradeCodexPanel();
+  }
+}
+
+function updateTradeAnalysisStatus(payload) {
+  const parts = [];
+  if (state.tradeAnalysisLoading) parts.push("读取中");
+  if (payload?.generatedAt) parts.push(`更新时间 ${formatTime(payload.generatedAt)}`);
+  if (payload?.window?.startTime && payload?.window?.endTime) {
+    parts.push(`${formatTime(payload.window.startTime)} → ${formatTime(payload.window.endTime)}`);
+  }
+  const missingCount = (payload?.sources ?? []).filter((source) => !source.configured).length;
+  const errorCount = (payload?.sources ?? []).filter((source) => source.configured && !source.ok).length;
+  if (missingCount) parts.push(`待配置 ${missingCount} 个来源`);
+  if (errorCount) parts.push(`异常 ${errorCount} 个来源`);
+  if (payload?.positions) parts.push(`${payload.positions.length} 个持仓`);
+  if (payload?.tradeRows) parts.push(`交易记录 ${payload.tradeRows.total ?? 0} 项`);
+  if (payload?.persistence?.enabled) parts.push("已入库");
+  else if (payload?.persistence?.error) parts.push(`入库失败：${payload.persistence.error}`);
+  if (state.tradeAnalysisError) parts.push(`失败：${state.tradeAnalysisError}`);
+  setText("#tradeAnalysisStatus", parts.join(" · ") || "等待读取");
+  const refreshButton = $("#refreshTradeAnalysisBtn");
+  if (refreshButton) {
+    refreshButton.disabled = state.tradeAnalysisLoading;
+    refreshButton.textContent = state.tradeAnalysisLoading ? "读取中" : "刷新交易分析";
+  }
+}
+
+function renderTradeConnections(connections) {
+  const target = $("#tradeConnectionCards");
+  if (!target) return;
+  if (!connections.length) {
+    target.innerHTML = '<div class="heat-empty">等待配置检查。</div>';
+    return;
+  }
+  target.innerHTML = connections.map((connection) => {
+    const fieldHtml = connection.fields.map((field) => `
+      <span class="trade-field-chip ${field.configured ? "is-ok" : "is-missing"}">
+        ${escapeHtml(field.env)} · ${field.configured ? "已配置" : field.optional ? "可选" : "待填写"}
+      </span>
+    `).join("");
+    return `
+      <article class="trade-connection-card ${connection.configured ? "is-ok" : "is-missing"}">
+        <div>
+          <span>${escapeHtml(connection.configured ? "可读取" : "待配置")}</span>
+          <strong>${escapeHtml(connection.label)}</strong>
+        </div>
+        <div class="trade-field-list">${fieldHtml}</div>
+        <a class="mini-link" href="${escapeHtml(connection.docsUrl)}" target="_blank" rel="noreferrer">官方文档</a>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderTradeTotals(totals = {}) {
+  const net = Number(totals.net);
+  const realized = Number(totals.realizedPnl);
+  const feeCost = Number(totals.feeCost);
+  const funding = Number(totals.funding);
+  setTradeMetric("#tradeNetPnl", net);
+  setTradeMetric("#tradeRealizedPnl", realized);
+  setTradeMetric("#tradeFeeCost", feeCost, { cost: true });
+  setTradeMetric("#tradeFundingPnl", funding);
+}
+
+function setTradeMetric(selector, value, { cost = false } = {}) {
+  const target = $(selector);
+  if (!target) return;
+  target.textContent = formatUsd(value);
+  target.classList.remove("is-positive", "is-negative", "is-neutral", "is-cost");
+  target.classList.add(cost ? "is-cost" : pnlClass(value));
+}
+
+function sourceStatusText(source) {
+  if (!source) return "";
+  if (!source.configured) return `缺少 ${source.missing?.join("、") || "配置"}`;
+  if (!source.ok) return source.error || "读取失败";
+  const bits = [];
+  if (source.positionCount) bits.push(`${source.positionCount} 个持仓`);
+  if (source.rangeNote) bits.push(source.rangeNote);
+  if (source.tradeError) bits.push(`成交明细异常：${source.tradeError}`);
+  if (source.billError) bits.push(`账单异常：${source.billError}`);
+  if (source.fillError) bits.push(`成交异常：${source.fillError}`);
+  if (source.orderError) bits.push(`历史订单异常：${source.orderError}`);
+  if (source.positionError) bits.push(`持仓异常：${source.positionError}`);
+  if (source.utaError) bits.push(`UTA异常：${source.utaError}`);
+  return bits.join(" · ") || "读取正常";
+}
+
+function renderTradeSources(groups, sources) {
+  const target = $("#tradeSourceCards");
+  if (!target) return;
+  if (!groups.length && !sources.length) {
+    target.innerHTML = '<div class="heat-empty">暂无交易所汇总。</div>';
+    return;
+  }
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  target.innerHTML = groups.map((group) => {
+    const source = sourceById.get(group.source);
+    return `
+      <article class="trade-source-card ${source?.ok ? "is-ok" : source?.configured === false ? "is-missing" : "is-error"}">
+        <span>${escapeHtml(group.sourceLabel || source?.label || group.source || "--")}</span>
+        <strong class="${pnlClass(group.net)}">${formatUsd(group.net)}</strong>
+        <p>${escapeHtml(sourceStatusText(source))}</p>
+        <div>
+          <b>手续费 ${formatUsd(group.feeCost)}</b>
+          <b>资金费 ${formatUsd(group.funding)}</b>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function renderTradePositions(positions, summary = {}) {
+  const target = $("#tradePositionRows");
+  if (!target) return;
+  setText("#tradePositionCount", formatNumber(summary.count ?? positions.length, 0));
+  const notionalTarget = $("#tradePositionNotional");
+  if (notionalTarget) notionalTarget.textContent = formatUsd(summary.notional ?? 0);
+  setTradeMetric("#tradePositionPnl", Number(summary.unrealizedPnl ?? 0));
+
+  if (state.tradeAnalysisLoading && !positions.length) {
+    target.innerHTML = '<tr><td colspan="11" class="empty">正在读取当前持仓。</td></tr>';
+    return;
+  }
+  if (!positions.length) {
+    target.innerHTML = '<tr><td colspan="11" class="empty">当前接口返回没有未平仓持仓。若你确定有仓位，请确认钱包地址和 Binance API 只读权限。</td></tr>';
+    return;
+  }
+  target.innerHTML = positions.map((position) => `
+    <tr>
+      <td>${escapeHtml(position.sourceLabel || position.source || "--")}</td>
+      <td><span class="mono">${escapeHtml(position.symbol || "--")}</span></td>
+      <td><span class="trade-side ${String(position.side).toLowerCase().includes("short") ? "is-short" : "is-long"}">${escapeHtml(position.side || "--")}</span></td>
+      <td>${formatNumber(position.quantity, 6)}</td>
+      <td>${formatNumber(position.entryPrice, 6)}</td>
+      <td>${formatNumber(position.markPrice, 6)}</td>
+      <td>${formatUsd(position.notional)}</td>
+      <td><strong class="${pnlClass(position.unrealizedPnl)}">${formatUsd(position.unrealizedPnl)}</strong></td>
+      <td>${position.leverage ? `${formatNumber(position.leverage, 2)}x` : "--"}</td>
+      <td>${formatNumber(position.liquidationPrice, 6)}</td>
+      <td>${formatTime(position.updatedAt)}</td>
+    </tr>
+  `).join("");
+}
+
+function tradeSymbolRowTime(row, key) {
+  const value = Number(row?.[key]);
+  if (Number.isFinite(value)) return value;
+  const parsed = Date.parse(String(row?.[key] ?? ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sortTradeSymbolRowsByTime(rows = []) {
+  return [...rows].sort((a, b) =>
+    tradeSymbolRowTime(b, "lastTime") - tradeSymbolRowTime(a, "lastTime") ||
+    tradeSymbolRowTime(b, "firstTime") - tradeSymbolRowTime(a, "firstTime") ||
+    String(a.source ?? "").localeCompare(String(b.source ?? "")) ||
+    String(a.symbol ?? "").localeCompare(String(b.symbol ?? ""))
+  );
+}
+
+function renderTradeSymbolRows(rows) {
+  const target = $("#tradeSymbolRows");
+  if (!target) return;
+  if (state.tradeAnalysisLoading && !rows.length) {
+    target.innerHTML = '<tr><td colspan="8" class="empty">正在读取交易分析。</td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    target.innerHTML = '<tr><td colspan="8" class="empty">当前时间窗口暂无可汇总的交易数据。先填写上方 API / 钱包地址，再点击刷新。</td></tr>';
+    return;
+  }
+  target.innerHTML = sortTradeSymbolRowsByTime(rows).map((row) => {
+    const key = tradeSymbolRowKey(row);
+    const tradeSelectable = state.tradeCodexScope === "trade";
+    const selected = tradeSelectable && state.selectedTradeSymbolKey === key;
+    return `
+    <tr class="${[tradeSelectable ? "is-trade-selectable" : "", selected ? "is-selected-trade-symbol" : ""].filter(Boolean).join(" ")}" data-trade-symbol-key="${escapeHtml(key)}">
+      <td>${escapeHtml(row.sourceLabel || row.source || "--")}</td>
+      <td><span class="mono">${escapeHtml(row.symbol || "--")}</span></td>
+      <td>${formatTime(row.firstTime)}</td>
+      <td>${formatTime(row.lastTime)}</td>
+      <td><strong class="${pnlClass(row.net)}">${formatUsd(row.net)}</strong></td>
+      <td><span class="${pnlClass(row.realizedPnl)}">${formatUsd(row.realizedPnl)}</span></td>
+      <td>${formatUsd(row.feeCost)}</td>
+      <td><span class="${pnlClass(row.funding)}">${formatUsd(row.funding)}</span></td>
+    </tr>
+  `;
+  }).join("");
+  bindTradeSymbolSelection(target);
+}
+
+function updateTradeSymbolPagination() {
+  const total = Number(state.tradeAnalysis?.tradeRows?.total ?? state.tradeAnalysis?.symbolSummary?.total ?? state.tradeSymbolTotal ?? 0);
+  const pageSize = Number(state.tradeAnalysis?.tradeRows?.pageSize ?? state.tradeAnalysis?.symbolSummary?.pageSize ?? state.tradeSymbolPageSize);
+  const page = Number(state.tradeAnalysis?.tradeRows?.page ?? state.tradeAnalysis?.symbolSummary?.page ?? state.tradeSymbolPage);
+  const totalPages = Math.ceil(total / pageSize) || 1;
+  const summary = total ? `第 ${page} / ${totalPages} 页，共 ${total} 项` : "--";
+  setText("#tradeSymbolPaginationSummary", summary);
+  setText("#tradeSymbolPageIndicator", `${page} / ${totalPages}`);
+
+  const prevBtn = $("#prevTradeSymbolPageBtn");
+  const nextBtn = $("#nextTradeSymbolPageBtn");
+  if (prevBtn) prevBtn.disabled = state.tradeAnalysisLoading || page <= 1;
+  if (nextBtn) nextBtn.disabled = state.tradeAnalysisLoading || page >= totalPages;
+
+  document.querySelectorAll("[data-trade-symbol-pagesize]").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.tradeSymbolPagesize) === pageSize);
+  });
+}
+
+function bindTradeSymbolSelection(root) {
+  root.querySelectorAll("[data-trade-symbol-key]").forEach((row) => {
+    row.addEventListener("click", () => {
+      if (state.tradeCodexScope !== "trade") return;
+      state.selectedTradeSymbolKey = state.selectedTradeSymbolKey === row.dataset.tradeSymbolKey ? "" : row.dataset.tradeSymbolKey || "";
+      state.tradeCodexError = "";
+      state.tradeCodexResult = null;
+      renderTradeAnalysis();
+    });
+  });
+}
+
+function normalizeTradeWindow(value) {
+  if (value === "max") {
+    return { key: "max", lookbackMs: TRADE_MAX_LOOKBACK_DAYS * DAY_MS };
+  }
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return { key: `${value}d`, lookbackMs: value * DAY_MS };
+  }
+  const text = String(value ?? "").trim().toLowerCase();
+  const hourMatch = text.match(/^(\d+(?:\.\d+)?)h$/);
+  if (hourMatch) {
+    const hours = Number(hourMatch[1]);
+    if (Number.isFinite(hours) && hours > 0) return { key: `${hours}h`, lookbackMs: hours * HOUR_MS };
+  }
+  const dayMatch = text.match(/^(\d+(?:\.\d+)?)d$/);
+  if (dayMatch) {
+    const days = Number(dayMatch[1]);
+    if (Number.isFinite(days) && days > 0) return { key: `${days}d`, lookbackMs: days * DAY_MS };
+  }
+  return null;
+}
+
+function updateTradeWindowButtons(activeKey) {
+  document.querySelectorAll("[data-trade-window], [data-trade-codex-window]").forEach((button) => {
+    const key = button.dataset.tradeWindow || button.dataset.tradeCodexWindow || "";
+    button.classList.toggle("active", key === activeKey);
+  });
+}
+
+function setTradeWindow(value) {
+  const windowOption = normalizeTradeWindow(value);
+  if (!windowOption) return;
+  const end = new Date();
+  const start = new Date(end.getTime() - windowOption.lookbackMs);
+  const startInput = $("#tradeStartInput");
+  const endInput = $("#tradeEndInput");
+  if (startInput) startInput.value = toDatetimeLocal(start);
+  if (endInput) endInput.value = toDatetimeLocal(end);
+  updateTradeWindowButtons(windowOption.key);
+  state.tradeSymbolPage = 1;
+  loadTradeAnalysis();
+}
+
 async function loadHotRank({ silent = false } = {}) {
   const requestedChain = state.hotRankChain;
   const requestId = state.hotRankRequestId + 1;
@@ -1359,12 +1924,6 @@ async function loadHotRank({ silent = false } = {}) {
     state.hotRankPartial = Boolean(payload.partial);
     state.hotRankStale = Boolean(payload.stale);
     state.hotRankErrors = Array.isArray(payload.errors) ? payload.errors : [];
-    state.hotRankTwitterPending = Math.max(0, Number(payload.twitterPendingCount) || 0);
-    if (state.hotRankTwitterPending > 0) {
-      state.hotRankRefreshTimer = setTimeout(() => {
-        if (state.hotRankChain === requestedChain) loadHotRank({ silent: true });
-      }, 2500);
-    }
   } catch (error) {
     if (controller.signal.aborted || requestId !== state.hotRankRequestId) return;
     const message = `热度数据读取失败：${error instanceof Error ? error.message : String(error)}`;
@@ -1382,7 +1941,6 @@ async function loadHotRank({ silent = false } = {}) {
       state.hotRankStale = false;
       state.hotRankErrors = [];
     }
-    state.hotRankTwitterPending = 0;
     state.hotRankError = message;
   } finally {
     if (requestId !== state.hotRankRequestId) return;
@@ -1474,7 +2032,7 @@ function renderSignals() {
             </div>
           </td>
           <td>${levelBadge(bestLevel)}</td>
-          <td class="mono">${formatNumber(selectedDetail.currentPrice)}</td>
+          <td class="mono" data-signal-price="${escapeHtml(row.symbol)}">${formatNumber(selectedDetail.currentPrice)}</td>
           <td class="mono"><span>MA100 ${formatNumber(selectedDetail.ma100)}</span><span>MA200 ${formatNumber(selectedDetail.ma200)}</span></td>
           <td>${formatTime(selectedDetail.signalTime || selectedDetail.updatedAt)}</td>
         </tr>
@@ -1855,6 +2413,16 @@ function closeWatchRealtime() {
 
 function watchRealtimeStreams() {
   const streams = new Set();
+  if (state.currentView === "signals") {
+    for (const row of state.signals) {
+      const symbol = String(row.symbol ?? "").toLowerCase();
+      if (!symbol) continue;
+      const preferredInterval = state.signalChartIntervals.get(row.symbol) ?? row.intervalCode ?? "15m";
+      const interval = ALL_INTERVALS.includes(preferredInterval) ? preferredInterval : "15m";
+      streams.add(`${symbol}@ticker`);
+      streams.add(`${symbol}@kline_${interval}`);
+    }
+  }
   if (state.currentView === "watch") {
     for (const item of state.watchlist) {
       const symbol = String(item.symbol ?? "").toLowerCase();
@@ -1896,6 +2464,10 @@ function watchRealtimeStreams() {
   return Array.from(streams).sort();
 }
 
+function shouldUseServerRealtimeEvents() {
+  return state.currentView === "watch";
+}
+
 function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
   const safeSymbol = String(symbol ?? "").toUpperCase();
   const item = state.watchlist.find((entry) => entry.symbol === safeSymbol);
@@ -1911,6 +2483,28 @@ function updateWatchPriceDom(symbol, price, eventTime = Date.now()) {
     element.textContent = `最新更新时间：${formatTime(eventTime)}`;
   }
   updateWatchStatus();
+}
+
+function updateSignalPriceDom(symbol, price, eventTime = Date.now()) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const numericPrice = Number(price);
+  if (!safeSymbol || !Number.isFinite(numericPrice)) return;
+  for (const row of state.signals) {
+    if (String(row.symbol ?? "").toUpperCase() !== safeSymbol) continue;
+    row.currentPrice = numericPrice;
+    row.currentCloseTime = eventTime;
+    if (Array.isArray(row.intervalDetails)) {
+      for (const detail of row.intervalDetails) {
+        detail.currentPrice = numericPrice;
+        detail.currentCloseTime = eventTime;
+      }
+    }
+  }
+  const selectorSymbol = cssEscape(safeSymbol);
+  for (const element of document.querySelectorAll(`[data-signal-price="${selectorSymbol}"]`)) {
+    element.textContent = formatNumber(numericPrice);
+    element.title = `实时价格：${formatTime(eventTime)}`;
+  }
 }
 
 function updateMarketPriceDom(symbol, price, eventTime = Date.now()) {
@@ -1937,6 +2531,7 @@ function averageRecent(values, size) {
 
 function updateChartKline(symbol, interval, kline) {
   const key = `${symbol}|${interval}`;
+  state.realtimeKlines.set(key, kline);
   const payload = state.chartCache.get(key);
   if (!payload?.klines?.length) return;
   const next = {
@@ -1946,7 +2541,8 @@ function updateChartKline(symbol, interval, kline) {
     high: Number(kline.h),
     low: Number(kline.l),
     close: Number(kline.c),
-    volume: Number(kline.v)
+    volume: Number(kline.v),
+    isOpen: !Boolean(kline.x)
   };
   if (!Number.isFinite(next.openTime) || !Number.isFinite(next.close)) return;
   const klines = payload.klines;
@@ -1972,6 +2568,8 @@ function updateChartKline(symbol, interval, kline) {
   const target = klines.at(-1);
   target.ma100 = averageRecent(closes, 100);
   target.ma200 = averageRecent(closes, 200);
+  payload.hasCurrentKline = Boolean(target.isOpen);
+  payload.currentKlineOpenTime = target.isOpen ? target.openTime : null;
   payload._chartKlines = null;
   drawChartForKey(key);
 }
@@ -1983,6 +2581,7 @@ function handleWatchRealtimeMessage(payload) {
     if (symbol && Number.isFinite(price)) {
       const eventTime = Number(payload.eventTime ?? Date.now());
       updateWatchPriceDom(symbol, price, eventTime);
+      updateSignalPriceDom(symbol, price, eventTime);
       updateMarketPriceDom(symbol, price, eventTime);
     }
     return;
@@ -1994,6 +2593,7 @@ function handleWatchRealtimeMessage(payload) {
     const eventTime = Number(payload.eventTime ?? Date.now());
     if (symbol && Number.isFinite(price)) {
       updateWatchPriceDom(symbol, price, eventTime);
+      updateSignalPriceDom(symbol, price, eventTime);
       updateMarketPriceDom(symbol, price, eventTime);
     }
     updateChartKline(symbol, interval, payload.kline);
@@ -2007,6 +2607,7 @@ function handleWatchRealtimeMessage(payload) {
     if (symbol && Number.isFinite(price)) {
       const eventTime = Number(data.E ?? Date.now());
       updateWatchPriceDom(symbol, price, eventTime);
+      updateSignalPriceDom(symbol, price, eventTime);
       updateMarketPriceDom(symbol, price, eventTime);
     }
     return;
@@ -2018,6 +2619,7 @@ function handleWatchRealtimeMessage(payload) {
     const eventTime = Number(data.E ?? Date.now());
     if (symbol && Number.isFinite(price)) {
       updateWatchPriceDom(symbol, price, eventTime);
+      updateSignalPriceDom(symbol, price, eventTime);
       updateMarketPriceDom(symbol, price, eventTime);
     }
     updateChartKline(symbol, interval, data.k);
@@ -2030,7 +2632,7 @@ function updateWatchRealtime() {
     closeWatchRealtime();
     return;
   }
-  if ("EventSource" in window) {
+  if ("EventSource" in window && shouldUseServerRealtimeEvents()) {
     const signature = "sse:watch-realtime";
     if (state.watchRealtimeSource && state.watchRealtimeSignature === signature) return;
     closeWatchRealtime();
@@ -2088,10 +2690,23 @@ function pageFromHash() {
   if (window.location.hash === "#ioPage") return "io";
   if (window.location.hash === "#triggerHistoryPage") return "trigger-history";
   if (window.location.hash === "#runtimeLogsPage") return "runtime-logs";
+  if (window.location.hash === "#tradeAnalysisPage") return "trade-analysis";
   if (window.location.hash === "#overview") {
     window.history.replaceState(null, "", "#signalsPage");
   }
   return "signals";
+}
+
+function alignTradeAnalysisAnchor() {
+  const align = () => {
+    const target = $("#tradeAnalysisPage");
+    if (!target) return;
+    const navHeight = $(".app-nav")?.getBoundingClientRect().height ?? 80;
+    const top = target.getBoundingClientRect().top + window.scrollY - navHeight - 16;
+    window.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+  };
+  requestAnimationFrame(align);
+  setTimeout(align, 120);
 }
 
 function setPage(page) {
@@ -2125,6 +2740,10 @@ function setPage(page) {
   if (page === "io") loadIOMonitoring();
   if (page === "trigger-history") loadTriggerHistory();
   if (page === "runtime-logs") loadRuntimeLogs();
+  if (page === "trade-analysis") {
+    alignTradeAnalysisAnchor();
+    loadTradeAnalysis();
+  }
 }
 
 function toggleRow(key) {
@@ -2324,6 +2943,8 @@ async function loadAndRenderChart(row, { force = false } = {}) {
       state.chartCache.set(key, payload);
       state.chartState.set(key, chartDefaults(chartKlineLength(payload)));
     }
+    const realtimeKline = state.realtimeKlines.get(key);
+    if (realtimeKline) updateChartKline(row.symbol, row.intervalCode, realtimeKline);
     const payload = state.chartCache.get(key);
     const settings = state.chartState.get(key) ?? chartDefaults(chartKlineLength(payload));
     state.chartState.set(key, settings);
@@ -2338,11 +2959,14 @@ async function loadAndRenderChart(row, { force = false } = {}) {
     const previous = payload.klines.at(-2);
     const changePct = previous?.close ? ((Number(last?.close) - Number(previous.close)) / Number(previous.close)) * 100 : null;
     const changeClass = Number(changePct) >= 0 ? "is-up" : "is-down";
+    const currentStatus = payload.hasCurrentKline
+      ? " · 含当前未收盘K线"
+      : " · 等待当前K线实时推送";
     shell.innerHTML = `
       <div class="chart-toolbar">
         <div class="chart-title-block">
           <strong>${escapeHtml(row.symbol)} ${escapeHtml(row.intervalCode)} K线</strong>
-          <span>数据库全部 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${payload.gapCount ? ` · 缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""}${payload.isStale ? " · 最新K线落后，已后台补齐" : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
+          <span>已收盘 ${payload.cachedCount ?? payload.klines.length} 根 / 目标 ${payload.expectedCount ?? "--"} 根${currentStatus}${payload.gapCount ? ` · 历史缺口 ${payload.gapCount} 段/${payload.missingKlineCount} 根` : ""}${payload.isStale ? " · 最新已收盘K线落后，已后台补齐" : ""} · ${payload.hasMa200 ? "MA200 可用" : "新币历史不足 200 根"} · 按住图表自由平移，滚轮缩放时间轴，右侧价格轴单独缩放</span>
         </div>
         <div class="chart-tools" role="toolbar" aria-label="K线工具">
           <button class="${settings.crosshair ? "active" : ""}" type="button" data-tool="crosshair" title="显示或隐藏十字线">十字线</button>
@@ -2360,6 +2984,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
         <span class="chart-meta-chip ma100">MA100 ${formatNumber(last?.ma100)}</span>
         <span class="chart-meta-chip ma200">MA200 ${formatNumber(last?.ma200)}</span>
         <span class="chart-meta-chip">量 ${formatCompactNumber(last?.volume)}</span>
+        ${last?.isOpen ? '<span class="chart-meta-chip">当前K线</span>' : ""}
       </div>
       <canvas class="kline-canvas" data-key="${escapeHtml(key)}"></canvas>
     `;
@@ -2770,7 +3395,7 @@ function drawUserDrawings(ctx, settings, layout, slot, palette) {
 function drawChartForKey(key) {
   const payload = state.chartCache.get(key);
   const settings = state.chartState.get(key);
-  const canvas = document.querySelector(`.kline-canvas[data-key="${CSS.escape(key)}"]`);
+  const canvas = document.querySelector(`.kline-canvas[data-key="${cssEscape(key)}"]`);
   if (!payload || !settings || !canvas) return;
   canvas.dataset.viewportStart = String(settings.start);
   canvas.dataset.viewportVisible = String(settings.visible);
@@ -3129,6 +3754,67 @@ $("#scanIoBtn")?.addEventListener("click", async () => {
 });
 $("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
 $("#refreshRuntimeLogsBtn")?.addEventListener("click", () => loadRuntimeLogs());
+$("#refreshTradeAnalysisBtn")?.addEventListener("click", () => loadTradeAnalysis());
+$("#applyTradeFilterBtn")?.addEventListener("click", () => {
+  state.tradeSymbolPage = 1;
+  loadTradeAnalysis();
+});
+$("#runTradeCodexBtn")?.addEventListener("click", () => runTradeCodexAnalysis());
+$("#tradeSymbolSelect")?.addEventListener("change", (event) => {
+  if (state.tradeCodexScope !== "trade") {
+    event.currentTarget.value = "";
+    state.selectedTradeSymbolKey = "";
+    renderTradeAnalysis();
+    return;
+  }
+  state.selectedTradeSymbolKey = event.currentTarget.value || "";
+  state.tradeCodexError = "";
+  state.tradeCodexResult = null;
+  renderTradeAnalysis();
+});
+document.querySelectorAll("[data-trade-codex-scope]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setTradeCodexScope(button.dataset.tradeCodexScope || "all");
+    renderTradeAnalysis();
+  });
+});
+document.querySelectorAll("[data-trade-codex-window]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setTradeCodexScope("range");
+    setTradeWindow(button.dataset.tradeCodexWindow || "30d");
+  });
+});
+document.querySelectorAll("[data-trade-window]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setTradeWindow(button.dataset.tradeWindow || "max");
+  });
+});
+document.querySelectorAll("[data-trade-symbol-pagesize]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.tradeSymbolPageSize = Number(btn.dataset.tradeSymbolPagesize);
+    state.tradeSymbolPage = 1;
+    loadTradeAnalysis();
+  });
+});
+$("#prevTradeSymbolPageBtn")?.addEventListener("click", () => {
+  if (state.tradeSymbolPage > 1) {
+    state.tradeSymbolPage -= 1;
+    loadTradeAnalysis();
+  }
+});
+$("#nextTradeSymbolPageBtn")?.addEventListener("click", () => {
+  const totalPages = Math.ceil(state.tradeSymbolTotal / state.tradeSymbolPageSize) || 1;
+  if (state.tradeSymbolPage < totalPages) {
+    state.tradeSymbolPage += 1;
+    loadTradeAnalysis();
+  }
+});
+$("#tradeSymbolInput")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    state.tradeSymbolPage = 1;
+    loadTradeAnalysis();
+  }
+});
 $("#selectAllRuntimeLogs")?.addEventListener("change", (event) => {
   const checked = event.currentTarget.checked;
   state.runtimeLogs.forEach((item) => {
@@ -3279,7 +3965,8 @@ $("#mobilePageSelect")?.addEventListener("change", (event) => {
     funding: "#fundingPage",
     io: "#ioPage",
     "trigger-history": "#triggerHistoryPage",
-    "runtime-logs": "#runtimeLogsPage"
+    "runtime-logs": "#runtimeLogsPage",
+    "trade-analysis": "#tradeAnalysisPage"
   };
   window.location.hash = hashes[page] ?? "#signalsPage";
 });

@@ -37,6 +37,8 @@ npm start
 | `8789` | 关注池实时 WebSocket |
 | `8790` | 资金费率、OI、热度、解锁、清理、Telegram |
 
+默认 `API_HOST=127.0.0.1`，只允许本机访问页面与公开 API。确实需要局域网访问时再改成 `0.0.0.0`，同时建议设置 `API_MUTATION_TOKEN`；写入、删除、触发扫描和 Codex 复盘等敏感接口只允许本机请求，或带 `X-API-Mutation-Token` 请求头访问。
+
 5. 打开页面：
 
 ```text
@@ -89,6 +91,36 @@ pm2 delete ecosystem.config.cjs
 - 每天本机时间 0 点自动审计全部活跃代币的四周期 K 线，缺少历史、存在中间断层或最新数据落后时重新入队补齐。
 - 新上线代币会从 Binance 实际可提供的最早 K 线开始抓取；下架代币保留 7 天，期间恢复上线会继续使用原缓存，超过 7 天才删除 K 线。
 
+## 交易分析接入
+
+页面新增“交易分析”模块，会读取 `.env` / `.env.local` 中的只读交易所配置，按时间窗口汇总净收益、已实现盈亏、手续费成本、资金费、当前持仓和交易流水。缺少配置时，页面会直接显示需要填写的变量名。
+
+需要填写：
+
+```bash
+# Binance USD-M Futures：需要只读 USER_DATA 权限
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+BINANCE_FUTURES_BASE_URL=https://fapi.binance.com
+
+# Hyperliquid：只需要钱包地址，查询成交和资金费
+HYPERLIQUID_WALLET_ADDRESS=
+HYPERLIQUID_INFO_BASE_URL=https://api.hyperliquid.xyz/info
+
+TRADE_ANALYSIS_DEFAULT_LOOKBACK_DAYS=90
+TRADE_ANALYSIS_EVENT_LIMIT=5000
+CODEX_CLI_PATH=/Applications/Codex.app/Contents/Resources/codex
+TRADE_ANALYSIS_CODEX_TIMEOUT_MS=180000
+TRADE_ANALYSIS_CODEX_EVENT_LIMIT=80
+```
+
+当前接口：
+
+- `GET /api/trade-analysis?start=<ISO>&end=<ISO>&symbol=<BTCUSDT>`：返回连接状态、当前持仓、交易所汇总、币种汇总和最多 `TRADE_ANALYSIS_EVENT_LIMIT` 条费用/盈亏流水。
+- `POST /api/trade-analysis/codex`：按全部交易记录、交易记录表里的单笔交易，或指定时间段生成 Codex 复盘；本机或 `API_MUTATION_TOKEN` 保护。
+- Binance 使用 USD-M Futures `/fapi/v1/income`、`/fapi/v1/userTrades`、`/fapi/v1/fundingRate` 和 `/fapi/v3/positionRisk`。
+- Hyperliquid 使用 Info endpoint 的 `userFillsByTime`、`userFunding` 和 `clearinghouseState`。
+
 ## K 线保留窗口
 
 | 周期 | 覆盖时间 | 保留根数 |
@@ -119,6 +151,36 @@ INACTIVE_TOKEN_KLINE_RETENTION_DAYS=7
 ```text
 POST /api/kline-audit
 ```
+
+## 查看 crawler 和 K 线补齐进度
+
+PM2 里的 crawler 进程名是 `monitor-crawler`。查看运行日志：
+
+```bash
+pm2 logs monitor-crawler --lines 100
+```
+
+只查看最近 100 行、不持续跟随：
+
+```bash
+pm2 logs monitor-crawler --lines 100 --nostream
+```
+
+查看当前抓取队列状态和正在处理的代币：
+
+```bash
+curl -s http://127.0.0.1:8787/api/overview | jq '.overview.totals, .overview.currentFetch, .crawler.lastAction'
+```
+
+其中 `overview.totals.pendingTokens` 表示 `token_list.fetch_status` 还没有变成 `completed` 的活跃代币数量，适合看 crawler 队列还剩多少。
+
+查看真实 K 线完整性缺口：
+
+```bash
+curl -s http://127.0.0.1:8787/api/kline-health | jq '{deficientTokenCount, deficientIntervalCount, tokens:(.deficient | map(.symbol) | unique)}'
+```
+
+其中 `deficientTokenCount` 表示仍有 K 线需要补齐的代币数量，`deficientIntervalCount` 表示这些代币合计还有多少个周期存在缺口。这个结果比 `pendingTokens` 更适合判断 K 线是否真正补齐。
 
 ## 首次回填提速参数
 
@@ -179,6 +241,9 @@ FUNDING_INTERVAL_MONITOR_ENABLED=true
 
 # 默认每小时扫描一次
 FUNDING_INTERVAL_SCAN_MS=3600000
+
+# 待确认提醒轮询间隔；真正重复发送时间由上次发送后 5 分钟控制
+FUNDING_INTERVAL_ALERT_POLL_MS=60000
 
 # 首次启动延迟，给数据库和服务预热
 FUNDING_INTERVAL_INITIAL_DELAY_MS=10000

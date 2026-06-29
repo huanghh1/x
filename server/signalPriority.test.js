@@ -84,6 +84,17 @@ test("only OI can be displayed independently without MA alerts", () => {
   );
 });
 
+test("standalone OI is grouped with the OI signal priorities", () => {
+  const standaloneOi = resolveSignalProfile({ oiSpike: true });
+  const oiLevel1 = resolveSignalProfile({ oiSpike: true, alertLevel: "LEVEL1" });
+  const oiLevel2 = resolveSignalProfile({ oiSpike: true, alertLevel: "LEVEL2" });
+  const heatMultiLevel1 = resolveSignalProfile({ hotRank: true, multiCycleCount: 3, alertLevel: "LEVEL1" });
+
+  assert.ok(standaloneOi.priority > oiLevel1.priority);
+  assert.equal(standaloneOi.priority, oiLevel2.priority);
+  assert.ok(standaloneOi.priority < heatMultiLevel1.priority);
+});
+
 test("the composite profile uses the highest MA level across intervals", () => {
   const bestAlertLevel = resolveBestAlertLevel([
     { alertLevel: "LEVEL2" },

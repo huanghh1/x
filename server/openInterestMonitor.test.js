@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildOpenInterestSnapshot, isOpenInterestHistoryUnavailable } from "./openInterestMonitor.js";
+import { config } from "./config.js";
+import { buildOpenInterestSnapshot, isOpenInterestHistoryUnavailable, selectScanBatch } from "./openInterestMonitor.js";
 
 test("buildOpenInterestSnapshot computes changes from aligned 5-minute history", () => {
   const base = Date.UTC(2026, 0, 1, 0, 0, 0);
@@ -40,4 +41,21 @@ test("OI history 403 is treated as endpoint unavailable", () => {
     true
   );
   assert.equal(isOpenInterestHistoryUnavailable(new Error("BTCUSDT open interest history HTTP 500")), false);
+});
+
+test("selectScanBatch rotates through tokens when request window is smaller than the universe", () => {
+  const originalLimit = config.openInterestMonitor.requestLimitPerWindow;
+  config.openInterestMonitor.requestLimitPerWindow = 2;
+  selectScanBatch([]);
+
+  try {
+    const tokens = ["AUSDT", "BUSDT", "CUSDT", "DUSDT"].map((symbol) => ({ symbol }));
+
+    assert.deepEqual(selectScanBatch(tokens).batch.map((token) => token.symbol), ["AUSDT", "BUSDT"]);
+    assert.deepEqual(selectScanBatch(tokens).batch.map((token) => token.symbol), ["CUSDT", "DUSDT"]);
+    assert.deepEqual(selectScanBatch(tokens).batch.map((token) => token.symbol), ["AUSDT", "BUSDT"]);
+  } finally {
+    config.openInterestMonitor.requestLimitPerWindow = originalLimit;
+    selectScanBatch([]);
+  }
 });
