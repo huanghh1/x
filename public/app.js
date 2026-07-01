@@ -119,6 +119,13 @@ const state = {
   tradeSymbolPage: 1,
   tradeSymbolPageSize: 20,
   tradeSymbolTotal: 0,
+  tradeJournal: [],
+  tradeJournalLoading: false,
+  tradeJournalSaving: false,
+  tradeJournalError: "",
+  tradeJournalPage: 1,
+  tradeJournalPageSize: 10,
+  tradeJournalTotal: 0,
   selectedRuntimeLogIds: new Set(),
   watchRealtimeSocket: null,
   watchRealtimeSource: null,
@@ -1949,6 +1956,280 @@ function bindTradeSymbolSelection(root) {
   });
 }
 
+function tradeJournalStatusLabel(status) {
+  if (status === "OPEN") return "开单中";
+  if (status === "ENDED") return "已结束";
+  if (status === "REVIEWED") return "已复盘";
+  return "未归类";
+}
+
+function tradeJournalSideLabel(side) {
+  if (side === "LONG") return "做多";
+  if (side === "SHORT") return "做空";
+  if (side === "SPOT") return "现货";
+  if (side === "OTHER") return "其他";
+  return "未填写";
+}
+
+function tradeJournalById(id) {
+  const numericId = Number(id);
+  return state.tradeJournal.find((item) => Number(item.id) === numericId) ?? null;
+}
+
+function tradeJournalFilters() {
+  return {
+    keyword: String($("#tradeJournalSearchInput")?.value ?? "").trim(),
+    status: String($("#tradeJournalStatusFilter")?.value ?? "").trim()
+  };
+}
+
+function tradeJournalQuery() {
+  const params = new URLSearchParams();
+  const filters = tradeJournalFilters();
+  if (filters.keyword) params.set("keyword", filters.keyword);
+  if (filters.status) params.set("status", filters.status);
+  params.set("page", String(state.tradeJournalPage));
+  params.set("pageSize", String(state.tradeJournalPageSize));
+  return params.toString();
+}
+
+async function loadTradeJournal() {
+  state.tradeJournalLoading = true;
+  state.tradeJournalError = "";
+  renderTradeJournal();
+  try {
+    const query = tradeJournalQuery();
+    const payload = await api(`/api/trade-journal${query ? `?${query}` : ""}`);
+    state.tradeJournal = payload.items ?? [];
+    state.tradeJournalTotal = Number(payload.total ?? 0);
+    state.tradeJournalPage = Number(payload.page ?? state.tradeJournalPage);
+    state.tradeJournalPageSize = Number(payload.pageSize ?? state.tradeJournalPageSize);
+  } catch (error) {
+    state.tradeJournalError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.tradeJournalLoading = false;
+    renderTradeJournal();
+  }
+}
+
+function tradeJournalTextHtml(value, fallback = "未填写") {
+  const text = String(value ?? "").trim();
+  if (!text) return `<p class="trade-journal-empty-text">${fallback}</p>`;
+  return `<p>${escapeHtml(text).replaceAll("\n", "<br>")}</p>`;
+}
+
+function tradeJournalExcerpt(value, maxLength = 84) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "未填写";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function renderTradeJournal() {
+  updateTradeJournalStatus();
+  const target = $("#tradeJournalRows");
+  if (!target) return;
+  if (state.tradeJournalLoading && !state.tradeJournal.length) {
+    target.innerHTML = '<div class="heat-empty">正在读取交易日记。</div>';
+    updateTradeJournalPagination();
+    return;
+  }
+  if (state.tradeJournalError && !state.tradeJournal.length) {
+    target.innerHTML = `<div class="heat-empty">读取失败：${escapeHtml(state.tradeJournalError)}</div>`;
+    updateTradeJournalPagination();
+    return;
+  }
+  if (!state.tradeJournal.length) {
+    target.innerHTML = '<div class="heat-empty">暂无交易日记。左侧写下第一条开仓理由吧。</div>';
+    updateTradeJournalPagination();
+    return;
+  }
+  target.innerHTML = state.tradeJournal.map((item) => `
+    <article class="trade-journal-card" data-trade-journal-id="${Number(item.id)}">
+      <div class="trade-journal-card-head">
+        <div>
+          <h3>${escapeHtml(item.title || "交易日记")}</h3>
+          <div class="trade-journal-meta">
+            <span>${escapeHtml(item.symbol || "未填交易对")}</span>
+            <span>${escapeHtml(tradeJournalSideLabel(item.side))}</span>
+            <span>开仓 ${escapeHtml(formatTime(item.openedAt))}</span>
+            ${item.closedAt ? `<span>结束 ${escapeHtml(formatTime(item.closedAt))}</span>` : ""}
+          </div>
+        </div>
+        <span class="trade-journal-badge is-${escapeHtml(String(item.status || "OPEN").toLowerCase())}">${escapeHtml(tradeJournalStatusLabel(item.status))}</span>
+      </div>
+      <div class="trade-journal-card-body">
+        <section>
+          <strong>开仓理由</strong>
+          <p>${escapeHtml(tradeJournalExcerpt(item.openReason))}</p>
+        </section>
+        <section>
+          <strong>结束理由</strong>
+          <p>${escapeHtml(tradeJournalExcerpt(item.closeReason))}</p>
+        </section>
+        <section>
+          <strong>复盘总结</strong>
+          <p>${escapeHtml(tradeJournalExcerpt(item.reviewSummary))}</p>
+        </section>
+      </div>
+      <details class="trade-journal-detail">
+        <summary>展开全文</summary>
+        <div>
+          <section>
+            <strong>开仓理由</strong>
+            ${tradeJournalTextHtml(item.openReason)}
+          </section>
+          <section>
+            <strong>结束理由</strong>
+            ${tradeJournalTextHtml(item.closeReason)}
+          </section>
+          <section>
+            <strong>后续追加复盘总结</strong>
+            ${tradeJournalTextHtml(item.reviewSummary)}
+          </section>
+        </div>
+      </details>
+      <div class="trade-journal-card-actions">
+        <button class="mini-link" type="button" data-trade-journal-action="edit" data-id="${Number(item.id)}">编辑</button>
+        <button class="mini-link" type="button" data-trade-journal-action="append" data-id="${Number(item.id)}">追加复盘</button>
+        <button class="mini-link danger" type="button" data-trade-journal-action="delete" data-id="${Number(item.id)}">删除</button>
+      </div>
+    </article>
+  `).join("");
+  bindTradeJournalActions(target);
+  updateTradeJournalPagination();
+}
+
+function updateTradeJournalStatus() {
+  const parts = [];
+  if (state.tradeJournalLoading) parts.push("读取中");
+  if (state.tradeJournalSaving) parts.push("保存中");
+  if (state.tradeJournalTotal) parts.push(`共 ${state.tradeJournalTotal} 条`);
+  if (state.tradeJournalError) parts.push(`失败：${state.tradeJournalError}`);
+  setText("#tradeJournalStatus", parts.join(" · ") || "等待读取");
+  const saveButton = $("#saveTradeJournalBtn");
+  if (saveButton) saveButton.disabled = state.tradeJournalSaving;
+  const refreshButton = $("#refreshTradeJournalBtn");
+  if (refreshButton) refreshButton.disabled = state.tradeJournalLoading;
+}
+
+function updateTradeJournalPagination() {
+  const total = Number(state.tradeJournalTotal ?? 0);
+  const pageSize = Number(state.tradeJournalPageSize ?? 10);
+  const page = Number(state.tradeJournalPage ?? 1);
+  const totalPages = Math.ceil(total / pageSize) || 1;
+  setText("#tradeJournalPaginationSummary", total ? `第 ${page} / ${totalPages} 页，共 ${total} 条` : "--");
+  setText("#tradeJournalPageIndicator", `${page} / ${totalPages}`);
+  const prevBtn = $("#prevTradeJournalPageBtn");
+  const nextBtn = $("#nextTradeJournalPageBtn");
+  if (prevBtn) prevBtn.disabled = state.tradeJournalLoading || page <= 1;
+  if (nextBtn) nextBtn.disabled = state.tradeJournalLoading || page >= totalPages;
+  document.querySelectorAll("[data-trade-journal-pagesize]").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.tradeJournalPagesize) === pageSize);
+  });
+}
+
+function tradeJournalFormPayload() {
+  return {
+    title: $("#tradeJournalTitleInput")?.value ?? "",
+    symbol: String($("#tradeJournalSymbolInput")?.value ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""),
+    side: $("#tradeJournalSideInput")?.value ?? "",
+    status: $("#tradeJournalStatusInput")?.value ?? "OPEN",
+    openedAt: datetimeLocalToIso($("#tradeJournalOpenedAtInput")?.value),
+    closedAt: datetimeLocalToIso($("#tradeJournalClosedAtInput")?.value),
+    openReason: $("#tradeJournalOpenReasonInput")?.value ?? "",
+    closeReason: $("#tradeJournalCloseReasonInput")?.value ?? "",
+    reviewSummary: $("#tradeJournalReviewInput")?.value ?? ""
+  };
+}
+
+function setTradeJournalForm(item = null, { focusReview = false } = {}) {
+  const entry = item ?? {};
+  const idInput = $("#tradeJournalIdInput");
+  if (idInput) idInput.value = entry.id ? String(entry.id) : "";
+  const titleInput = $("#tradeJournalTitleInput");
+  if (titleInput) titleInput.value = entry.title ?? "";
+  const symbolInput = $("#tradeJournalSymbolInput");
+  if (symbolInput) symbolInput.value = entry.symbol ?? "";
+  const sideInput = $("#tradeJournalSideInput");
+  if (sideInput) sideInput.value = entry.side ?? "";
+  const statusInput = $("#tradeJournalStatusInput");
+  if (statusInput) statusInput.value = entry.status ?? "OPEN";
+  const openedInput = $("#tradeJournalOpenedAtInput");
+  if (openedInput) openedInput.value = entry.openedAt ? toDatetimeLocal(entry.openedAt) : toDatetimeLocal(new Date());
+  const closedInput = $("#tradeJournalClosedAtInput");
+  if (closedInput) closedInput.value = entry.closedAt ? toDatetimeLocal(entry.closedAt) : "";
+  const openReasonInput = $("#tradeJournalOpenReasonInput");
+  if (openReasonInput) openReasonInput.value = entry.openReason ?? "";
+  const closeReasonInput = $("#tradeJournalCloseReasonInput");
+  if (closeReasonInput) closeReasonInput.value = entry.closeReason ?? "";
+  const reviewInput = $("#tradeJournalReviewInput");
+  if (reviewInput) reviewInput.value = entry.reviewSummary ?? "";
+  setText("#tradeJournalFormTitle", entry.id ? `编辑交易日记 #${entry.id}` : "新建交易日记");
+  const saveButton = $("#saveTradeJournalBtn");
+  if (saveButton) saveButton.textContent = entry.id ? "保存修改" : "保存日记";
+  if (focusReview && reviewInput) {
+    requestAnimationFrame(() => {
+      reviewInput.focus();
+      reviewInput.selectionStart = reviewInput.selectionEnd = reviewInput.value.length;
+    });
+  }
+}
+
+function resetTradeJournalForm() {
+  setTradeJournalForm(null);
+}
+
+async function saveTradeJournal(event) {
+  event?.preventDefault();
+  const id = $("#tradeJournalIdInput")?.value;
+  const payload = tradeJournalFormPayload();
+  state.tradeJournalSaving = true;
+  state.tradeJournalError = "";
+  updateTradeJournalStatus();
+  try {
+    const saved = await api(id ? `/api/trade-journal/${encodeURIComponent(id)}` : "/api/trade-journal", {
+      method: id ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    setTradeJournalForm(saved.item ?? null);
+    await loadTradeJournal();
+  } catch (error) {
+    state.tradeJournalError = error instanceof Error ? error.message : String(error);
+    renderTradeJournal();
+  } finally {
+    state.tradeJournalSaving = false;
+    updateTradeJournalStatus();
+  }
+}
+
+function bindTradeJournalActions(root) {
+  root.querySelectorAll("[data-trade-journal-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const item = tradeJournalById(button.dataset.id);
+      const action = button.dataset.tradeJournalAction;
+      if (!item) return;
+      if (action === "edit" || action === "append") {
+        setTradeJournalForm(item, { focusReview: action === "append" });
+        $("#tradeJournalForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      if (action === "delete") {
+        const confirmed = window.confirm(`确定删除这条交易日记吗？\n${item.title || item.symbol || `#${item.id}`}`);
+        if (!confirmed) return;
+        try {
+          await api(`/api/trade-journal/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+          if (state.tradeJournal.length === 1 && state.tradeJournalPage > 1) state.tradeJournalPage -= 1;
+          await loadTradeJournal();
+        } catch (error) {
+          state.tradeJournalError = error instanceof Error ? error.message : String(error);
+          renderTradeJournal();
+        }
+      }
+    });
+  });
+}
+
 function normalizeTradeWindow(value) {
   if (value === "max") {
     return { key: "max", lookbackMs: TRADE_MAX_LOOKBACK_DAYS * DAY_MS };
@@ -2783,6 +3064,7 @@ function pageFromHash() {
   if (window.location.hash === "#triggerHistoryPage") return "trigger-history";
   if (window.location.hash === "#runtimeLogsPage") return "runtime-logs";
   if (window.location.hash === "#tradeAnalysisPage") return "trade-analysis";
+  if (window.location.hash === "#tradeJournalPage") return "trade-journal";
   if (window.location.hash === "#overview") {
     window.history.replaceState(null, "", "#signalsPage");
   }
@@ -2836,6 +3118,7 @@ function setPage(page) {
     alignTradeAnalysisAnchor();
     loadTradeAnalysis();
   }
+  if (page === "trade-journal") loadTradeJournal();
 }
 
 function toggleRow(key) {
@@ -4072,6 +4355,47 @@ $("#tradeSymbolInput")?.addEventListener("keydown", (event) => {
     loadTradeAnalysis();
   }
 });
+$("#tradeJournalForm")?.addEventListener("submit", saveTradeJournal);
+$("#newTradeJournalBtn")?.addEventListener("click", () => {
+  resetTradeJournalForm();
+  $("#tradeJournalForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+$("#resetTradeJournalFormBtn")?.addEventListener("click", resetTradeJournalForm);
+$("#refreshTradeJournalBtn")?.addEventListener("click", () => loadTradeJournal());
+$("#applyTradeJournalFilterBtn")?.addEventListener("click", () => {
+  state.tradeJournalPage = 1;
+  loadTradeJournal();
+});
+$("#tradeJournalSearchInput")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    state.tradeJournalPage = 1;
+    loadTradeJournal();
+  }
+});
+$("#tradeJournalStatusFilter")?.addEventListener("change", () => {
+  state.tradeJournalPage = 1;
+  loadTradeJournal();
+});
+document.querySelectorAll("[data-trade-journal-pagesize]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.tradeJournalPageSize = Number(btn.dataset.tradeJournalPagesize);
+    state.tradeJournalPage = 1;
+    loadTradeJournal();
+  });
+});
+$("#prevTradeJournalPageBtn")?.addEventListener("click", () => {
+  if (state.tradeJournalPage > 1) {
+    state.tradeJournalPage -= 1;
+    loadTradeJournal();
+  }
+});
+$("#nextTradeJournalPageBtn")?.addEventListener("click", () => {
+  const totalPages = Math.ceil(state.tradeJournalTotal / state.tradeJournalPageSize) || 1;
+  if (state.tradeJournalPage < totalPages) {
+    state.tradeJournalPage += 1;
+    loadTradeJournal();
+  }
+});
 $("#selectAllRuntimeLogs")?.addEventListener("change", (event) => {
   const checked = event.currentTarget.checked;
   state.runtimeLogs.forEach((item) => {
@@ -4223,7 +4547,8 @@ $("#mobilePageSelect")?.addEventListener("change", (event) => {
     io: "#ioPage",
     "trigger-history": "#triggerHistoryPage",
     "runtime-logs": "#runtimeLogsPage",
-    "trade-analysis": "#tradeAnalysisPage"
+    "trade-analysis": "#tradeAnalysisPage",
+    "trade-journal": "#tradeJournalPage"
   };
   window.location.hash = hashes[page] ?? "#signalsPage";
 });

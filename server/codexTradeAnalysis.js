@@ -112,6 +112,15 @@ function pickTrade(row) {
 
 function addEventSummary(summary, event) {
   summary.events += 1;
+  const eventTime = toNumber(event.time, NaN);
+  if (Number.isFinite(eventTime)) {
+    summary.firstTime = summary.firstTime === null || summary.firstTime === undefined
+      ? eventTime
+      : Math.min(summary.firstTime, eventTime);
+    summary.lastTime = summary.lastTime === null || summary.lastTime === undefined
+      ? eventTime
+      : Math.max(summary.lastTime, eventTime);
+  }
   if (event.pnlIncluded === false) return;
   const realizedPnl = toNumber(event.realizedPnl);
   const funding = toNumber(event.funding);
@@ -127,9 +136,22 @@ function addEventSummary(summary, event) {
   if (net < 0) summary.losingEvents += 1;
 }
 
+function summaryActivityTime(summary) {
+  return toNumber(summary?.lastTime ?? summary?.firstTime, 0);
+}
+
+function compareSummariesByTimeDesc(a, b) {
+  return summaryActivityTime(b) - summaryActivityTime(a) ||
+    toNumber(b.firstTime, 0) - toNumber(a.firstTime, 0) ||
+    String(a.source ?? "").localeCompare(String(b.source ?? "")) ||
+    String(a.symbol ?? "").localeCompare(String(b.symbol ?? ""));
+}
+
 function summarizeEvents(events) {
   const totals = {
     events: 0,
+    firstTime: null,
+    lastTime: null,
     realizedPnl: 0,
     funding: 0,
     commission: 0,
@@ -149,6 +171,8 @@ function summarizeEvents(events) {
       sourceLabel: event.sourceLabel ?? "",
       symbol: event.symbol ?? "",
       events: 0,
+      firstTime: null,
+      lastTime: null,
       realizedPnl: 0,
       funding: 0,
       commission: 0,
@@ -166,6 +190,8 @@ function summarizeEvents(events) {
       source: event.source ?? "",
       sourceLabel: event.sourceLabel ?? "",
       events: 0,
+      firstTime: null,
+      lastTime: null,
       realizedPnl: 0,
       funding: 0,
       commission: 0,
@@ -180,8 +206,8 @@ function summarizeEvents(events) {
   }
   return {
     totals,
-    bySource: Array.from(sourceMap.values()).sort((a, b) => Math.abs(b.net) - Math.abs(a.net)),
-    bySymbol: Array.from(symbolMap.values()).sort((a, b) => Math.abs(b.net) - Math.abs(a.net)).slice(0, 20)
+    bySource: Array.from(sourceMap.values()).sort(compareSummariesByTimeDesc),
+    bySymbol: Array.from(symbolMap.values()).sort(compareSummariesByTimeDesc).slice(0, 20)
   };
 }
 
@@ -351,9 +377,11 @@ export function runCodexTradeAnalysis(prompt, options = {}) {
   const command = String(options.command || DEFAULT_CODEX_COMMAND).trim() || DEFAULT_CODEX_COMMAND;
   const timeoutMs = Math.max(30_000, Number(options.timeoutMs) || DEFAULT_TIMEOUT_MS);
   const cwd = options.cwd || os.tmpdir();
+  const searchArgs = options.search ? ["--search"] : [];
   const args = [
     "--ask-for-approval",
     "never",
+    ...searchArgs,
     "exec",
     "--ephemeral",
     "--sandbox",

@@ -36,7 +36,8 @@ const CONNECTIONS = [
     docsUrl: "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals",
     fields: [
       { env: "HYPERLIQUID_WALLET_ADDRESS", configKey: "walletAddress", label: "钱包地址" },
-      { env: "HYPERLIQUID_INFO_BASE_URL", configKey: "infoBaseUrl", label: "Info Base URL", optional: true }
+      { env: "HYPERLIQUID_INFO_BASE_URL", configKey: "infoBaseUrl", label: "Info Base URL", optional: true },
+      { env: "HYPERLIQUID_PERP_DEXS", configKey: "perpDexs", label: "HIP-3 Perp Dexs", optional: true }
     ]
   }
 ];
@@ -197,6 +198,42 @@ function normalizeTradeAction({ source, side, positionSide, direction, realizedP
   if (sideUpper === "BUY" || sideUpper === "B") return "Buy";
   if (sideUpper === "SELL" || sideUpper === "S" || sideUpper === "A") return "Sell";
   return side || "";
+}
+
+function normalizeSymbolText(value) {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+function symbolLookupVariants(value) {
+  const variants = new Set();
+  function add(item) {
+    const normalized = normalizeSymbolText(item);
+    if (normalized) variants.add(normalized);
+  }
+
+  add(value);
+  for (const item of Array.from(variants)) {
+    if (item.includes("-")) add(item.split("-")[0]);
+    if (item.includes(":")) add(item.split(":").pop());
+    for (const quote of ["USDT", "USDC"]) {
+      if (item.endsWith(quote) && item.length > quote.length) add(item.slice(0, -quote.length));
+      if (item.endsWith(`-${quote}`) && item.length > quote.length + 1) add(item.slice(0, -(quote.length + 1)));
+    }
+  }
+  for (const item of Array.from(variants)) {
+    if (/^[A-Z]{3}$/.test(item)) add(`USD${item}`);
+  }
+  return variants;
+}
+
+function symbolMatchesValue(value, target) {
+  if (!target) return true;
+  const valueVariants = symbolLookupVariants(value);
+  const targetVariants = symbolLookupVariants(target);
+  for (const variant of valueVariants) {
+    if (targetVariants.has(variant)) return true;
+  }
+  return false;
 }
 
 function sourceConnectionStatus(config) {
@@ -579,33 +616,75 @@ async function fetchHyperliquidInfo(config, body) {
   }, config.tradeAnalysis.requestTimeoutMs);
 }
 
-async function fetchHyperliquidPositions(config, symbol) {
-  const source = config.tradeAnalysis.hyperliquid;
-  const payload = await fetchHyperliquidInfo(config, {
+function hyperliquidPerpDexs(source) {
+  const configuredDexs = Array.isArray(source.perpDexs)
+    ? source.perpDexs
+    : String(source.perpDexs ?? "").split(",");
+  const dexs = ["", ...configuredDexs]
+    .map((dex) => String(dex ?? "").trim())
+    .filter((dex, index, all) => all.indexOf(dex) === index);
+  return dexs.length ? dexs : [""];
+}
+
+function hyperliquidClearinghouseRequest(source, dex) {
+  const request = {
     type: "clearinghouseState",
     user: source.walletAddress
-  });
-  return (Array.isArray(payload?.assetPositions) ? payload.assetPositions : [])
-    .map((item) => item.position ?? item)
-    .filter((position) => Math.abs(toNumber(position.szi ?? position.size)) > 0)
-    .filter((position) => !symbol || String(position.coin ?? "").toUpperCase() === symbol)
-    .map((position) => ({
-      id: `hyperliquid-position:${position.coin}`,
-      source: "hyperliquid",
-      sourceLabel: SOURCE_LABELS.hyperliquid,
-      symbol: position.coin || "--",
-      asset: "USDC",
-      side: positionSide(position.szi ?? position.size),
-      quantity: normalizePositionQuantity(position.szi ?? position.size),
-      entryPrice: finiteOrNull(position.entryPx),
-      markPrice: null,
-      notional: Math.abs(toNumber(position.positionValue)),
-      unrealizedPnl: toNumber(position.unrealizedPnl),
-      leverage: finiteOrNull(position.leverage?.value ?? position.leverage),
-      liquidationPrice: finiteOrNull(position.liquidationPx),
-      marginMode: position.leverage?.type || "",
-      updatedAt: Number(payload.time) || null
-    }));
+  };
+  if (dex) request.dex = dex;
+  return request;
+}
+
+function hyperliquidPositionSymbol(position, dex) {
+  const coin = String(position.coin || "").trim();
+  if (!dex || !coin || coin.toLowerCase().startsWith(`${dex.toLowerCase()}:`)) return coin || "--";
+  return `${dex}:${coin}`;
+}
+
+function hyperliquidPositionFromApi(position, payload, dex) {
+  const symbol = hyperliquidPositionSymbol(position, dex);
+  return {
+    id: `hyperliquid-position:${dex || "default"}:${symbol}`,
+    source: "hyperliquid",
+    sourceLabel: SOURCE_LABELS.hyperliquid,
+    symbol,
+    asset: "USDC",
+    side: positionSide(position.szi ?? position.size),
+    quantity: normalizePositionQuantity(position.szi ?? position.size),
+    entryPrice: finiteOrNull(position.entryPx),
+    markPrice: null,
+    notional: Math.abs(toNumber(position.positionValue)),
+    unrealizedPnl: toNumber(position.unrealizedPnl),
+    leverage: finiteOrNull(position.leverage?.value ?? position.leverage),
+    liquidationPrice: finiteOrNull(position.liquidationPx),
+    marginMode: position.leverage?.type || "",
+    updatedAt: Number(payload.time) || null
+  };
+}
+
+async function fetchHyperliquidPositions(config, symbol) {
+  const source = config.tradeAnalysis.hyperliquid;
+  const dexs = hyperliquidPerpDexs(source);
+  const results = await Promise.allSettled(dexs.map(async (dex) => ({
+    dex,
+    payload: await fetchHyperliquidInfo(config, hyperliquidClearinghouseRequest(source, dex))
+  })));
+  const fulfilled = results.filter((result) => result.status === "fulfilled");
+  if (!fulfilled.length) throw results[0]?.reason ?? new Error("Hyperliquid 持仓读取失败");
+  const positions = fulfilled.flatMap(({ value }) =>
+    (Array.isArray(value.payload?.assetPositions) ? value.payload.assetPositions : [])
+      .map((item) => item.position ?? item)
+      .filter((position) => Math.abs(toNumber(position.szi ?? position.size)) > 0)
+      .map((position) => hyperliquidPositionFromApi(position, value.payload, value.dex))
+      .filter((position) => symbolMatchesValue(position.symbol, symbol))
+  );
+  const rejected = results.filter((result) => result.status === "rejected");
+  return {
+    positions,
+    error: rejected.length
+      ? `部分 Hyperliquid dex 持仓读取失败：${rejected.map((result) => describeError(result.reason)).join("；")}`
+      : ""
+  };
 }
 
 async function fetchHyperliquidEvents(config, window, symbol) {
@@ -657,20 +736,22 @@ async function fetchHyperliquidEvents(config, window, symbol) {
   if (fillsResult.status === "rejected") throw fillsResult.reason;
   const fillsPayload = fillsResult.value;
   const fills = (Array.isArray(fillsPayload) ? fillsPayload : [])
-    .filter((item) => !symbol || String(item.coin ?? "").toUpperCase() === symbol)
+    .filter((item) => symbolMatchesValue(item.coin, symbol))
     .map(hyperliquidFillEvent);
   let funding = [];
   try {
     const fundingPayload = await fetchFundingPaged();
     funding = (Array.isArray(fundingPayload) ? fundingPayload : [])
-      .filter((item) => !symbol || String(item.delta?.coin ?? item.coin ?? "").toUpperCase() === symbol)
+      .filter((item) => symbolMatchesValue(item.delta?.coin ?? item.coin, symbol))
       .map(hyperliquidFundingEvent);
   } catch (error) {
     funding = [];
   }
-  const sourceResult = okSource("hyperliquid", [...fills, ...funding], positionsResult.status === "fulfilled" ? positionsResult.value : []);
+  const positionsPayload = positionsResult.status === "fulfilled" ? positionsResult.value : { positions: [], error: "" };
+  const sourceResult = okSource("hyperliquid", [...fills, ...funding], positionsPayload.positions);
   sourceResult.rawEventCount = fills.length + funding.length;
   sourceResult.rangeNote = "Hyperliquid fills/funding 按时间向后分页抓取；fills 官方单次最多 2000 条，最近最多 10000 条。";
+  if (positionsPayload.error) sourceResult.positionError = positionsPayload.error;
   if (positionsResult.status === "rejected") sourceResult.positionError = positionsResult.reason instanceof Error ? positionsResult.reason.message : String(positionsResult.reason);
   return sourceResult;
 }
@@ -1034,7 +1115,7 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
   } else {
     const fetchers = [
       ["binance", () => fetchBinanceEvents(config, window, safeSymbol)],
-      ["hyperliquid", () => fetchHyperliquidEvents(config, window, safeSymbol.replace(/USDT$/, ""))]
+      ["hyperliquid", () => fetchHyperliquidEvents(config, window, safeSymbol)]
     ];
     sourceResults = await Promise.all(fetchers.map(async ([id, run]) => {
       try {

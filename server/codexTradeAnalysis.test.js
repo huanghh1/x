@@ -114,3 +114,32 @@ test("trade scope includes the selected table record and its same-row detail", (
   assert.match(prepared.prompt, /证据不足/);
   assert.ok(!prepared.prompt.includes("test-secret"));
 });
+
+test("codex trade summaries keep records sorted by latest time", () => {
+  const olderLargeWin = event({
+    id: "old-big",
+    symbol: "OLDUSDT",
+    time: baseTime + 1000,
+    realizedPnl: 1000
+  });
+  const newerSmallTrade = event({
+    id: "new-small",
+    symbol: "NEWUSDT",
+    time: baseTime + 10_000,
+    realizedPnl: 1
+  });
+  const prepared = prepareCodexTradeAnalysis({
+    ...analysisFixture(),
+    events: [olderLargeWin, newerSmallTrade],
+    positions: []
+  }, {
+    scope: "all",
+    contextEventLimit: 10
+  });
+
+  assert.deepEqual(
+    prepared.report.summary.bySymbol.map((row) => row.symbol),
+    ["NEWUSDT", "OLDUSDT"]
+  );
+  assert.equal(prepared.report.summary.bySymbol[0].lastTime, baseTime + 10_000);
+});

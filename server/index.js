@@ -6,9 +6,12 @@ import { Readable } from "node:stream";
 import { config } from "./config.js";
 import {
   clearTriggerHistory,
+  createTradeJournalEntry,
+  deleteTradeJournalEntry,
   deleteTriggerHistory,
   deleteWatchlistItem,
   ensureDatabase,
+  getTradeJournalEntry,
   getKlines,
   getHotMaSignalsPage,
   getSignalGroupsPage,
@@ -20,10 +23,12 @@ import {
   getTokenUnlockCache,
   listOneHourFundingIntervals,
   listOpenInterestMonitorPage,
+  listTradeJournal,
   listTriggerHistory,
   listWatchlist,
   pingDatabase,
   queueSymbolsForKlineRefresh,
+  updateTradeJournalEntry,
   upsertWatchlistItem
 } from "./db.js";
 import { getHotRank } from "./hotRank.js";
@@ -427,6 +432,69 @@ app.get("/api/trade-analysis", requireSensitiveRead, async (request, response) =
   }
 });
 
+app.get("/api/trade-journal", requireSensitiveRead, async (request, response) => {
+  try {
+    response.json({
+      ok: true,
+      ...(await listTradeJournal({
+        page: request.query.page,
+        pageSize: request.query.pageSize,
+        keyword: request.query.keyword,
+        status: request.query.status
+      }))
+    });
+  } catch (error) {
+    console.error("get trade journal failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/trade-journal/:id", requireSensitiveRead, async (request, response) => {
+  try {
+    const item = await getTradeJournalEntry(request.params.id);
+    if (!item) {
+      response.status(404).json({ ok: false, error: "交易日记不存在" });
+      return;
+    }
+    response.json({ ok: true, item });
+  } catch (error) {
+    console.error("get trade journal item failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/trade-journal", requireLocalMutation, async (request, response) => {
+  try {
+    response.json({ ok: true, item: await createTradeJournalEntry(request.body ?? {}) });
+  } catch (error) {
+    console.error("create trade journal failed", error);
+    response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.put("/api/trade-journal/:id", requireLocalMutation, async (request, response) => {
+  try {
+    const item = await updateTradeJournalEntry(request.params.id, request.body ?? {});
+    if (!item) {
+      response.status(404).json({ ok: false, error: "交易日记不存在" });
+      return;
+    }
+    response.json({ ok: true, item });
+  } catch (error) {
+    console.error("update trade journal failed", error);
+    response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.delete("/api/trade-journal/:id", requireLocalMutation, async (request, response) => {
+  try {
+    response.json({ ok: true, deleted: await deleteTradeJournalEntry(request.params.id) });
+  } catch (error) {
+    console.error("delete trade journal failed", error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 app.post("/api/trade-analysis/codex", requireLocalMutation, async (request, response) => {
   try {
     const body = request.body ?? {};
@@ -499,7 +567,7 @@ app.post("/api/token-analysis/codex", requireLocalMutation, async (request, resp
       intervalCode,
       klinePayload,
       context: body.context,
-      contextKlineLimit: body.contextKlineLimit
+      contextKlineLimit: body.contextKlineLimit ?? config.tradeAnalysis.codex.tokenContextKlineLimit
     });
     const codexResult = await runCodexTradeAnalysis(prepared.prompt, {
       command: config.tradeAnalysis.codex.command,

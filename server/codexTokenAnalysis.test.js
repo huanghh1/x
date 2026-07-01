@@ -53,8 +53,15 @@ test("prepareCodexTokenAnalysis summarizes and returns all cached klines by defa
   assert.equal(prepared.report.summary.bars, 220);
   assert.equal(prepared.report.summary.movingAverages.ma100.side, "above");
   assert.equal(prepared.report.pageContext.noisy.length, 24);
-  assert.match(prepared.prompt, /代币信号研究助理/);
+  assert.equal(prepared.report.newsSearchHints, undefined);
+  assert.match(prepared.prompt, /代币执行研判助理/);
   assert.match(prepared.prompt, /不是交易复盘教练/);
+  assert.match(prepared.prompt, /不要联网/);
+  assert.doesNotMatch(prepared.prompt, /实时网页搜索/);
+  assert.doesNotMatch(prepared.prompt, /newsSearchHints/);
+  assert.doesNotMatch(prepared.prompt, /Twitter|Binance Square|币安广场/);
+  assert.doesNotMatch(prepared.prompt, /消息面/);
+  assert.match(prepared.prompt, /试多\/试空/);
   assert.match(prepared.prompt, /低\/中\/高置信度/);
   assert.match(prepared.prompt, /确认条件和失效条件/);
   assert.ok(prepared.prompt.includes("LEVEL1"));
@@ -69,6 +76,29 @@ test("prepareCodexTokenAnalysis honors explicit kline context limits", () => {
   });
 
   assert.equal(prepared.report.recentKlines.length, 50);
+});
+
+test("prepareCodexTokenAnalysis caps default kline context to keep prompts small", () => {
+  const prepared = prepareCodexTokenAnalysis({
+    symbol: "BTCUSDT",
+    intervalCode: "1h",
+    klinePayload: klinePayload(5000)
+  });
+
+  assert.equal(prepared.report.summary.bars, 5000);
+  assert.equal(prepared.report.recentKlines.length, 360);
+  assert.ok(prepared.prompt.length < 1_048_576);
+});
+
+test("prepareCodexTokenAnalysis caps oversized explicit kline limits", () => {
+  const prepared = prepareCodexTokenAnalysis({
+    symbol: "BTCUSDT",
+    intervalCode: "1h",
+    klinePayload: klinePayload(1000),
+    contextKlineLimit: 5000
+  });
+
+  assert.equal(prepared.report.recentKlines.length, 720);
 });
 
 test("prepareCodexTokenAnalysis rejects empty kline payloads", () => {

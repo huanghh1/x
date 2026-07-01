@@ -1,4 +1,6 @@
 const VALID_INTERVALS = new Set(["15m", "1h", "4h", "1d"]);
+const DEFAULT_CONTEXT_KLINE_LIMIT = 360;
+const MAX_CONTEXT_KLINE_LIMIT = 720;
 
 function requestError(message, statusCode = 400) {
   const error = new Error(message);
@@ -135,6 +137,14 @@ function sanitizeContext(value, depth = 0) {
   return output;
 }
 
+function normalizeContextKlineLimit(value) {
+  const requestedLimit = Number(value);
+  const rawLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? requestedLimit
+    : DEFAULT_CONTEXT_KLINE_LIMIT;
+  return Math.max(24, Math.min(MAX_CONTEXT_KLINE_LIMIT, Math.floor(rawLimit)));
+}
+
 export function prepareCodexTokenAnalysis({ symbol, intervalCode, klinePayload, context, contextKlineLimit } = {}) {
   const safeSymbol = cleanSymbol(symbol || klinePayload?.symbol);
   const safeInterval = normalizeTokenInterval(intervalCode || klinePayload?.intervalCode);
@@ -142,10 +152,7 @@ export function prepareCodexTokenAnalysis({ symbol, intervalCode, klinePayload, 
   if (!safeSymbol) throw requestError("symbol is required");
   if (!klines.length) throw requestError(`当前没有 ${safeSymbol} ${safeInterval} 的 K 线缓存，先展开图表或等待抓取完成。`, 404);
 
-  const requestedLimit = Number(contextKlineLimit);
-  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
-    ? Math.min(klines.length, Math.max(24, Math.floor(requestedLimit)))
-    : klines.length;
+  const limit = Math.min(klines.length, normalizeContextKlineLimit(contextKlineLimit));
   const recentKlines = klines.slice(-limit).map(pickKline);
   const report = {
     title: `代币图表分析：${safeSymbol} · ${safeInterval}`,
@@ -172,15 +179,15 @@ export function prepareCodexTokenAnalysis({ symbol, intervalCode, klinePayload, 
   };
 
   const prompt = [
-    "你是我的代币信号研究助理，只判断这个币是否值得继续观察；你不是交易复盘教练。只根据下面 JSON 里的本系统监控数据看这个币，不要联网，不要读取本地文件，不要执行命令，不要索要或猜测任何 API Key/Secret。",
-    "用中文回答，语气像在帮我快速做代币信号研判。不要复盘我的交易盈亏，不要写交易记录总结，不要保证收益，不要写“可以买/可以卖/建议开仓/建议做多/建议做空”，只能写“值得继续观察/暂时降低关注/信号不足”。",
-    "重点看：当前价格相对 MA100/MA200 的位置、全量 K 线里的趋势位置、近几段涨跌、区间高低点、成交量变化、数据质量，以及页面上下文里的均线/OI/资金费/关注池信号。",
-    "如果证据不足，要直接说证据不足；如果只是短线异动，也要说清楚需要哪些确认，以及什么条件下当前判断失效。",
+    "你是我的代币执行研判助理，目标是判断这个币当前更适合试多、试空、等待确认还是放弃；你不是交易复盘教练。只根据下面 JSON 里的本系统监控数据看技术面和资金面；不要联网，不要做外部资讯检索，不要读取本地文件，不要执行命令，不要索要或猜测任何 API Key/Secret。",
+    "用中文回答，语气直接、果断、像在帮我盘前快速做交易决策。证据强时可以明确写“试多/试空/等待突破/暂时放弃”，也可以写“可以执行”；不要保证收益，不要把 JSON 没有的数据当事实，不要脑补外部催化。",
+    "重点看：当前价格相对 MA100/MA200 的位置、全量 K 线里的趋势位置、近几段涨跌、区间高低点、成交量变化、数据质量，以及页面上下文里的均线/OI/资金费/热度/关注池信号。",
+    "如果技术形态、量能、OI/资金费、热度等系统内信号互相确认，要给出清晰执行方向；如果证据不足或信号冲突，要直接说不执行，并说明还差什么确认。短线异动必须写清楚确认条件和失效条件。",
     "请按这个格式输出，不要扩成长篇报告：",
-    "当前判断：1-3 句话，说明当前更像强势、弱势、震荡、异动待确认还是证据不足，并给出低/中/高置信度。",
-    "关键证据：列 2-4 条，必须引用 JSON 中的具体数据，例如价格、MA100/MA200 距离、近几段涨跌幅、成交量、OI、资金费或热度信号。",
+    "执行结论：1-3 句话，必须明确写试多、试空、等待确认或暂时放弃；说明当前更像强势、弱势、震荡、异动待确认还是证据不足，并给出低/中/高置信度。",
+    "关键证据：列 2-4 条，必须引用 JSON 中的具体数据，例如价格、MA100/MA200 距离、近几段涨跌幅、成交量、OI、资金费、热度或关注池信号。",
+    "执行条件：给 1-3 条可执行条件，包含触发条件、失效条件和风控位置，例如站稳哪个均线、放量突破哪个价位、跌破哪里就不做或止损；如果不执行，也写等待什么条件。",
     "风险点：列 1-3 条，只写数据里真实存在的风险，例如追高、跌破均线、量能不足、OI过热、资金费异常、K线缺口或历史不足。",
-    "继续观察：给 3 条以内可执行观察条件，必须包含确认条件和失效条件，例如站稳哪个均线、放量突破哪个价位、跌破哪里就降低关注。",
     "",
     "<token_data_json>",
     JSON.stringify(report, null, 2),

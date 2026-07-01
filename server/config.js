@@ -14,6 +14,15 @@ function boolEnv(name, fallback) {
   return value === "true";
 }
 
+function listEnv(name, fallback = []) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 const intervalLookbackDays = {
   "15m": numberEnv("KLINE_15M_LOOKBACK_DAYS", 60),
   "1h": numberEnv("KLINE_1H_LOOKBACK_DAYS", 183),
@@ -93,7 +102,8 @@ export const config = {
     codex: {
       command: process.env.CODEX_CLI_PATH?.trim() || "/Applications/Codex.app/Contents/Resources/codex",
       timeoutMs: Math.max(30_000, numberEnv("TRADE_ANALYSIS_CODEX_TIMEOUT_MS", 180_000)),
-      contextEventLimit: Math.max(10, Math.min(180, numberEnv("TRADE_ANALYSIS_CODEX_EVENT_LIMIT", 80)))
+      contextEventLimit: Math.max(10, Math.min(180, numberEnv("TRADE_ANALYSIS_CODEX_EVENT_LIMIT", 80))),
+      tokenContextKlineLimit: Math.max(24, Math.min(720, numberEnv("TOKEN_ANALYSIS_CODEX_KLINE_LIMIT", 360)))
     },
     binance: {
       apiKey: process.env.BINANCE_API_KEY?.trim() ?? "",
@@ -103,7 +113,8 @@ export const config = {
     },
     hyperliquid: {
       walletAddress: process.env.HYPERLIQUID_WALLET_ADDRESS?.trim() ?? "",
-      infoBaseUrl: process.env.HYPERLIQUID_INFO_BASE_URL?.trim() || "https://api.hyperliquid.xyz/info"
+      infoBaseUrl: process.env.HYPERLIQUID_INFO_BASE_URL?.trim() || "https://api.hyperliquid.xyz/info",
+      perpDexs: listEnv("HYPERLIQUID_PERP_DEXS")
     }
   },
   crawler: {

@@ -23,7 +23,8 @@ function testConfig() {
       },
       hyperliquid: {
         walletAddress: "",
-        infoBaseUrl: "https://hyperliquid.test/info"
+        infoBaseUrl: "https://hyperliquid.test/info",
+        perpDexs: []
       }
     }
   };
@@ -308,6 +309,66 @@ test("symbol summaries support pagination when history storage is unavailable", 
       analysis.summary.bySymbol.map((row) => row.symbol),
       ["BBBUSDT"]
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Hyperliquid positions include configured HIP-3 perp dexs", async () => {
+  const originalFetch = globalThis.fetch;
+  const start = Date.UTC(2026, 0, 5, 0, 0, 0);
+  const end = start + 60_000;
+  const requestedDexs = [];
+
+  try {
+    globalThis.fetch = async (url, options = {}) => {
+      if (String(url) !== "https://hyperliquid.test/info") throw new Error(`unexpected fetch ${url}`);
+      const body = JSON.parse(options.body);
+      if (body.type === "userFillsByTime") return response([]);
+      if (body.type === "userFunding") return response([]);
+      if (body.type === "clearinghouseState") {
+        requestedDexs.push(body.dex ?? "");
+        return response({
+          time: end,
+          assetPositions: body.dex === "xyz"
+            ? [
+                {
+                  position: {
+                    coin: "xyz:JPY",
+                    szi: "-193.66",
+                    entryPx: "162.0",
+                    positionValue: "31390.3494",
+                    unrealizedPnl: "-17.4294",
+                    leverage: { type: "isolated", value: 50 },
+                    liquidationPx: "163.661191125"
+                  }
+                }
+              ]
+            : []
+        });
+      }
+      throw new Error(`unexpected Hyperliquid request ${body.type}`);
+    };
+
+    const config = testConfig();
+    config.tradeAnalysis.binance.apiKey = "";
+    config.tradeAnalysis.binance.apiSecret = "";
+    config.tradeAnalysis.hyperliquid.walletAddress = "0xf020762C7bb2A9f198D67b7B0d722dA0a55bBA1C";
+    config.tradeAnalysis.hyperliquid.perpDexs = ["xyz"];
+
+    const analysis = await getTradeAnalysis(config, {
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      symbol: "USDJPY"
+    });
+
+    assert.deepEqual(requestedDexs, ["", "xyz"]);
+    assert.equal(analysis.positionSummary.count, 1);
+    assert.equal(analysis.positions[0].symbol, "xyz:JPY");
+    assert.equal(analysis.positions[0].side, "short");
+    assert.equal(analysis.positions[0].quantity, 193.66);
+    assert.equal(analysis.positions[0].leverage, 50);
+    assert.equal(analysis.positions[0].unrealizedPnl, -17.4294);
   } finally {
     globalThis.fetch = originalFetch;
   }

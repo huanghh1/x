@@ -108,12 +108,15 @@ BINANCE_FUTURES_BASE_URL=https://fapi.binance.com
 # Hyperliquid：只需要钱包地址，查询成交和资金费
 HYPERLIQUID_WALLET_ADDRESS=
 HYPERLIQUID_INFO_BASE_URL=https://api.hyperliquid.xyz/info
+# 可选：HIP-3 / builder-deployed perp dex，多个用英文逗号分隔，例如 xyz
+HYPERLIQUID_PERP_DEXS=
 
 TRADE_ANALYSIS_DEFAULT_LOOKBACK_DAYS=90
 TRADE_ANALYSIS_EVENT_LIMIT=5000
 CODEX_CLI_PATH=/Applications/Codex.app/Contents/Resources/codex
 TRADE_ANALYSIS_CODEX_TIMEOUT_MS=180000
 TRADE_ANALYSIS_CODEX_EVENT_LIMIT=80
+TOKEN_ANALYSIS_CODEX_KLINE_LIMIT=360
 ```
 
 当前接口：
@@ -122,7 +125,7 @@ TRADE_ANALYSIS_CODEX_EVENT_LIMIT=80
 - `POST /api/trade-analysis/codex`：按全部交易记录、交易组、选中币种或指定时间段生成 Codex 复盘；本机或 `API_MUTATION_TOKEN` 保护。
 - `POST /api/token-analysis/codex`：按图表里的代币和周期，把 K 线、MA100/MA200、数据质量和页面上下文交给 Codex 做代币分析；本机或 `API_MUTATION_TOKEN` 保护。
 - Binance 使用 USD-M Futures `/fapi/v1/income`、`/fapi/v1/userTrades`、`/fapi/v1/fundingRate` 和 `/fapi/v3/positionRisk`。
-- Hyperliquid 使用 Info endpoint 的 `userFillsByTime`、`userFunding` 和 `clearinghouseState`。
+- Hyperliquid 使用 Info endpoint 的 `userFillsByTime`、`userFunding` 和 `clearinghouseState`；HIP-3 / builder-deployed perp 持仓需要在 `HYPERLIQUID_PERP_DEXS` 配置对应 dex。
 
 ## K 线保留窗口
 

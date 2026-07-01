@@ -311,3 +311,23 @@ CREATE TABLE IF NOT EXISTS token_unlock_cache (
   KEY idx_unlock_expiry (expires_at),
   KEY idx_unlock_checked (checked_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 交易总结日记本：手动记录开仓理由、结束理由和后续复盘总结
+CREATE TABLE IF NOT EXISTS trade_journal (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  title VARCHAR(160) NOT NULL,
+  symbol VARCHAR(32) NULL,
+  side VARCHAR(24) NULL,
+  status ENUM('OPEN','ENDED','REVIEWED') NOT NULL DEFAULT 'OPEN',
+  opened_at DATETIME(3) NULL,
+  closed_at DATETIME(3) NULL,
+  open_reason TEXT NOT NULL,
+  close_reason TEXT NULL,
+  review_summary TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_trade_journal_status_time (status, opened_at, id),
+  KEY idx_trade_journal_symbol_time (symbol, opened_at, id),
+  KEY idx_trade_journal_updated (updated_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
