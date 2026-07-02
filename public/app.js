@@ -5,6 +5,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const TRADE_MAX_LOOKBACK_DAYS = 90;
 const API_MUTATION_TOKEN_STORAGE_KEY = "signal.monitor.apiMutationToken";
+const TOKEN_CODEX_PROMPT_TEMPLATE = "standard";
 
 const LABELS = {
   category: { A: "A类", B: "B类" },
@@ -31,6 +32,14 @@ const SIGNAL_PROFILE_COLORS = {
   15: { text: "#211721", border: "#d8ccd4", bg: "#f8f3f6" }
 };
 
+function normalizeTokenCodexTemplate(value) {
+  return TOKEN_CODEX_PROMPT_TEMPLATE;
+}
+
+function tokenCodexTemplateLabel() {
+  return "常规看币";
+}
+
 const state = {
   categories: new Set(ALL_CATEGORIES),
   levels: new Set(["LEVEL1", "LEVEL2"]),
@@ -44,6 +53,7 @@ const state = {
   chartCache: new Map(),
   chartState: new Map(),
   tokenCodex: new Map(),
+  tokenCodexTemplate: TOKEN_CODEX_PROMPT_TEMPLATE,
   chartRefreshTimers: new Map(),
   chartRefreshAttempts: new Map(),
   realtimeKlines: new Map(),
@@ -112,6 +122,7 @@ const state = {
   tradeAnalysisError: "",
   tradeAnalysisInitialized: false,
   tradeAnalysisRequestId: 0,
+  tradeWindowKey: "max",
   tradeCodexScope: "all",
   tradeCodexLoading: false,
   tradeCodexError: "",
@@ -1496,8 +1507,9 @@ function applyTradeAnalysisPayload(payload) {
   state.tradeCodexResult = null;
 }
 
-async function loadTradeAnalysis({ refresh = true } = {}) {
+async function loadTradeAnalysis({ refresh = true, advanceWindow = refresh } = {}) {
   ensureTradeAnalysisInputs();
+  if (advanceWindow) advanceTradeWindowToNow();
   const requestId = state.tradeAnalysisRequestId + 1;
   state.tradeAnalysisRequestId = requestId;
   state.tradeAnalysisLoading = true;
@@ -1741,6 +1753,7 @@ function updateTradeAnalysisStatus(payload) {
   else if (state.tradeAnalysisRefreshing) parts.push("同步最新");
   if (payload?.snapshot) parts.push("本地记录");
   if (payload?.generatedAt) parts.push(`更新时间 ${formatTime(payload.generatedAt)}`);
+  if (payload?.positionSnapshot?.cached) parts.push(`仓位缓存 ${formatTime(payload.positionSnapshot.updatedAt)}`);
   if (payload?.window?.startTime && payload?.window?.endTime) {
     parts.push(`${formatTime(payload.window.startTime)} → ${formatTime(payload.window.endTime)}`);
   }
@@ -1751,7 +1764,7 @@ function updateTradeAnalysisStatus(payload) {
   if (payload?.positions) parts.push(`${payload.positions.length} 个持仓`);
   if (payload?.tradeRows) parts.push(`交易记录 ${payload.tradeRows.total ?? 0} 项`);
   if (payload?.persistence?.enabled) parts.push(payload?.snapshot ? "来自数据库" : "已入库");
-  else if (payload?.persistence?.error) parts.push(`入库失败：${payload.persistence.error}`);
+  else if (payload?.persistence?.error) parts.push(`${payload?.snapshot ? "数据库读取失败" : "入库失败"}：${payload.persistence.error}`);
   if (state.tradeAnalysisError) parts.push(`失败：${state.tradeAnalysisError}`);
   setText("#tradeAnalysisStatus", parts.join(" · ") || "等待读取");
   const refreshButton = $("#refreshTradeAnalysisBtn");
@@ -2363,15 +2376,27 @@ function updateTradeWindowButtons(activeKey) {
   });
 }
 
-function setTradeWindow(value) {
-  const windowOption = normalizeTradeWindow(value);
-  if (!windowOption) return;
+function applyTradeWindowInputs(windowOption) {
   const end = new Date();
   const start = new Date(end.getTime() - windowOption.lookbackMs);
   const startInput = $("#tradeStartInput");
   const endInput = $("#tradeEndInput");
   if (startInput) startInput.value = toDatetimeLocal(start);
   if (endInput) endInput.value = toDatetimeLocal(end);
+}
+
+function advanceTradeWindowToNow() {
+  const windowOption = normalizeTradeWindow(state.tradeWindowKey);
+  if (!windowOption) return;
+  applyTradeWindowInputs(windowOption);
+  updateTradeWindowButtons(windowOption.key);
+}
+
+function setTradeWindow(value) {
+  const windowOption = normalizeTradeWindow(value);
+  if (!windowOption) return;
+  state.tradeWindowKey = windowOption.key;
+  applyTradeWindowInputs(windowOption);
   updateTradeWindowButtons(windowOption.key);
   state.tradeSymbolPage = 1;
   loadTradeAnalysis();
@@ -3406,8 +3431,8 @@ function chartKlineLength(payload) {
   return chartKlines(payload).length;
 }
 
-function tokenCodexKey(symbol, intervalCode) {
-  return `${String(symbol ?? "").toUpperCase()}|${intervalCode || "1h"}`;
+function tokenCodexKey(symbol, intervalCode, promptTemplate = state.tokenCodexTemplate) {
+  return `${String(symbol ?? "").toUpperCase()}|${intervalCode || "1h"}|${normalizeTokenCodexTemplate(promptTemplate)}`;
 }
 
 function signalContextForToken(symbol, intervalCode) {
@@ -3440,6 +3465,42 @@ function signalContextForToken(symbol, intervalCode) {
     selectedMa200: selectedDetail.ma200,
     triggered
   };
+}
+
+function buildYokaiResearchPrompt(symbol, intervalCode) {
+  const safeSymbol = String(symbol ?? "").trim().toUpperCase() || "当前交易对";
+  const baseAsset = safeSymbol.replace(/USDT$/, "") || safeSymbol;
+  return [
+    `请帮我对 ${safeSymbol}（base asset: ${baseAsset}）做一次“妖币 / 庄控风险”排查。`,
+    "",
+    "先确认币种身份：Binance 合约 symbol、是否 Binance Alpha、是否有现货、是否有合约、主要链、合约地址、DEX 池子、market cap / FDV / liquidity / volume。仅靠 symbol 可能重名，必须优先用合约地址或 Binance/DEX 页面交叉确认。",
+    "",
+    "核心检查维度：",
+    "1. 筹码集中：Top10 holder 占比、Top holder 类型、是否需要排除 CEX 热钱包、LP、staking、bridge、项目锁仓或做市地址。",
+    "2. Bundler / 机器人 / 同源钱包：部署者、早期买入钱包、同秒注资、同源资金、批量钱包痕迹；查不到就写缺失。",
+    "3. OI/MCap：合约 OI value 与市值或流通市值的比例；OI/MCap > 3x 属于高风险信号。",
+    "4. Vol/OI：成交额相对 OI 的异常程度；Vol/OI > 20x 时要警惕刷量或高频对倒。",
+    "5. 资金费率陷阱：持续深度负费率 < -0.05% 且价格抗跌/OI 上升，偏诱空或挤压蓄力；费率转正后要观察是否出货。",
+    "6. 订单簿结构：Bid-Ask 是否失衡、Ask 是否变薄、拉盘前上方卖压是否被快速吃掉；没有盘口数据就写缺失。",
+    "7. wallet -> CEX：项目方、早期大户或异常钱包是否向 CEX 转入；没有地址标签或转账证据就写缺失。",
+    "8. 价格结构：是否处在区间底部、横盘吸筹、挤压蓄力、快速拉高、急跌出货或双向收割阶段。",
+    "",
+    "评分权重：筹码集中 25 分，资金费率异常 20 分，OI/MCap 异常 15 分，Vol/OI 刷量嫌疑 15 分，价格接近区间底部或挤压蓄力位置 10 分，Bundler/机器人/同源钱包 10 分，订单簿结构 5 分，总分 0-100。",
+    "",
+    "操盘模式识别：",
+    "- 挤压式：建仓 -> 诱饵拉盘 -> 深度负费率引空 -> 挤压爆空 -> 反手做空。",
+    "- 拉盘砸盘式：无充分横盘 -> 机器人钱包同秒注资 -> 急拉 ATH -> 快速崩盘。",
+    "- 一鱼双吃：慢磨吞 Ask -> 空平多追 -> 一针砸盘 -> 双向收割。",
+    "没有对应证据就写不成立。",
+    "",
+    "请按这个格式输出，不要扩成长篇报告：",
+    "妖币/庄控结论：给 0-100 分；写风险等级低/中/高；写当前阶段：建仓、诱空、挤压、出货或不成立；用 1-3 句话说明。",
+    "证据链：列 2-5 条，必须引用具体数据和来源链接/来源名称。",
+    "反证与缺失：列真实反证和缺失数据，尤其是 Top10、Bundler、Alpha/Futures、链、MCap、订单簿、wallet->CEX。",
+    "操盘模式：判断更像挤压式、拉盘砸盘式、一鱼双吃或不成立；说明触发下一阶段还差什么确认。",
+    "退出/警戒信号：检查费率转正、OI 跌价涨、大额 wallet->CEX、价格放量失守关键位；没有数据就写缺失。",
+    "执行建议：明确写试多、试空、等待确认或暂时放弃；给 1-3 条触发条件、失效条件和风控位置。"
+  ].join("\n");
 }
 
 function tokenCodexContext(symbol, intervalCode) {
@@ -3492,10 +3553,12 @@ function tokenCodexContext(symbol, intervalCode) {
   };
 }
 
-function tokenCodexPanelHtml(symbol, intervalCode) {
-  const key = tokenCodexKey(symbol, intervalCode);
+function tokenCodexPanelHtml(symbol, intervalCode, promptTemplate = state.tokenCodexTemplate) {
+  const safeTemplate = normalizeTokenCodexTemplate(promptTemplate);
+  const key = tokenCodexKey(symbol, intervalCode, safeTemplate);
   const entry = state.tokenCodex.get(key);
   if (!entry) return "";
+  const templateLabel = tokenCodexTemplateLabel(safeTemplate);
   const status = entry.loading
     ? "分析中"
     : entry.error
@@ -3511,7 +3574,7 @@ function tokenCodexPanelHtml(symbol, intervalCode) {
   return `
     <section class="chart-codex-panel ${entry.error ? "is-error" : ""}" data-token-codex-panel="${escapeHtml(key)}">
       <div class="chart-codex-head">
-        <strong>Codex 看币</strong>
+        <strong>Codex 看币 · ${escapeHtml(templateLabel)}</strong>
         <span>${escapeHtml(status)}</span>
       </div>
       <pre>${escapeHtml(content)}</pre>
@@ -3522,8 +3585,9 @@ function tokenCodexPanelHtml(symbol, intervalCode) {
 async function runTokenCodexAnalysis(symbol, intervalCode) {
   const safeSymbol = String(symbol ?? "").toUpperCase();
   const safeInterval = intervalCode || "1h";
+  const safeTemplate = TOKEN_CODEX_PROMPT_TEMPLATE;
   if (!safeSymbol) return;
-  const key = tokenCodexKey(safeSymbol, safeInterval);
+  const key = tokenCodexKey(safeSymbol, safeInterval, safeTemplate);
   const requestId = Number(state.tokenCodex.get(key)?.requestId ?? 0) + 1;
   state.tokenCodex.set(key, {
     loading: true,
@@ -3539,6 +3603,7 @@ async function runTokenCodexAnalysis(symbol, intervalCode) {
       body: JSON.stringify({
         symbol: safeSymbol,
         intervalCode: safeInterval,
+        promptTemplate: safeTemplate,
         context: tokenCodexContext(safeSymbol, safeInterval)
       })
     });
@@ -3600,7 +3665,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
     const currentStatus = payload.hasCurrentKline
       ? " · 含当前未收盘K线"
       : " · 等待当前K线实时推送";
-    const codexEntry = state.tokenCodex.get(key);
+    const codexEntry = state.tokenCodex.get(tokenCodexKey(row.symbol, row.intervalCode));
     shell.innerHTML = `
       <div class="chart-toolbar">
         <div class="chart-title-block">
@@ -3612,6 +3677,7 @@ async function loadAndRenderChart(row, { force = false } = {}) {
           <button class="${settings.volume ? "active" : ""}" type="button" data-tool="volume" title="显示或隐藏成交量">成交量</button>
           <button class="${settings.ma100 ? "active" : ""}" type="button" data-tool="ma100" title="显示或隐藏 MA100">MA100</button>
           <button class="${settings.ma200 ? "active" : ""}" type="button" data-tool="ma200" title="显示或隐藏 MA200">MA200</button>
+          <button class="chart-yokai-copy" type="button" data-tool="copy-yokai-prompt" data-token-codex-symbol="${escapeHtml(row.symbol)}" data-token-codex-interval="${escapeHtml(row.intervalCode)}" title="复制当前交易对的妖币排查话术">复制妖币话术</button>
           <button class="${codexEntry ? "active" : ""}" type="button" data-tool="token-codex" data-token-codex-symbol="${escapeHtml(row.symbol)}" data-token-codex-interval="${escapeHtml(row.intervalCode)}" title="让 Codex 看这个币的图表和信号" ${codexEntry?.loading ? "disabled" : ""}>${codexEntry?.loading ? "分析中" : "Codex看币"}</button>
           <a href="https://www.tradingview.com/chart/?symbol=${tvSymbol}" target="_blank" rel="noreferrer">TradingView</a>
         </div>
@@ -3662,14 +3728,27 @@ function scheduleChartRefreshIfNeeded(key, row, payload) {
 
 function bindChartTools(shell, key) {
   for (const button of shell.querySelectorAll("[data-tool]")) {
-    button.addEventListener("click", () => {
-      const settings = state.chartState.get(key);
-      if (!settings) return;
+    button.addEventListener("click", async () => {
       const tool = button.dataset.tool;
+      if (tool === "copy-yokai-prompt") {
+        const originalText = button.textContent;
+        try {
+          await copyText(buildYokaiResearchPrompt(button.dataset.tokenCodexSymbol, button.dataset.tokenCodexInterval));
+          button.textContent = "已复制";
+          setTimeout(() => {
+            button.textContent = originalText || "复制妖币话术";
+          }, 1200);
+        } catch {
+          button.textContent = "复制失败";
+        }
+        return;
+      }
       if (tool === "token-codex") {
         void runTokenCodexAnalysis(button.dataset.tokenCodexSymbol, button.dataset.tokenCodexInterval);
         return;
       }
+      const settings = state.chartState.get(key);
+      if (!settings) return;
       if (["crosshair", "volume", "ma100", "ma200"].includes(tool)) settings[tool] = !settings[tool];
       loadAndRenderChart({ symbol: state.chartCache.get(key)?.symbol, intervalCode: state.chartCache.get(key)?.intervalCode });
     });
@@ -4376,6 +4455,12 @@ $("#refreshTradeAnalysisBtn")?.addEventListener("click", () => loadTradeAnalysis
 $("#applyTradeFilterBtn")?.addEventListener("click", () => {
   state.tradeSymbolPage = 1;
   loadTradeAnalysis();
+});
+["#tradeStartInput", "#tradeEndInput"].forEach((selector) => {
+  $(selector)?.addEventListener("change", () => {
+    state.tradeWindowKey = "";
+    updateTradeWindowButtons("");
+  });
 });
 $("#runTradeCodexBtn")?.addEventListener("click", () => runTradeCodexAnalysis());
 $("#tradeSymbolSelect")?.addEventListener("change", (event) => {

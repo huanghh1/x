@@ -279,6 +279,40 @@ CREATE TABLE IF NOT EXISTS open_interest_monitor (
   KEY idx_oi_1d (change_1d_pct, observed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS open_interest_sample (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  symbol VARCHAR(32) NOT NULL,
+  open_interest DECIMAL(38,12) NOT NULL,
+  open_interest_value DECIMAL(38,12) NULL,
+  observed_at DATETIME(3) NOT NULL,
+  source ENUM('current','history') NOT NULL DEFAULT 'current',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_oi_sample_symbol_time (symbol, observed_at),
+  KEY idx_oi_sample_symbol_observed (symbol, observed_at),
+  KEY idx_oi_sample_observed (observed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS telegram_alert_queue (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  queue_key VARCHAR(191) NOT NULL,
+  alert_type ENUM('OI_SPIKE') NOT NULL,
+  symbol VARCHAR(32) NULL,
+  status ENUM('PENDING','SENDING','SENT','FAILED') NOT NULL DEFAULT 'PENDING',
+  payload_json JSON NOT NULL,
+  attempt_count INT UNSIGNED NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  locked_at DATETIME(3) NULL,
+  sent_at DATETIME(3) NULL,
+  last_error VARCHAR(1000) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_telegram_alert_queue_key (queue_key),
+  KEY idx_telegram_alert_pending (status, next_attempt_at, id),
+  KEY idx_telegram_alert_symbol (symbol, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS hot_rank_snapshot (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   symbol VARCHAR(32) NOT NULL,

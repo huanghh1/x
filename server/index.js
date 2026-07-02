@@ -35,7 +35,7 @@ import {
 import { getHotRank } from "./hotRank.js";
 import { cleanupRuntimeLogFiles, RUNTIME_ERROR_LOG_FILES, RUNTIME_LOG_FILES, runtimeLogPath } from "./runtimeLogs.js";
 import { telegramState } from "./telegram.js";
-import { getTradeAnalysis } from "./tradeAnalysis.js";
+import { getTradeAnalysis, startTradePositionPrefetch } from "./tradeAnalysis.js";
 import { normalizeCodexScope, prepareCodexTradeAnalysis, runCodexTradeAnalysis } from "./codexTradeAnalysis.js";
 import { normalizeTokenInterval, prepareCodexTokenAnalysis } from "./codexTokenAnalysis.js";
 import { requestService, serviceStates, serviceUrl } from "./serviceClient.js";
@@ -586,7 +586,8 @@ app.post("/api/token-analysis/codex", requireLocalMutation, async (request, resp
       intervalCode,
       klinePayload,
       context: body.context,
-      contextKlineLimit: body.contextKlineLimit ?? config.tradeAnalysis.codex.tokenContextKlineLimit
+      contextKlineLimit: body.contextKlineLimit ?? config.tradeAnalysis.codex.tokenContextKlineLimit,
+      promptTemplate: body.promptTemplate ?? body.template
     });
     response.json(await runPreparedCodexAnalysis(prepared));
   } catch (error) {
@@ -1014,6 +1015,7 @@ app.use((_request, response) => {
 });
 
 await ensureDatabase();
+startTradePositionPrefetch(config);
 app.listen(config.service.apiPort, config.service.apiHost, () => {
   console.log(`API service running at http://${config.service.apiHost}:${config.service.apiPort}`);
 });

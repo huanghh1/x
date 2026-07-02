@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeTokenInterval, prepareCodexTokenAnalysis } from "./codexTokenAnalysis.js";
+import { normalizeTokenInterval, normalizeTokenPromptTemplate, prepareCodexTokenAnalysis } from "./codexTokenAnalysis.js";
 
 function kline(index, overrides = {}) {
   const close = 100 + index;
@@ -36,6 +36,12 @@ test("normalizeTokenInterval falls back to 1h for unsupported values", () => {
   assert.equal(normalizeTokenInterval("bad"), "1h");
 });
 
+test("normalizeTokenPromptTemplate falls back to the standard token prompt", () => {
+  assert.equal(normalizeTokenPromptTemplate("yokai"), "standard");
+  assert.equal(normalizeTokenPromptTemplate("STANDARD"), "standard");
+  assert.equal(normalizeTokenPromptTemplate("bad"), "standard");
+});
+
 test("prepareCodexTokenAnalysis summarizes and returns all cached klines by default", () => {
   const prepared = prepareCodexTokenAnalysis({
     symbol: "BTCUSDT",
@@ -49,6 +55,8 @@ test("prepareCodexTokenAnalysis summarizes and returns all cached klines by defa
 
   assert.equal(prepared.report.scope, "token");
   assert.equal(prepared.report.symbol, "BTCUSDT");
+  assert.equal(prepared.report.promptTemplate, "standard");
+  assert.equal(prepared.report.promptTemplateLabel, "常规看币");
   assert.equal(prepared.report.recentKlines.length, 220);
   assert.equal(prepared.report.summary.bars, 220);
   assert.equal(prepared.report.summary.movingAverages.ma100.side, "above");
@@ -64,7 +72,30 @@ test("prepareCodexTokenAnalysis summarizes and returns all cached klines by defa
   assert.match(prepared.prompt, /试多\/试空/);
   assert.match(prepared.prompt, /低\/中\/高置信度/);
   assert.match(prepared.prompt, /确认条件和失效条件/);
+  assert.doesNotMatch(prepared.prompt, /妖币 \/ 庄控风险/);
+  assert.doesNotMatch(prepared.prompt, /Top10|Bundler|OI\/MCap|Vol\/OI/);
   assert.ok(prepared.prompt.includes("LEVEL1"));
+});
+
+test("prepareCodexTokenAnalysis always uses the standard token prompt", () => {
+  const prepared = prepareCodexTokenAnalysis({
+    symbol: "MYXUSDT",
+    intervalCode: "15m",
+    klinePayload: klinePayload(220),
+    promptTemplate: "yokai",
+    context: {
+      funding: { currentFundingRate: -0.0007, fundingIntervalHours: 1 },
+      openInterest: { changePercent: 180, currentOpenInterestValue: 12_000_000 }
+    }
+  });
+
+  assert.equal(prepared.report.promptTemplate, "standard");
+  assert.equal(prepared.report.promptTemplateLabel, "常规看币");
+  assert.match(prepared.report.title, /代币图表分析/);
+  assert.match(prepared.prompt, /代币执行研判助理/);
+  assert.doesNotMatch(prepared.prompt, /妖币 \/ 庄控风险研判助理/);
+  assert.doesNotMatch(prepared.prompt, /Top10|Bundler|OI\/MCap|Vol\/OI/);
+  assert.match(prepared.prompt, /MYXUSDT/);
 });
 
 test("prepareCodexTokenAnalysis honors explicit kline context limits", () => {

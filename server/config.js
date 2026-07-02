@@ -119,6 +119,10 @@ export const config = {
     requestTimeoutMs: numberEnv("TRADE_ANALYSIS_REQUEST_TIMEOUT_MS", numberEnv("REQUEST_TIMEOUT_MS", 15000)),
     defaultLookbackDays: Math.max(1, numberEnv("TRADE_ANALYSIS_DEFAULT_LOOKBACK_DAYS", 90)),
     maxEventRows: Math.max(100, numberEnv("TRADE_ANALYSIS_EVENT_LIMIT", 5000)),
+    positionPrefetchEnabled: boolEnv("TRADE_POSITION_PREFETCH_ENABLED", true),
+    positionPrefetchIntervalMs: Math.max(10_000, numberEnv("TRADE_POSITION_PREFETCH_MS", 60_000)),
+    positionPrefetchInitialDelayMs: Math.max(0, numberEnv("TRADE_POSITION_PREFETCH_INITIAL_DELAY_MS", 2_000)),
+    positionCacheMs: Math.max(30_000, numberEnv("TRADE_POSITION_CACHE_MS", 5 * 60_000)),
     codex: {
       command: process.env.CODEX_CLI_PATH?.trim() || "/Applications/Codex.app/Contents/Resources/codex",
       timeoutMs: Math.max(30_000, numberEnv("TRADE_ANALYSIS_CODEX_TIMEOUT_MS", 180_000)),
@@ -195,6 +199,7 @@ export const config = {
     requestLimitPerWindow: Math.max(1, Math.min(1000, numberEnv("OPEN_INTEREST_REQUEST_LIMIT_PER_5M", 900))),
     retryDelayMs: Math.max(5 * 1000, numberEnv("OPEN_INTEREST_RETRY_DELAY_MS", 30 * 1000)),
     historyLimit: Math.max(289, Math.min(500, numberEnv("OPEN_INTEREST_HISTORY_LIMIT", 289))),
+    sampleRetentionDays: Math.max(2, numberEnv("OPEN_INTEREST_SAMPLE_RETENTION_DAYS", 3)),
     spike5mPct: numberEnv("OPEN_INTEREST_SPIKE_5M_PCT", 2),
     spike1hPct: numberEnv("OPEN_INTEREST_SPIKE_1H_PCT", 10),
     spike4hPct: numberEnv("OPEN_INTEREST_SPIKE_4H_PCT", 20),
@@ -238,6 +243,9 @@ export const config = {
     timeoutMs: numberEnv("TELEGRAM_REQUEST_TIMEOUT_MS", 12000),
     retries: Math.max(1, numberEnv("TELEGRAM_REQUEST_RETRIES", 4)),
     retryDelayMs: Math.max(250, numberEnv("TELEGRAM_RETRY_DELAY_MS", 900)),
+    alertQueuePollMs: Math.max(1000, numberEnv("TELEGRAM_ALERT_QUEUE_POLL_MS", 5000)),
+    alertQueueBatchSize: Math.max(1, Math.min(50, numberEnv("TELEGRAM_ALERT_QUEUE_BATCH_SIZE", 10))),
+    alertQueueMaxAttempts: Math.max(1, numberEnv("TELEGRAM_ALERT_QUEUE_MAX_ATTEMPTS", 8)),
     menuCacheMs: Math.max(1000, numberEnv("TELEGRAM_MENU_CACHE_MS", 30_000)),
     menuStaleMs: Math.max(30_000, numberEnv("TELEGRAM_MENU_STALE_MS", 5 * 60_000)),
     menuWarmIntervalMs: Math.max(10_000, numberEnv("TELEGRAM_MENU_WARM_INTERVAL_MS", 60_000))

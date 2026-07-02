@@ -115,6 +115,10 @@ HYPERLIQUID_PERP_DEXS=
 
 TRADE_ANALYSIS_DEFAULT_LOOKBACK_DAYS=90
 TRADE_ANALYSIS_EVENT_LIMIT=5000
+TRADE_POSITION_PREFETCH_ENABLED=true
+TRADE_POSITION_PREFETCH_MS=60000
+TRADE_POSITION_PREFETCH_INITIAL_DELAY_MS=2000
+TRADE_POSITION_CACHE_MS=300000
 CODEX_CLI_PATH=/Applications/Codex.app/Contents/Resources/codex
 TRADE_ANALYSIS_CODEX_TIMEOUT_MS=180000
 TRADE_ANALYSIS_CODEX_EVENT_LIMIT=80
@@ -124,6 +128,7 @@ TOKEN_ANALYSIS_CODEX_KLINE_LIMIT=360
 当前接口：
 
 - `GET /api/trade-analysis?start=<ISO>&end=<ISO>&symbol=<BTCUSDT>`：返回连接状态、当前持仓、交易所汇总、币种汇总和最多 `TRADE_ANALYSIS_EVENT_LIMIT` 条费用/盈亏流水；本机或 `API_MUTATION_TOKEN` 保护。
+- API 服务会按 `TRADE_POSITION_PREFETCH_MS` 在后台预抓取当前持仓；交易分析页面先展示数据库历史和后台缓存仓位，再同步最新交易流水。
 - `POST /api/trade-analysis/codex`：按全部交易记录、交易组、选中币种或指定时间段生成 Codex 复盘；本机或 `API_MUTATION_TOKEN` 保护。
 - `POST /api/token-analysis/codex`：按图表里的代币和周期，把 K 线、MA100/MA200、数据质量和页面上下文交给 Codex 做代币分析；本机或 `API_MUTATION_TOKEN` 保护。
 - Binance 使用 USD-M Futures `/fapi/v1/income`、`/fapi/v1/userTrades`、`/fapi/v1/fundingRate` 和 `/fapi/v3/positionRisk`。

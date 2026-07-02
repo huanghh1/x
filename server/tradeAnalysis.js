@@ -18,6 +18,7 @@ const BINANCE_PNL_INCOME_TYPES = new Set(["REALIZED_PNL", "FUNDING_FEE", "COMMIS
 const TRADE_ANALYSIS_CACHE_MS = 60 * 1000;
 const TRANSIENT_RETRY_DELAYS_MS = [350, 1000];
 const tradeAnalysisCache = new Map();
+const tradePositionCache = new Map();
 
 const CONNECTIONS = [
   {
@@ -801,6 +802,22 @@ function errorSource(id, error) {
   };
 }
 
+async function fetchBinancePositionSource(config, symbol = "") {
+  const source = config.tradeAnalysis.binance;
+  if (!source.apiKey || !source.apiSecret) return missingSource("binance", ["BINANCE_API_KEY", "BINANCE_API_SECRET"]);
+  const positions = await fetchBinancePositions(config, symbol);
+  return okSource("binance", [], positions);
+}
+
+async function fetchHyperliquidPositionSource(config, symbol = "") {
+  const source = config.tradeAnalysis.hyperliquid;
+  if (!source.walletAddress) return missingSource("hyperliquid", ["HYPERLIQUID_WALLET_ADDRESS"]);
+  const payload = await fetchHyperliquidPositions(config, symbol);
+  const sourceResult = okSource("hyperliquid", [], payload.positions);
+  if (payload.error) sourceResult.positionError = payload.error;
+  return sourceResult;
+}
+
 function snapshotSourceResults(connectionStatus = []) {
   return connectionStatus.map((connection) => ({
     id: connection.id,
@@ -813,6 +830,73 @@ function snapshotSourceResults(connectionStatus = []) {
     positionCount: 0,
     rangeNote: connection.configured ? "先显示本地数据库记录，后台同步最新数据。" : ""
   }));
+}
+
+function positionCacheKey(safeSymbol = "") {
+  return safeSymbol || "__all__";
+}
+
+function positionCacheTtlMs(config) {
+  const configured = Number(config?.tradeAnalysis?.positionCacheMs);
+  return Number.isFinite(configured) && configured > 0 ? configured : 5 * 60 * 1000;
+}
+
+function publicSourceResult(source = {}) {
+  const { events: _events, positions: _positions, ...rest } = source;
+  return rest;
+}
+
+function positionOnlySourceResult(source = {}, positions = [], cachedAt = Date.now()) {
+  return {
+    ...publicSourceResult(source),
+    eventCount: 0,
+    positionCount: positions.length,
+    rangeNote: source.configured === false
+      ? source.rangeNote || ""
+      : `后台预抓取仓位缓存，时间 ${new Date(cachedAt).toISOString()}`,
+    events: [],
+    positions
+  };
+}
+
+function rememberTradePositionSnapshot({ safeSymbol = "", sourceResults = [], positions = [], cachedAt = Date.now() } = {}) {
+  const key = positionCacheKey(safeSymbol);
+  tradePositionCache.set(key, {
+    cachedAt,
+    sourceResults: sourceResults.map((source) => ({
+      ...publicSourceResult(source),
+      events: [],
+      positions: Array.isArray(source.positions) ? source.positions : []
+    })),
+    positions: Array.isArray(positions) ? positions : []
+  });
+}
+
+function cachedTradePositionSnapshot(config, { safeSymbol = "" } = {}) {
+  const now = Date.now();
+  const ttlMs = positionCacheTtlMs(config);
+  const exact = tradePositionCache.get(positionCacheKey(safeSymbol));
+  const fallback = safeSymbol ? tradePositionCache.get(positionCacheKey("")) : null;
+  const cached = [exact, fallback].find((item) => item && now - item.cachedAt <= ttlMs);
+  if (!cached) return null;
+  const positions = cached.positions
+    .filter((position) => symbolMatchesValue(position.symbol, safeSymbol))
+    .sort((a, b) => Math.abs(toNumber(b.notional)) - Math.abs(toNumber(a.notional)));
+  const sourceResults = cached.sourceResults.map((source) => {
+    const sourcePositions = positions.filter((position) => position.source === source.id);
+    return positionOnlySourceResult(source, sourcePositions, cached.cachedAt);
+  });
+  return {
+    cachedAt: cached.cachedAt,
+    positions,
+    sourceResults,
+    meta: {
+      cached: true,
+      updatedAt: new Date(cached.cachedAt).toISOString(),
+      ageSeconds: Math.max(0, Math.round((now - cached.cachedAt) / 1000)),
+      ttlSeconds: Math.round(ttlMs / 1000)
+    }
+  };
 }
 
 function emptyGroup(source, symbol) {
@@ -909,6 +993,18 @@ function paginateSymbolSummary(summary, { page = 1, pageSize = 20 } = {}) {
       page: effectivePage,
       pageSize: safePageSize
     }
+  };
+}
+
+function emptyTradeHistory(sourceResults = [], { page = 1, pageSize = 20, persistError = "" } = {}) {
+  const summary = summarize([], sourceResults);
+  const pageResult = paginateSymbolSummary(summary, { page, pageSize });
+  return {
+    ...pageResult,
+    events: [],
+    eventCount: 0,
+    persisted: !persistError,
+    persistError
   };
 }
 
@@ -1018,6 +1114,7 @@ function buildTradeAnalysisPayload({
   sourceResults,
   history,
   positions,
+  positionSnapshot,
   maxEventRows,
   mode
 }) {
@@ -1048,6 +1145,7 @@ function buildTradeAnalysisPayload({
     },
     positionSummary,
     positions: safePositions,
+    positionSnapshot: positionSnapshot ?? null,
     persistence: {
       enabled: history.persisted,
       error: history.persisted ? "" : history.persistError
@@ -1055,6 +1153,79 @@ function buildTradeAnalysisPayload({
     eventCount: history.eventCount + safePositions.length,
     eventLimit: maxEventRows,
     events: events.slice(0, maxEventRows)
+  };
+}
+
+export async function refreshTradePositionCache(config, { symbol = "" } = {}) {
+  const safeSymbol = String(symbol ?? "").trim().toUpperCase().replace(/[^A-Z0-9:_-]/g, "");
+  const fetchers = [
+    ["binance", () => fetchBinancePositionSource(config, safeSymbol)],
+    ["hyperliquid", () => fetchHyperliquidPositionSource(config, safeSymbol)]
+  ];
+  const sourceResults = await Promise.all(fetchers.map(async ([id, run]) => {
+    try {
+      return await retryTransient(run);
+    } catch (error) {
+      return errorSource(id, error);
+    }
+  }));
+  const positions = sourceResults
+    .flatMap((source) => source.positions ?? [])
+    .filter((position) => symbolMatchesValue(position.symbol, safeSymbol))
+    .filter((position, index, all) => all.findIndex((item) => item.id === position.id) === index)
+    .sort((a, b) => Math.abs(toNumber(b.notional)) - Math.abs(toNumber(a.notional)));
+  const cachedAt = Date.now();
+  rememberTradePositionSnapshot({ safeSymbol, sourceResults, positions, cachedAt });
+  return {
+    ok: true,
+    generatedAt: new Date(cachedAt).toISOString(),
+    symbol: safeSymbol,
+    sources: sourceResults.map(publicSourceResult),
+    positionSummary: summarizePositions(positions, sourceResults),
+    positions
+  };
+}
+
+export function startTradePositionPrefetch(config, { logger = console } = {}) {
+  const settings = config?.tradeAnalysis ?? {};
+  if (settings.positionPrefetchEnabled === false) {
+    return { started: false, stop() {}, runNow() { return Promise.resolve(null); } };
+  }
+  const intervalMs = Math.max(10_000, Number(settings.positionPrefetchIntervalMs) || 60_000);
+  const initialDelayMs = Math.max(0, Number(settings.positionPrefetchInitialDelayMs) || 0);
+  let stopped = false;
+  let running = false;
+
+  async function runNow() {
+    if (stopped || running) return null;
+    running = true;
+    try {
+      return await refreshTradePositionCache(config);
+    } catch (error) {
+      logger.error?.("trade position prefetch failed", error);
+      return null;
+    } finally {
+      running = false;
+    }
+  }
+
+  const initialTimer = setTimeout(() => {
+    void runNow();
+  }, initialDelayMs);
+  const intervalTimer = setInterval(() => {
+    void runNow();
+  }, intervalMs);
+  initialTimer.unref?.();
+  intervalTimer.unref?.();
+
+  return {
+    started: true,
+    runNow,
+    stop() {
+      stopped = true;
+      clearTimeout(initialTimer);
+      clearInterval(intervalTimer);
+    }
   };
 }
 
@@ -1067,23 +1238,33 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
   const connectionStatus = sourceConnectionStatus(config);
 
   if (analysisMode === "snapshot") {
-    const sourceResults = snapshotSourceResults(connectionStatus);
-    const history = await readTradeEventHistoryAnalysis({
-      startMs: window.startMs,
-      endMs: window.endMs,
-      symbol: safeSymbol,
-      page: safePage,
-      pageSize: safePageSize,
-      eventLimit: config.tradeAnalysis.maxEventRows
-    });
+    const cachedPositions = cachedTradePositionSnapshot(config, { safeSymbol });
+    const sourceResults = cachedPositions?.sourceResults ?? snapshotSourceResults(connectionStatus);
+    let history;
+    try {
+      history = await readTradeEventHistoryAnalysis({
+        startMs: window.startMs,
+        endMs: window.endMs,
+        symbol: safeSymbol,
+        page: safePage,
+        pageSize: safePageSize,
+        eventLimit: config.tradeAnalysis.maxEventRows
+      });
+    } catch (error) {
+      history = emptyTradeHistory(sourceResults, {
+        page: safePage,
+        pageSize: safePageSize,
+        persistError: error instanceof Error ? error.message : String(error)
+      });
+    }
     const snapshotHistory = {
       ...history,
       summary: {
         ...history.summary,
         bySource: mergeSourceSummaries(history.summary.bySource, sourceResults)
       },
-      persisted: true,
-      persistError: ""
+      persisted: history.persisted !== false,
+      persistError: history.persistError ?? ""
     };
     return buildTradeAnalysisPayload({
       window,
@@ -1091,7 +1272,8 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
       connectionStatus,
       sourceResults,
       history: snapshotHistory,
-      positions: [],
+      positions: cachedPositions?.positions ?? [],
+      positionSnapshot: cachedPositions?.meta ?? null,
       maxEventRows: config.tradeAnalysis.maxEventRows,
       mode: "snapshot"
     });
@@ -1108,10 +1290,17 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
   let sourceResults;
   let tradeEvents;
   let positions;
+  let positionSnapshot;
   if (cachedSync) {
     sourceResults = cachedSync.sourceResults;
     tradeEvents = cachedSync.tradeEvents;
     positions = cachedSync.positions;
+    positionSnapshot = {
+      cached: true,
+      updatedAt: new Date(cachedSync.cachedAt).toISOString(),
+      ageSeconds: Math.max(0, Math.round((Date.now() - cachedSync.cachedAt) / 1000)),
+      ttlSeconds: Math.round(TRADE_ANALYSIS_CACHE_MS / 1000)
+    };
   } else {
     const fetchers = [
       ["binance", () => fetchBinanceEvents(config, window, safeSymbol)],
@@ -1132,6 +1321,14 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
       .flatMap((source) => source.positions ?? [])
       .filter((position, index, all) => all.findIndex((item) => item.id === position.id) === index)
       .sort((a, b) => Math.abs(toNumber(b.notional)) - Math.abs(toNumber(a.notional)));
+    const positionsFetchedAt = Date.now();
+    rememberTradePositionSnapshot({ safeSymbol, sourceResults, positions, cachedAt: positionsFetchedAt });
+    positionSnapshot = {
+      cached: false,
+      updatedAt: new Date(positionsFetchedAt).toISOString(),
+      ageSeconds: 0,
+      ttlSeconds: Math.round(positionCacheTtlMs(config) / 1000)
+    };
     const cacheable = sourceResults.every((source) =>
       source.ok &&
       !source.error &&
@@ -1166,6 +1363,7 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
     sourceResults,
     history,
     positions,
+    positionSnapshot,
     maxEventRows: config.tradeAnalysis.maxEventRows,
     mode: "refresh"
   });

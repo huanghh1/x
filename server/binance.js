@@ -332,6 +332,39 @@ export async function fetchCurrentFundingRates() {
     .filter(Boolean);
 }
 
+export async function fetchMarkPrices() {
+  const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/premiumIndex`, "Binance premium index", {
+    weight: 10
+  });
+  if (!Array.isArray(data)) return [];
+  return data
+    .map((item) => {
+      const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+      const markPrice = Number(item?.markPrice);
+      if (!symbol || !Number.isFinite(markPrice)) return null;
+      return { symbol, markPrice };
+    })
+    .filter(Boolean);
+}
+
+export async function fetchOpenInterest({ symbol }) {
+  const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  if (!safeSymbol) throw new Error("symbol is required for open interest");
+  const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/openInterest`);
+  url.searchParams.set("symbol", safeSymbol);
+  const item = await fetchJson(url.toString(), `${safeSymbol} open interest`, { weight: 1 });
+  const openInterest = Number(item?.openInterest);
+  const time = Number(item?.time);
+  if (!Number.isFinite(openInterest) || !Number.isFinite(time)) {
+    throw new Error(`${safeSymbol} open interest returned invalid payload`);
+  }
+  return {
+    symbol: String(item?.symbol ?? safeSymbol).toUpperCase(),
+    openInterest,
+    time
+  };
+}
+
 export async function fetchOpenInterestHistory({ symbol, period = "5m", limit = 289 }) {
   const safePeriod = ["5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"].includes(period)
     ? period

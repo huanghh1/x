@@ -877,7 +877,8 @@ tbody tr:hover {
 }
 
 .chart-tools button,
-.chart-tools a {
+.chart-tools a,
+.chart-tools select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -895,9 +896,15 @@ tbody tr:hover {
   white-space: nowrap;
 }
 
+.chart-tools select {
+  min-width: 92px;
+  padding-right: 24px;
+}
+
 .chart-tools button.active,
 .chart-tools button:hover,
-.chart-tools a:hover {
+.chart-tools a:hover,
+.chart-tools select:hover {
   border-color: var(--chart-control-hover-border);
   color: var(--chart-control-hover-text);
   background: var(--chart-control-hover-bg);
@@ -3011,6 +3018,146 @@ main,
 
 .kline-canvas.is-dragging {
   cursor: grabbing;
+}
+
+.mobile-page-select,
+.chart-codex-template,
+.trade-codex-picker select,
+.trade-journal-toolbar select,
+.trade-journal-form select {
+  --select-height: 44px;
+  --select-radius: var(--radius-sm);
+  --select-pad-x: 13px;
+  --select-arrow-x: 14px;
+  --select-arrow-color: var(--accent-strong);
+  min-height: var(--select-height);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--select-radius);
+  padding: 0 calc(var(--select-pad-x) + 30px) 0 var(--select-pad-x);
+  color: var(--ink-strong);
+  background:
+    linear-gradient(45deg, transparent 50%, var(--select-arrow-color) 50%) right calc(var(--select-arrow-x) + 5px) center / 7px 7px no-repeat,
+    linear-gradient(135deg, var(--select-arrow-color) 50%, transparent 50%) right var(--select-arrow-x) center / 7px 7px no-repeat,
+    linear-gradient(180deg, var(--surface-raised), var(--surface-soft));
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--surface-raised) 86%, transparent),
+    0 1px 2px color-mix(in oklch, var(--ink-muted) 12%, transparent);
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  appearance: none;
+  transition:
+    background-color 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    border-color 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    box-shadow 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.chart-codex-template {
+  --select-height: 34px;
+  --select-radius: 10px;
+  --select-pad-x: 10px;
+  --select-arrow-x: 11px;
+  --select-arrow-color: var(--chart-control-hover-text);
+  min-width: 152px;
+  width: auto;
+  max-width: min(100%, 240px);
+  border-color: var(--chart-control-border);
+  color: var(--chart-control-text);
+  background:
+    linear-gradient(45deg, transparent 50%, var(--select-arrow-color) 50%) right calc(var(--select-arrow-x) + 5px) center / 6px 6px no-repeat,
+    linear-gradient(135deg, var(--select-arrow-color) 50%, transparent 50%) right var(--select-arrow-x) center / 6px 6px no-repeat,
+    linear-gradient(180deg, var(--color-paper), var(--chart-control-hover-bg));
+  font-size: 12px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mobile-page-select:hover,
+  .trade-codex-picker select:hover,
+  .trade-journal-toolbar select:hover,
+  .trade-journal-form select:hover {
+    border-color: var(--accent);
+    background:
+      linear-gradient(45deg, transparent 50%, var(--select-arrow-color) 50%) right calc(var(--select-arrow-x) + 5px) center / 7px 7px no-repeat,
+      linear-gradient(135deg, var(--select-arrow-color) 50%, transparent 50%) right var(--select-arrow-x) center / 7px 7px no-repeat,
+      linear-gradient(180deg, var(--surface-raised), var(--surface-panel));
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklch, var(--surface-raised) 88%, transparent),
+      0 6px 16px color-mix(in oklch, var(--accent) 10%, transparent);
+  }
+
+  .chart-codex-template:hover {
+    border-color: var(--chart-control-hover-border);
+    color: var(--chart-control-hover-text);
+    background:
+      linear-gradient(45deg, transparent 50%, var(--select-arrow-color) 50%) right calc(var(--select-arrow-x) + 5px) center / 6px 6px no-repeat,
+      linear-gradient(135deg, var(--select-arrow-color) 50%, transparent 50%) right var(--select-arrow-x) center / 6px 6px no-repeat,
+      linear-gradient(180deg, var(--color-paper), var(--chart-control-hover-bg));
+  }
+}
+
+.mobile-page-select:focus-visible,
+.chart-codex-template:focus-visible,
+.trade-codex-picker select:focus-visible,
+.trade-journal-toolbar select:focus-visible,
+.trade-journal-form select:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in oklch, var(--focus) 42%, transparent);
+  outline-offset: 2px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--surface-raised) 88%, transparent),
+    0 0 0 4px color-mix(in oklch, var(--focus) 15%, transparent);
+}
+
+.mobile-page-select:active,
+.chart-codex-template:active,
+.trade-codex-picker select:active,
+.trade-journal-toolbar select:active,
+.trade-journal-form select:active {
+  border-color: var(--accent-strong);
+  background-color: var(--surface-accent);
+}
+
+.mobile-page-select:disabled,
+.chart-codex-template:disabled,
+.trade-codex-picker select:disabled,
+.trade-journal-toolbar select:disabled,
+.trade-journal-form select:disabled {
+  --select-arrow-color: var(--ink-muted);
+  color: var(--ink-muted);
+  cursor: not-allowed;
+  opacity: 0.58;
+  box-shadow: none;
+}
+
+.mobile-page-select[aria-invalid="true"],
+.chart-codex-template[aria-invalid="true"],
+.trade-codex-picker select[aria-invalid="true"],
+.trade-journal-toolbar select[aria-invalid="true"],
+.trade-journal-form select[aria-invalid="true"] {
+  --select-arrow-color: var(--negative);
+  border-color: var(--negative);
+}
+
+.mobile-page-select[data-state="success"],
+.chart-codex-template[data-state="success"],
+.trade-codex-picker select[data-state="success"],
+.trade-journal-toolbar select[data-state="success"],
+.trade-journal-form select[data-state="success"] {
+  --select-arrow-color: var(--positive);
+  border-color: var(--positive);
+}
+
+.mobile-page-select[data-state="loading"],
+.chart-codex-template[data-state="loading"],
+.trade-codex-picker select[data-state="loading"],
+.trade-journal-toolbar select[data-state="loading"],
+.trade-journal-form select[data-state="loading"] {
+  cursor: progress;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--select-arrow-color) 50%) right calc(var(--select-arrow-x) + 5px) center / 7px 7px no-repeat,
+    linear-gradient(135deg, var(--select-arrow-color) 50%, transparent 50%) right var(--select-arrow-x) center / 7px 7px no-repeat,
+    linear-gradient(90deg, transparent, color-mix(in oklch, var(--accent) 8%, transparent), transparent) 0 0 / 180% 100% no-repeat,
+    linear-gradient(180deg, var(--surface-raised), var(--surface-soft));
 }
 
 @media (max-width: 900px) {

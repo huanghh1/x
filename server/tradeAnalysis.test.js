@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getTradeAnalysis } from "./tradeAnalysis.js";
+import { getTradeAnalysis, refreshTradePositionCache } from "./tradeAnalysis.js";
 
 function response(payload) {
   return {
@@ -452,6 +452,47 @@ test("Hyperliquid positions include configured HIP-3 perp dexs", async () => {
     assert.equal(analysis.positions[0].quantity, 193.66);
     assert.equal(analysis.positions[0].leverage, 50);
     assert.equal(analysis.positions[0].unrealizedPnl, -17.4294);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("position prefetch reads current positions without scanning trade history", async () => {
+  const originalFetch = globalThis.fetch;
+  const start = Date.UTC(2026, 0, 6, 0, 0, 0);
+  const paths = [];
+
+  try {
+    globalThis.fetch = async (url) => {
+      const parsed = new URL(url);
+      paths.push(parsed.pathname);
+      if (parsed.pathname === "/fapi/v3/positionRisk") {
+        return response([
+          {
+            symbol: "SOLUSDT",
+            positionAmt: "-2",
+            positionSide: "SHORT",
+            entryPrice: "150",
+            markPrice: "145",
+            notional: "-290",
+            unRealizedProfit: "10",
+            leverage: "4",
+            liquidationPrice: "180",
+            marginType: "cross",
+            updateTime: start + 1000
+          }
+        ]);
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    };
+
+    const payload = await refreshTradePositionCache(testConfig());
+
+    assert.deepEqual(paths, ["/fapi/v3/positionRisk"]);
+    assert.equal(payload.positionSummary.count, 1);
+    assert.equal(payload.positions[0].symbol, "SOLUSDT");
+    assert.equal(payload.positions[0].side, "short");
+    assert.equal(payload.positions[0].unrealizedPnl, 10);
   } finally {
     globalThis.fetch = originalFetch;
   }

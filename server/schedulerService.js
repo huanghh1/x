@@ -20,6 +20,7 @@ import {
 } from "./openInterestMonitor.js";
 import { requireInternalService } from "./serviceClient.js";
 import { sendHotRankTelegram } from "./telegram.js";
+import { getTelegramAlertQueueState, startTelegramAlertQueueWorker } from "./telegramAlertQueue.js";
 import { getTelegramBotState, startTelegramBot } from "./telegramBot.js";
 import {
   getTokenUnlockState,
@@ -40,6 +41,7 @@ app.get("/internal/health", (_request, response) => {
     fundingMonitor: getFundingIntervalMonitorState(),
     openInterestMonitor: getOpenInterestMonitorState(),
     tokenUnlock: getTokenUnlockState(),
+    telegramAlertQueue: getTelegramAlertQueueState(),
     telegramBot: getTelegramBotState()
   });
 });
@@ -100,6 +102,7 @@ async function refreshHotRank() {
 await ensureDatabase();
 await startMaintenanceScheduler();
 startTelegramBot();
+startTelegramAlertQueueWorker();
 startFundingIntervalMonitor();
 startOpenInterestMonitor();
 startTokenUnlockMonitor();
