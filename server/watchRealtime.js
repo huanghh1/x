@@ -161,7 +161,14 @@ export function resolveWatchlistAlertSide(item, price) {
 
 export function shouldSendWatchlistPriceAlert(item, side) {
   if (side !== "above" && side !== "below") return false;
-  return item?.lastAlertSide !== side;
+  if (item?.lastAlertSide === side) return false;
+  const cooldownMs = Math.max(0, Number(config.realtime.watchlistAlertCooldownMs) || 0);
+  if (!cooldownMs) return true;
+  const lastAlertMs = item?.lastAlertAt instanceof Date
+    ? item.lastAlertAt.getTime()
+    : new Date(item?.lastAlertAt ?? 0).getTime();
+  if (!Number.isFinite(lastAlertMs) || lastAlertMs <= 0) return true;
+  return Date.now() - lastAlertMs >= cooldownMs;
 }
 
 async function maybeSendPriceAlert(symbol, price, eventTime) {

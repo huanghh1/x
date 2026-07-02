@@ -227,7 +227,7 @@ KLINE_TAIL_REFRESH_ENABLED=true
 KLINE_TAIL_REFRESH_LIMIT=2500
 KLINE_TAIL_REFRESH_REQUEST_LIMIT=20
 
-# OI 历史接口官方限制为 1000 requests/5min/IP；默认每轮最多扫 900 个币，超出滚动分批
+# OI 当前值会全量采样；历史补齐接口官方限制为 1000 requests/5min/IP，按该预算分轮补齐基线
 OPEN_INTEREST_SCAN_MS=180000
 OPEN_INTEREST_REQUEST_LIMIT_PER_5M=900
 
@@ -283,6 +283,9 @@ FUNDING_INTERVAL_TARGET_HOURS=1
 
 # Binance fundingInfo 只返回发生调整的合约；不再出现在快照里时按默认周期回写
 FUNDING_INTERVAL_DEFAULT_HOURS=4
+
+# 关注池价格提醒冷却；价格在阈值附近反复穿越时避免刷屏，设为 0 可关闭
+WATCHLIST_ALERT_COOLDOWN_MS=600000
 ```
 
 关注池下次解锁日期默认先通过 Binance Alpha 核对项目身份，再读取已核验的项目官方

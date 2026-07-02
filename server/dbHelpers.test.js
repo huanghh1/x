@@ -6,7 +6,8 @@ import {
   isNaturalKlineHistoryShortfall,
   normalizeFundingIntervalSnapshotItems,
   normalizeHotRankSeenTokens,
-  normalizeOptionalLimit
+  normalizeOptionalLimit,
+  selectOpenInterestSampleBaselines
 } from "./db.js";
 
 test("optional query limits keep null unbounded instead of coercing it to LIMIT 1", () => {
@@ -64,6 +65,30 @@ test("funding hot-rank matching handles multiplier-prefixed futures symbols", ()
   );
 
   assert.deepEqual([...matches].sort(), ["1000AEROUSDT", "ETHUSDT"]);
+});
+
+test("OI sample baselines choose the nearest sample at or before each target", () => {
+  const observedAt = Date.UTC(2026, 0, 1, 12, 0, 0);
+  const rows = [
+    { openInterest: 999, observedAt: new Date(observedAt - 4 * 60 * 1000) },
+    { openInterest: 130, openInterestValue: 1300, observedAt: new Date(observedAt - 6 * 60 * 1000) },
+    { openInterest: 120, openInterestValue: 1200, observedAt: new Date(observedAt - 15 * 60 * 1000) },
+    { openInterest: 100, openInterestValue: 1000, observedAt: new Date(observedAt - 17 * 60 * 1000) },
+    { openInterest: 90, observedAt: new Date(observedAt - 60 * 60 * 1000) },
+    { openInterest: "bad", observedAt: new Date(observedAt - 4 * 60 * 60 * 1000) },
+    { openInterest: 80, observedAt: new Date(observedAt - 4 * 60 * 60 * 1000 - 2 * 60 * 1000) },
+    { openInterest: 50, observedAt: new Date(observedAt - 24 * 60 * 60 * 1000) }
+  ];
+
+  const baselines = selectOpenInterestSampleBaselines(rows, observedAt);
+
+  assert.equal(baselines["5m"].openInterest, 130);
+  assert.equal(baselines["5m"].openInterestValue, 1300);
+  assert.equal(baselines["15m"].openInterest, 120);
+  assert.equal(baselines["15m"].openInterestValue, 1200);
+  assert.equal(baselines["1h"].openInterest, 90);
+  assert.equal(baselines["4h"].openInterest, 80);
+  assert.equal(baselines["1d"].openInterest, 50);
 });
 
 test("natural kline history shortfall is not treated as a repairable gap", () => {

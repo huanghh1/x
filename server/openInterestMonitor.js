@@ -49,8 +49,11 @@ const monitorState = {
   retryPendingCount: 0,
   lastRetryMode: false,
   requestLimitPerRun: 0,
+  historyBootstrapLimit: 0,
+  historyBootstrapUsedCount: 0,
   historyBootstrapCount: 0,
-  historyBootstrapFailedCount: 0
+  historyBootstrapFailedCount: 0,
+  historyBootstrapDeferredCount: 0
 };
 
 function percentChange(current, previous) {
@@ -195,12 +198,17 @@ async function buildCachedOpenInterestSnapshot(sample) {
 
 async function bootstrapOpenInterestHistorySamples(symbol) {
   if (historyBootstrapAttempted.has(symbol)) return { attempted: false, count: 0 };
-  historyBootstrapAttempted.add(symbol);
-  const rows = await fetchOpenInterestHistory({
-    symbol,
-    period: "5m",
-    limit: config.openInterestMonitor.historyLimit
-  });
+  let rows;
+  try {
+    rows = await fetchOpenInterestHistory({
+      symbol,
+      period: "5m",
+      limit: config.openInterestMonitor.historyLimit
+    });
+  } catch (error) {
+    if (isOpenInterestHistoryUnavailable(error)) historyBootstrapAttempted.add(symbol);
+    throw error;
+  }
   const samples = rows.map((row) => ({
     symbol,
     openInterest: row.sumOpenInterest,
@@ -209,6 +217,7 @@ async function bootstrapOpenInterestHistorySamples(symbol) {
     source: "history"
   }));
   await upsertOpenInterestSamples(samples);
+  historyBootstrapAttempted.add(symbol);
   return { attempted: true, count: samples.length };
 }
 
@@ -217,7 +226,7 @@ function snapshotNeedsHistoryBootstrap(snapshot) {
   return [snapshot.change5mPct, snapshot.change1hPct, snapshot.change4hPct, snapshot.change1dPct].some((value) => value === null);
 }
 
-async function scanToken(token, { markPrices = new Map() } = {}) {
+async function scanToken(token, { markPrices = new Map(), claimHistoryBootstrap = () => true } = {}) {
   const current = await fetchOpenInterest({ symbol: token.symbol });
   const markPrice = markPrices.get(token.symbol);
   const sample = {
@@ -231,22 +240,45 @@ async function scanToken(token, { markPrices = new Map() } = {}) {
   let snapshot = await buildCachedOpenInterestSnapshot(sample);
   let historyBootstrap = { attempted: false, count: 0 };
   let historyBootstrapError = null;
-  if (snapshotNeedsHistoryBootstrap(snapshot)) {
-    try {
-      historyBootstrap = await bootstrapOpenInterestHistorySamples(token.symbol);
-      if (historyBootstrap.count > 0) {
-        snapshot = await buildCachedOpenInterestSnapshot(sample);
+  let historyBootstrapDeferred = false;
+  if (snapshotNeedsHistoryBootstrap(snapshot) && !historyBootstrapAttempted.has(token.symbol)) {
+    if (!claimHistoryBootstrap()) {
+      historyBootstrapDeferred = true;
+    } else {
+      try {
+        historyBootstrap = await bootstrapOpenInterestHistorySamples(token.symbol);
+        if (historyBootstrap.count > 0) {
+          snapshot = await buildCachedOpenInterestSnapshot(sample);
+        }
+      } catch (error) {
+        historyBootstrapError = error instanceof Error ? error.message : String(error);
       }
-    } catch (error) {
-      historyBootstrapError = error instanceof Error ? error.message : String(error);
     }
   }
-  if (!snapshot) return { updated: false, spike: false, alerted: false, historyBootstrap, historyBootstrapError };
+  if (!snapshot) {
+    return {
+      updated: false,
+      spike: false,
+      alerted: false,
+      historyBootstrap,
+      historyBootstrapError,
+      historyBootstrapDeferred
+    };
+  }
 
   const previous = await getOpenInterestMonitorItem(token.symbol);
   await upsertOpenInterestSnapshot(snapshot);
   const spike = evaluateOpenInterestSpike(snapshot, config.openInterestMonitor);
-  if (!spike.hit) return { updated: true, spike: false, alerted: false, historyBootstrap, historyBootstrapError };
+  if (!spike.hit) {
+    return {
+      updated: true,
+      spike: false,
+      alerted: false,
+      historyBootstrap,
+      historyBootstrapError,
+      historyBootstrapDeferred
+    };
+  }
   const previousSpike = evaluateOpenInterestSpike(previous ?? {}, config.openInterestMonitor);
 
   const context = await getSignalCorrelationContext(token.symbol);
@@ -278,7 +310,14 @@ async function scanToken(token, { markPrices = new Map() } = {}) {
     if (shouldBackfillOpenInterestSpikeAlertState({ previous, previousSpike })) {
       await markOpenInterestSpikeAlertSent(snapshot.symbol, { ...alertState, preserveAlertAt: true });
     }
-    return { updated: true, spike: true, alerted: false, historyBootstrap, historyBootstrapError };
+    return {
+      updated: true,
+      spike: true,
+      alerted: false,
+      historyBootstrap,
+      historyBootstrapError,
+      historyBootstrapDeferred
+    };
   }
   const result = await enqueueOpenInterestSpikeTelegramAlert(snapshot, context, alertState);
   return {
@@ -288,6 +327,7 @@ async function scanToken(token, { markPrices = new Map() } = {}) {
     alertQueued: !result.skipped,
     historyBootstrap,
     historyBootstrapError,
+    historyBootstrapDeferred,
     alertSkippedReason: result.skipped ? result.reason : null
   };
 }
@@ -418,12 +458,29 @@ export async function runOpenInterestCheck({ force = false } = {}) {
   monitorState.unavailableCount = 0;
   monitorState.retryPendingCount = retryQueue.size;
   monitorState.lastRetryMode = false;
+  monitorState.historyBootstrapLimit = 0;
+  monitorState.historyBootstrapUsedCount = 0;
   monitorState.historyBootstrapCount = 0;
   monitorState.historyBootstrapFailedCount = 0;
+  monitorState.historyBootstrapDeferredCount = 0;
 
   try {
     const tokens = await listOpenInterestScanTokens();
     const { batch: scanTokens, startOffset, deferredCount, retryMode, requestLimitPerRun } = selectScanBatch(tokens);
+    const historyBootstrapLimit = effectiveOpenInterestScanLimit({
+      tokenCount: scanTokens.length,
+      scanIntervalMs: retryMode
+        ? Math.min(config.openInterestMonitor.scanIntervalMs, config.openInterestMonitor.retryDelayMs)
+        : config.openInterestMonitor.scanIntervalMs,
+      requestLimitPerWindow: config.openInterestMonitor.requestLimitPerWindow,
+      useHistoryBudget: true
+    });
+    let historyBootstrapUsedCount = 0;
+    const claimHistoryBootstrap = () => {
+      if (historyBootstrapUsedCount >= historyBootstrapLimit) return false;
+      historyBootstrapUsedCount += 1;
+      return true;
+    };
     const errors = [];
     let markPrices = new Map();
     try {
@@ -436,6 +493,7 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     let spikeCount = 0;
     let historyBootstrapCount = 0;
     let historyBootstrapFailedCount = 0;
+    let historyBootstrapDeferredCount = 0;
     const alertedSymbols = [];
     const failedSymbols = [];
     const unavailableSymbols = [];
@@ -446,11 +504,12 @@ export async function runOpenInterestCheck({ force = false } = {}) {
         cursor += 1;
         const token = scanTokens[index];
         try {
-          const result = await scanToken(token, { markPrices });
+          const result = await scanToken(token, { markPrices, claimHistoryBootstrap });
           if (result.updated) updatedCount += 1;
           if (result.spike) spikeCount += 1;
           if (result.alerted) alertedSymbols.push(token.symbol);
           if (result.historyBootstrap?.count > 0) historyBootstrapCount += 1;
+          if (result.historyBootstrapDeferred) historyBootstrapDeferredCount += 1;
           if (result.historyBootstrapError) {
             historyBootstrapFailedCount += 1;
             errors.push(`${token.symbol}: OI history bootstrap failed: ${result.historyBootstrapError}`);
@@ -496,8 +555,11 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     monitorState.unavailableCount = unavailableSymbols.length;
     monitorState.retryPendingCount = retryQueue.size;
     monitorState.lastRetryMode = Boolean(retryMode);
+    monitorState.historyBootstrapLimit = historyBootstrapLimit;
+    monitorState.historyBootstrapUsedCount = historyBootstrapUsedCount;
     monitorState.historyBootstrapCount = historyBootstrapCount;
     monitorState.historyBootstrapFailedCount = historyBootstrapFailedCount;
+    monitorState.historyBootstrapDeferredCount = historyBootstrapDeferredCount;
     return {
       ok: true,
       totalTokenCount: tokens.length,
@@ -514,8 +576,11 @@ export async function runOpenInterestCheck({ force = false } = {}) {
       unavailableSymbols: monitorState.unavailableSymbols,
       unavailableCount: monitorState.unavailableCount,
       retryPendingCount: retryQueue.size,
+      historyBootstrapLimit,
+      historyBootstrapUsedCount,
       historyBootstrapCount,
       historyBootstrapFailedCount,
+      historyBootstrapDeferredCount,
       errors: monitorState.errors
     };
   } catch (error) {

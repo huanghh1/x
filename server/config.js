@@ -211,7 +211,8 @@ export const config = {
   },
   realtime: {
     streamLimit: realtimeStreamLimit,
-    tokenLimit: Math.max(1, Math.min(Math.floor(realtimeStreamLimit / 5), numberEnv("REALTIME_KLINE_TOKEN_LIMIT", Math.floor(realtimeStreamLimit / 5))))
+    tokenLimit: Math.max(1, Math.min(Math.floor(realtimeStreamLimit / 5), numberEnv("REALTIME_KLINE_TOKEN_LIMIT", Math.floor(realtimeStreamLimit / 5)))),
+    watchlistAlertCooldownMs: Math.max(0, numberEnv("WATCHLIST_ALERT_COOLDOWN_MS", 10 * 60 * 1000))
   },
   app: {
     publicBaseUrl: process.env.PUBLIC_BASE_URL?.trim() ?? "",

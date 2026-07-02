@@ -727,6 +727,36 @@ export async function pingDatabase() {
   return true;
 }
 
+function isRetryableDatabaseError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error?.code ?? error?.errno;
+  return (
+    code === "ER_LOCK_DEADLOCK" ||
+    code === "ER_LOCK_WAIT_TIMEOUT" ||
+    code === 1213 ||
+    code === 1205 ||
+    /deadlock|lock wait timeout/i.test(message)
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetryableDatabaseQuery(operation, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableDatabaseError(error) || attempt >= attempts) break;
+      await sleep(150 * 2 ** (attempt - 1));
+    }
+  }
+  throw lastError;
+}
+
 export async function upsertTokens(tokens) {
   if (tokens.length === 0) return 0;
   const rows = tokens.map((token) => [
@@ -2657,61 +2687,118 @@ export async function upsertOpenInterestSamples(samples = []) {
   return result.affectedRows ?? 0;
 }
 
-function mapOpenInterestBaseline(row, prefix) {
-  const openInterest = row?.[`${prefix}OpenInterest`];
+const OPEN_INTEREST_BASELINE_WINDOWS = [
+  ["5m", 5 * 60 * 1000],
+  ["15m", 15 * 60 * 1000],
+  ["1h", 60 * 60 * 1000],
+  ["4h", 4 * 60 * 60 * 1000],
+  ["1d", 24 * 60 * 60 * 1000]
+];
+const OPEN_INTEREST_BASELINE_LAG_MS = 5 * 60 * 1000;
+
+function emptyOpenInterestBaselines() {
+  return Object.fromEntries(OPEN_INTEREST_BASELINE_WINDOWS.map(([window]) => [window, null]));
+}
+
+function mapOpenInterestSampleBaseline(row) {
+  const openInterest = row?.openInterest;
   if (openInterest === null || openInterest === undefined) return null;
+  const normalizedOpenInterest = Number(openInterest);
+  const normalizedOpenInterestValue = Number(row.openInterestValue);
+  const observedAt = row.observedAt ?? null;
+  const observedMs = observedAt instanceof Date ? observedAt.getTime() : new Date(observedAt).getTime();
+  if (!Number.isFinite(normalizedOpenInterest) || !Number.isFinite(observedMs)) return null;
   return {
-    openInterest: Number(openInterest),
-    openInterestValue:
-      row[`${prefix}OpenInterestValue`] === null || row[`${prefix}OpenInterestValue`] === undefined
-        ? null
-        : Number(row[`${prefix}OpenInterestValue`]),
-    observedAt: row[`${prefix}ObservedAt`] ?? null
+    openInterest: normalizedOpenInterest,
+    openInterestValue: Number.isFinite(normalizedOpenInterestValue) ? normalizedOpenInterestValue : null,
+    observedAt,
+    observedMs
   };
+}
+
+export function selectOpenInterestSampleBaselines(rows = [], observedAt) {
+  const observedDate = observedAt instanceof Date ? observedAt : new Date(Number(observedAt) || observedAt);
+  const output = emptyOpenInterestBaselines();
+  if (Number.isNaN(observedDate.getTime())) return output;
+
+  const sortedRows = (Array.isArray(rows) ? rows : [])
+    .map(mapOpenInterestSampleBaseline)
+    .filter(Boolean)
+    .sort((a, b) => b.observedMs - a.observedMs);
+  const observedMs = observedDate.getTime();
+  for (const [window, duration] of OPEN_INTEREST_BASELINE_WINDOWS) {
+    const targetMs = observedMs - duration;
+    const baseline = sortedRows.find(
+      (row) => row.observedMs <= targetMs && targetMs - row.observedMs < OPEN_INTEREST_BASELINE_LAG_MS
+    );
+    if (baseline) {
+      output[window] = {
+        openInterest: baseline.openInterest,
+        openInterestValue: baseline.openInterestValue,
+        observedAt: baseline.observedAt
+      };
+    }
+  }
+  return output;
 }
 
 export async function getOpenInterestSampleBaselines(symbol, observedAt) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   const observedDate = observedAt instanceof Date ? observedAt : new Date(Number(observedAt) || observedAt);
   if (!safeSymbol || Number.isNaN(observedDate.getTime())) {
-    return { "5m": null, "15m": null, "1h": null, "4h": null, "1d": null };
+    return emptyOpenInterestBaselines();
   }
   const observedMs = observedDate.getTime();
-  const params = {
-    symbol: safeSymbol,
-    target5m: new Date(observedMs - 5 * 60 * 1000),
-    target15m: new Date(observedMs - 15 * 60 * 1000),
-    target1h: new Date(observedMs - 60 * 60 * 1000),
-    target4h: new Date(observedMs - 4 * 60 * 60 * 1000),
-    target1d: new Date(observedMs - 24 * 60 * 60 * 1000)
-  };
+  const params = { symbol: safeSymbol };
+  for (const [window, duration] of OPEN_INTEREST_BASELINE_WINDOWS) {
+    const key = window.replace(/\W/g, "");
+    const targetMs = observedMs - duration;
+    params[`target${key}`] = new Date(targetMs);
+    params[`min${key}`] = new Date(targetMs - OPEN_INTEREST_BASELINE_LAG_MS);
+  }
   const [rows] = await getPool().query(
-    `SELECT
-      (SELECT open_interest FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target5m ORDER BY observed_at DESC LIMIT 1) AS baseline5mOpenInterest,
-      (SELECT open_interest_value FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target5m ORDER BY observed_at DESC LIMIT 1) AS baseline5mOpenInterestValue,
-      (SELECT observed_at FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target5m ORDER BY observed_at DESC LIMIT 1) AS baseline5mObservedAt,
-      (SELECT open_interest FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target15m ORDER BY observed_at DESC LIMIT 1) AS baseline15mOpenInterest,
-      (SELECT open_interest_value FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target15m ORDER BY observed_at DESC LIMIT 1) AS baseline15mOpenInterestValue,
-      (SELECT observed_at FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target15m ORDER BY observed_at DESC LIMIT 1) AS baseline15mObservedAt,
-      (SELECT open_interest FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target1h ORDER BY observed_at DESC LIMIT 1) AS baseline1hOpenInterest,
-      (SELECT open_interest_value FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target1h ORDER BY observed_at DESC LIMIT 1) AS baseline1hOpenInterestValue,
-      (SELECT observed_at FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target1h ORDER BY observed_at DESC LIMIT 1) AS baseline1hObservedAt,
-      (SELECT open_interest FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target4h ORDER BY observed_at DESC LIMIT 1) AS baseline4hOpenInterest,
-      (SELECT open_interest_value FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target4h ORDER BY observed_at DESC LIMIT 1) AS baseline4hOpenInterestValue,
-      (SELECT observed_at FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target4h ORDER BY observed_at DESC LIMIT 1) AS baseline4hObservedAt,
-      (SELECT open_interest FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target1d ORDER BY observed_at DESC LIMIT 1) AS baseline1dOpenInterest,
-      (SELECT open_interest_value FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target1d ORDER BY observed_at DESC LIMIT 1) AS baseline1dOpenInterestValue,
-      (SELECT observed_at FROM open_interest_sample WHERE symbol=:symbol AND observed_at <= :target1d ORDER BY observed_at DESC LIMIT 1) AS baseline1dObservedAt`,
+    `(SELECT open_interest AS openInterest,
+       open_interest_value AS openInterestValue,
+       observed_at AS observedAt
+      FROM open_interest_sample
+      WHERE symbol=:symbol AND observed_at <= :target5m AND observed_at > :min5m
+      ORDER BY observed_at DESC
+      LIMIT 1)
+     UNION ALL
+     (SELECT open_interest AS openInterest,
+       open_interest_value AS openInterestValue,
+       observed_at AS observedAt
+      FROM open_interest_sample
+      WHERE symbol=:symbol AND observed_at <= :target15m AND observed_at > :min15m
+      ORDER BY observed_at DESC
+      LIMIT 1)
+     UNION ALL
+     (SELECT open_interest AS openInterest,
+       open_interest_value AS openInterestValue,
+       observed_at AS observedAt
+      FROM open_interest_sample
+      WHERE symbol=:symbol AND observed_at <= :target1h AND observed_at > :min1h
+      ORDER BY observed_at DESC
+      LIMIT 1)
+     UNION ALL
+     (SELECT open_interest AS openInterest,
+       open_interest_value AS openInterestValue,
+       observed_at AS observedAt
+      FROM open_interest_sample
+      WHERE symbol=:symbol AND observed_at <= :target4h AND observed_at > :min4h
+      ORDER BY observed_at DESC
+      LIMIT 1)
+     UNION ALL
+     (SELECT open_interest AS openInterest,
+       open_interest_value AS openInterestValue,
+       observed_at AS observedAt
+      FROM open_interest_sample
+      WHERE symbol=:symbol AND observed_at <= :target1d AND observed_at > :min1d
+      ORDER BY observed_at DESC
+      LIMIT 1)`,
     params
   );
-  const row = rows[0] ?? {};
-  return {
-    "5m": mapOpenInterestBaseline(row, "baseline5m"),
-    "15m": mapOpenInterestBaseline(row, "baseline15m"),
-    "1h": mapOpenInterestBaseline(row, "baseline1h"),
-    "4h": mapOpenInterestBaseline(row, "baseline4h"),
-    "1d": mapOpenInterestBaseline(row, "baseline1d")
-  };
+  return selectOpenInterestSampleBaselines(rows, observedDate);
 }
 
 export async function getActiveTokenBySymbol(symbol) {
@@ -2989,6 +3076,7 @@ export async function listOpenInterestMonitorPage({
         LIMIT 1
       ) AS currentCloseTime,
       oi.observed_at AS observedAt,
+      oi.updated_at AS fetchedAt,
       oi.observed_at < DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND) AS isStale,
       TIMESTAMPDIFF(SECOND, oi.observed_at, NOW(3)) AS observedAgeSeconds,
       oi.last_spike_alert_at AS lastSpikeAlertAt,
@@ -3037,9 +3125,10 @@ export async function listTopOpenInterestRealtimeTokens({ timeWindow = "5m", sor
      FROM open_interest_monitor oi
      JOIN token_list t ON t.symbol=oi.symbol AND t.is_active=1
      WHERE oi.${column} IS NOT NULL
+       AND oi.observed_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
      ORDER BY oi.${column} ${direction}, oi.observed_at DESC, oi.symbol
      LIMIT :limit`,
-    { limit: safeLimit }
+    { activeSeconds: openInterestActiveSeconds(), limit: safeLimit }
   );
   return rows;
 }
@@ -3103,21 +3192,23 @@ export async function upsertKlinePage(token, intervalCode, klines) {
     kline[7] ?? null,
     kline[8] ?? null
   ]);
-  const [result] = await getPool().query(
-    `INSERT INTO kline_cache
-      (token_id, symbol, interval_code, open_time, close_time, open_price, high_price, low_price, close_price, volume, quote_volume, trade_count)
-     VALUES ?
-     ON DUPLICATE KEY UPDATE
-      token_id=VALUES(token_id),
-      close_time=VALUES(close_time),
-      open_price=VALUES(open_price),
-      high_price=VALUES(high_price),
-      low_price=VALUES(low_price),
-      close_price=VALUES(close_price),
-      volume=VALUES(volume),
-      quote_volume=VALUES(quote_volume),
-      trade_count=VALUES(trade_count)`,
-    [rows]
+  const [result] = await withRetryableDatabaseQuery(() =>
+    getPool().query(
+      `INSERT INTO kline_cache
+        (token_id, symbol, interval_code, open_time, close_time, open_price, high_price, low_price, close_price, volume, quote_volume, trade_count)
+       VALUES ?
+       ON DUPLICATE KEY UPDATE
+        token_id=VALUES(token_id),
+        close_time=VALUES(close_time),
+        open_price=VALUES(open_price),
+        high_price=VALUES(high_price),
+        low_price=VALUES(low_price),
+        close_price=VALUES(close_price),
+        volume=VALUES(volume),
+        quote_volume=VALUES(quote_volume),
+        trade_count=VALUES(trade_count)`,
+      [rows]
+    )
   );
   return result.affectedRows ?? 0;
 }
@@ -3171,23 +3262,25 @@ export async function upsertSignals(token, signals) {
     signal.note,
     new Date(Number(signal.signalTime) || Date.now())
   ]);
-  const [result] = await getPool().query(
-    `INSERT INTO signal_result
-      (token_id, symbol, category_type, interval_code, ma100, ma200, current_price, alert_level, proximity_pct, signal_weight, signal_status, note, signal_time)
-     VALUES ?
-     ON DUPLICATE KEY UPDATE
-      token_id=VALUES(token_id),
-      category_type=VALUES(category_type),
-      ma100=VALUES(ma100),
-      ma200=VALUES(ma200),
-      current_price=VALUES(current_price),
-      proximity_pct=VALUES(proximity_pct),
-      signal_weight=VALUES(signal_weight),
-      signal_status=VALUES(signal_status),
-      note=VALUES(note),
-      signal_time=VALUES(signal_time),
-      alert_level=VALUES(alert_level)`,
-    [rows]
+  const [result] = await withRetryableDatabaseQuery(() =>
+    getPool().query(
+      `INSERT INTO signal_result
+        (token_id, symbol, category_type, interval_code, ma100, ma200, current_price, alert_level, proximity_pct, signal_weight, signal_status, note, signal_time)
+       VALUES ?
+       ON DUPLICATE KEY UPDATE
+        token_id=VALUES(token_id),
+        category_type=VALUES(category_type),
+        ma100=VALUES(ma100),
+        ma200=VALUES(ma200),
+        current_price=VALUES(current_price),
+        proximity_pct=VALUES(proximity_pct),
+        signal_weight=VALUES(signal_weight),
+        signal_status=VALUES(signal_status),
+        note=VALUES(note),
+        signal_time=VALUES(signal_time),
+        alert_level=VALUES(alert_level)`,
+      [rows]
+    )
   );
   return result.affectedRows ?? 0;
 }
@@ -3293,6 +3386,31 @@ function openInterestActiveSeconds() {
   return Math.max(60, Math.floor(config.openInterestMonitor.activeMs / 1000));
 }
 
+function openInterestSpikeConditionSql(alias = "oi") {
+  return `(
+    ${alias}.change_5m_pct >= :oiSpike5mPct
+    OR ${alias}.change_1h_pct >= :oiSpike1hPct
+    OR ${alias}.change_4h_pct >= :oiSpike4hPct
+    OR ${alias}.change_1d_pct >= :oiSpike1dPct
+  )`;
+}
+
+function activeOpenInterestSpikeSql(alias = "oi", activeSecondsParam = "oiActiveSeconds") {
+  return `${alias}.observed_at >= DATE_SUB(NOW(3), INTERVAL :${activeSecondsParam} SECOND)
+    AND ${openInterestSpikeConditionSql(alias)}`;
+}
+
+function openInterestSpikeQueryParams(extra = {}) {
+  return {
+    oiActiveSeconds: openInterestActiveSeconds(),
+    oiSpike5mPct: config.openInterestMonitor.spike5mPct,
+    oiSpike1hPct: config.openInterestMonitor.spike1hPct,
+    oiSpike4hPct: config.openInterestMonitor.spike4hPct,
+    oiSpike1dPct: config.openInterestMonitor.spike1dPct,
+    ...extra
+  };
+}
+
 function hotRankTokenMatchSql(hotAlias, tokenAlias) {
   return `(
     ${hotAlias}.symbol=${tokenAlias}.symbol
@@ -3369,13 +3487,7 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     `IF(EXISTS(
       SELECT 1 FROM open_interest_monitor oi
       WHERE oi.symbol=s.symbol
-        AND oi.observed_at >= DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND)
-        AND (
-          oi.change_5m_pct >= :oiSpike5mPct
-          OR oi.change_1h_pct >= :oiSpike1hPct
-          OR oi.change_4h_pct >= :oiSpike4hPct
-          OR oi.change_1d_pct >= :oiSpike1dPct
-        )
+        AND ${activeOpenInterestSpikeSql("oi")}
     ), 4, 0)`;
   const hotBitSql = `IF(EXISTS(
     SELECT 1 FROM hot_rank_seen h
@@ -3435,27 +3547,14 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
     FROM token_list t
     JOIN open_interest_monitor oi
       ON oi.symbol=t.symbol
-      AND oi.observed_at >= DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND)
-      AND (
-        oi.change_5m_pct >= :oiSpike5mPct
-        OR oi.change_1h_pct >= :oiSpike1hPct
-        OR oi.change_4h_pct >= :oiSpike4hPct
-        OR oi.change_1d_pct >= :oiSpike1dPct
-      )
+      AND ${activeOpenInterestSpikeSql("oi")}
     WHERE t.category_type IN (${quotedList(safeCategories)})
       AND t.is_active=1
       AND NOT ${standaloneMaAlertExistsSql}`;
   const candidateSql = `${groupSql}\nUNION ALL\n${standaloneOiSql}`;
   const [countRows] = await getPool().query(
     `SELECT COUNT(*) AS total FROM (${candidateSql}) grouped`,
-    {
-      activeSeconds: hotRankActiveSeconds(),
-      oiActiveSeconds: openInterestActiveSeconds(),
-      oiSpike5mPct: config.openInterestMonitor.spike5mPct,
-      oiSpike1hPct: config.openInterestMonitor.spike1hPct,
-      oiSpike4hPct: config.openInterestMonitor.spike4hPct,
-      oiSpike1dPct: config.openInterestMonitor.spike1dPct
-    }
+    openInterestSpikeQueryParams({ activeSeconds: hotRankActiveSeconds() })
   );
   const [symbolRows] = await getPool().query(
     `${candidateSql}
@@ -3466,16 +3565,11 @@ export async function getSignalGroupsPage({ categories, levels, intervals, page 
       latestUpdatedAt DESC,
       symbol
      LIMIT :pageSize OFFSET :offset`,
-    {
+    openInterestSpikeQueryParams({
       pageSize: safePageSize,
       offset: (safePage - 1) * safePageSize,
-      activeSeconds: hotRankActiveSeconds(),
-      oiActiveSeconds: openInterestActiveSeconds(),
-      oiSpike5mPct: config.openInterestMonitor.spike5mPct,
-      oiSpike1hPct: config.openInterestMonitor.spike1hPct,
-      oiSpike4hPct: config.openInterestMonitor.spike4hPct,
-      oiSpike1dPct: config.openInterestMonitor.spike1dPct
-    }
+      activeSeconds: hotRankActiveSeconds()
+    })
   );
   const symbols = symbolRows.map((row) => sanitizeDbSymbol(row.symbol)).filter(Boolean);
   const uniqueSymbols = [...new Set(symbols)];
@@ -4236,13 +4330,7 @@ export async function listRealtimeKlineTokens() {
                OR EXISTS(
                  SELECT 1 FROM open_interest_monitor oi
                  WHERE oi.symbol=s.symbol
-                   AND oi.observed_at >= DATE_SUB(NOW(3), INTERVAL :oiActiveSeconds SECOND)
-                   AND (
-                     oi.change_5m_pct >= :oiSpike5mPct
-                     OR oi.change_1h_pct >= :oiSpike1hPct
-                     OR oi.change_4h_pct >= :oiSpike4hPct
-                     OR oi.change_1d_pct >= :oiSpike1dPct
-                   )
+                   AND ${activeOpenInterestSpikeSql("oi")}
                )
                OR EXISTS(
                  SELECT 1 FROM hot_rank_seen h
@@ -4253,14 +4341,7 @@ export async function listRealtimeKlineTokens() {
          )
        )
      ORDER BY t.symbol`,
-    {
-      oiActiveSeconds: openInterestActiveSeconds(),
-      oiSpike5mPct: config.openInterestMonitor.spike5mPct,
-      oiSpike1hPct: config.openInterestMonitor.spike1hPct,
-      oiSpike4hPct: config.openInterestMonitor.spike4hPct,
-      oiSpike1dPct: config.openInterestMonitor.spike1dPct,
-      hotRankActiveSeconds: hotRankActiveSeconds()
-    }
+    openInterestSpikeQueryParams({ hotRankActiveSeconds: hotRankActiveSeconds() })
   );
   return rows;
 }

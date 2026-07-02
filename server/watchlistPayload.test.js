@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { config } from "./config.js";
 import {
   normalizeWatchlistAlertPrice,
   normalizeWatchlistPayload
@@ -55,4 +56,27 @@ test("watchlist price alert state suppresses repeated alerts on the same side", 
   assert.equal(shouldSendWatchlistPriceAlert({ ...item, lastAlertSide: "above" }, "above"), false);
   assert.equal(resolveWatchlistAlertSide({ ...item, lastAlertSide: "above" }, 2500), null);
   assert.equal(shouldSendWatchlistPriceAlert({ ...item, lastAlertSide: null }, "below"), true);
+});
+
+test("watchlist price alerts respect the global cooldown after a side reset", () => {
+  const originalCooldown = config.realtime.watchlistAlertCooldownMs;
+  config.realtime.watchlistAlertCooldownMs = 10 * 60 * 1000;
+  try {
+    const recentAlert = {
+      lastAlertSide: null,
+      lastAlertAt: new Date(Date.now() - 2 * 60 * 1000)
+    };
+    const oldAlert = {
+      lastAlertSide: null,
+      lastAlertAt: new Date(Date.now() - 11 * 60 * 1000)
+    };
+
+    assert.equal(shouldSendWatchlistPriceAlert(recentAlert, "above"), false);
+    assert.equal(shouldSendWatchlistPriceAlert(oldAlert, "above"), true);
+
+    config.realtime.watchlistAlertCooldownMs = 0;
+    assert.equal(shouldSendWatchlistPriceAlert(recentAlert, "above"), true);
+  } finally {
+    config.realtime.watchlistAlertCooldownMs = originalCooldown;
+  }
 });
