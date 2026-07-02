@@ -147,6 +147,8 @@ TOKEN_ANALYSIS_CODEX_KLINE_LIMIT=360
 
 K 线清理频率默认每 7 天一次，可通过 `KLINE_CLEANUP_INTERVAL_DAYS` 调整；服务会每小时检查一次是否到期。
 
+热榜快照/出现记录、已完成 Telegram 队列、OI 当前快照、非关注池解锁缓存默认保留 7 天，可通过 `HOT_RANK_RETENTION_DAYS` 和 `IO_RETENTION_DAYS` 调整。
+
 触发历史默认保留最近 4 小时并每 4 小时清理一次；PM2 的 `monitor-*-error.log` 和 `monitor-*-out.log` 默认每 4 小时截断一次。可通过 `RECORD_CLEANUP_INTERVAL_HOURS` 统一调整清理频率，也可以用 `TRIGGER_HISTORY_RETENTION_HOURS` 和 `RUNTIME_LOG_CLEANUP_INTERVAL_HOURS` 分别调整触发历史保留窗口和运行日志清理间隔。
 
 全量 K 线完整性审计默认每天 0 点执行：
@@ -157,6 +159,8 @@ TRIGGER_HISTORY_RETENTION_HOURS=4
 RUNTIME_LOG_CLEANUP_INTERVAL_HOURS=4
 KLINE_DAILY_AUDIT_HOUR=0
 INACTIVE_TOKEN_KLINE_RETENTION_DAYS=7
+HOT_RANK_RETENTION_DAYS=7
+IO_RETENTION_DAYS=7
 ```
 
 也可以手动触发：

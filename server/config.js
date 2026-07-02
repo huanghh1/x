@@ -175,8 +175,8 @@ export const config = {
       1,
       numberEnv("TRIGGER_HISTORY_RETENTION_HOURS", numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4))
     ),
-    hotRankRetentionDays: numberEnv("HOT_RANK_RETENTION_DAYS", 30),
-    ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 30),
+    hotRankRetentionDays: numberEnv("HOT_RANK_RETENTION_DAYS", 7),
+    ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 7),
     runtimeLogCleanupIntervalHours: Math.max(
       1,
       numberEnv("RUNTIME_LOG_CLEANUP_INTERVAL_HOURS", numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4))

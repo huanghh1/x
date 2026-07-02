@@ -1420,8 +1420,8 @@ export async function cleanupTriggerHistoryRetention(
 }
 
 export async function cleanupExpiredData() {
-  const hotRankDays = Math.max(1, Number(config.maintenance.hotRankRetentionDays) || 30);
-  const ioDays = Math.max(1, Number(config.maintenance.ioRetentionDays) || 30);
+  const hotRankDays = Math.max(1, Number(config.maintenance.hotRankRetentionDays) || 7);
+  const ioDays = Math.max(1, Number(config.maintenance.ioRetentionDays) || 7);
   const oiSampleDays = Math.max(2, Number(config.openInterestMonitor.sampleRetentionDays) || 3);
   const [triggerHistory, hotSnapshots, staleHotRows, staleOpenInterest, staleOpenInterestSamples, staleTelegramAlerts, staleUnlocks] = await Promise.all([
     cleanupTriggerHistoryRetention(),
