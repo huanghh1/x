@@ -132,7 +132,6 @@ const TABLE_SQL = [
     signal_status VARCHAR(48) NOT NULL,
     note VARCHAR(255) NOT NULL,
     signal_time DATETIME(3) NOT NULL,
-    telegram_sent_at DATETIME(3) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -176,6 +175,7 @@ const TABLE_SQL = [
     current_price DECIMAL(32,12) NULL,
     current_price_time DATETIME(3) NULL,
     last_alert_at DATETIME(3) NULL,
+    last_alert_side ENUM('above','below') NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -188,6 +188,9 @@ const TABLE_SQL = [
     interval_code ENUM('15m','1h','4h','1d') NOT NULL,
     alert_level ENUM('LEVEL1','LEVEL2') NOT NULL,
     signal_time DATETIME(3) NOT NULL,
+    profile_key VARCHAR(80) NULL,
+    source_mask TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    context_signature VARCHAR(255) NULL,
     sent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (symbol, interval_code),
     KEY idx_hot_ma_sent_at (sent_at)
@@ -299,6 +302,7 @@ const TABLE_SQL = [
     change_1d_pct DECIMAL(18,8) NULL,
     observed_at DATETIME(3) NOT NULL,
     last_spike_alert_at DATETIME(3) NULL,
+    last_spike_alert_signature VARCHAR(255) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol),
@@ -361,6 +365,16 @@ const TABLE_SQL = [
     KEY idx_trade_journal_status_time (status, opened_at, id),
     KEY idx_trade_journal_symbol_time (symbol, opened_at, id),
     KEY idx_trade_journal_updated (updated_at, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS trade_journal_intraday_notes (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    journal_id BIGINT UNSIGNED NOT NULL,
+    note_text TEXT NOT NULL,
+    noted_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_trade_journal_intraday_time (journal_id, noted_at, id),
+    CONSTRAINT fk_trade_journal_intraday_journal FOREIGN KEY (journal_id) REFERENCES trade_journal(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
 ];
 
@@ -429,6 +443,8 @@ async function initializeDatabase() {
       await ensureFundingRateColumns();
       await ensureFundingAlertConfirmationColumns();
       await ensureTokenUnlockStatusSchema();
+      await ensureHotMaSignalAlertSchema();
+      await ensureOpenInterestAlertSchema();
       await ensureTriggerHistorySchema();
       await ensureTradeEventHistorySchema();
       await ensurePerformanceIndexes();
@@ -469,6 +485,9 @@ async function ensureWatchlistRealtimeColumns() {
   }
   if (!(await columnExists("watchlist", "current_price_time"))) {
     await pool.query("ALTER TABLE watchlist ADD COLUMN current_price_time DATETIME(3) NULL AFTER current_price");
+  }
+  if (!(await columnExists("watchlist", "last_alert_side"))) {
+    await pool.query("ALTER TABLE watchlist ADD COLUMN last_alert_side ENUM('above','below') NULL AFTER last_alert_at");
   }
 }
 
@@ -515,6 +534,27 @@ async function ensureTokenUnlockStatusSchema() {
   }
   if (!(await columnExists("token_unlock_cache", "raw_payload"))) {
     await pool.query("ALTER TABLE token_unlock_cache ADD COLUMN raw_payload JSON NULL AFTER error_message");
+  }
+}
+
+async function ensureHotMaSignalAlertSchema() {
+  if (!(await tableExists("hot_ma_signal_alert"))) return;
+  const columns = [
+    ["profile_key", "ALTER TABLE hot_ma_signal_alert ADD COLUMN profile_key VARCHAR(80) NULL AFTER signal_time"],
+    ["source_mask", "ALTER TABLE hot_ma_signal_alert ADD COLUMN source_mask TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER profile_key"],
+    ["context_signature", "ALTER TABLE hot_ma_signal_alert ADD COLUMN context_signature VARCHAR(255) NULL AFTER source_mask"]
+  ];
+  for (const [column, sql] of columns) {
+    if (!(await columnExists("hot_ma_signal_alert", column))) await pool.query(sql);
+  }
+}
+
+async function ensureOpenInterestAlertSchema() {
+  if (!(await tableExists("open_interest_monitor"))) return;
+  if (!(await columnExists("open_interest_monitor", "last_spike_alert_signature"))) {
+    await pool.query(
+      "ALTER TABLE open_interest_monitor ADD COLUMN last_spike_alert_signature VARCHAR(255) NULL AFTER last_spike_alert_at"
+    );
   }
 }
 
@@ -607,6 +647,7 @@ async function ensurePerformanceIndexes() {
   await ensureIndex("trade_journal", "idx_trade_journal_status_time", "(status, opened_at, id)");
   await ensureIndex("trade_journal", "idx_trade_journal_symbol_time", "(symbol, opened_at, id)");
   await ensureIndex("trade_journal", "idx_trade_journal_updated", "(updated_at, id)");
+  await ensureIndex("trade_journal_intraday_notes", "idx_trade_journal_intraday_time", "(journal_id, noted_at, id)");
   await ensureIndex("kline_cache", "idx_kline_symbol_interval_close", "(symbol, interval_code, close_time)");
   await ensureIndex("hot_rank_snapshot", "idx_hot_snapshot_time", "(snapshot_time)");
   await ensureIndex("token_unlock_cache", "idx_unlock_checked", "(checked_at)");
@@ -895,26 +936,6 @@ export async function countActiveTokens() {
   return Number(rows[0]?.count ?? 0);
 }
 
-export async function selectNextTokenForFetch({ incrementalCutoffAt = null } = {}) {
-  const incrementalRefreshCondition = incrementalCutoffAt
-    ? `OR (fetch_status='completed' AND (cache_policy_key IS NULL OR cache_policy_key <> :cachePolicyKey))
-        OR (fetch_status='completed' AND (cache_completed_at IS NULL OR cache_completed_at < :incrementalCutoffAt))`
-    : "";
-  const [rows] = await getPool().query(
-    `SELECT * FROM token_list
-     WHERE is_active=1
-       AND (fetch_status IN ('pending','partial','failed','fetching')
-        ${incrementalRefreshCondition})
-     ORDER BY
-      CASE fetch_status WHEN 'partial' THEN 0 WHEN 'fetching' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
-      category_type ASC,
-      updated_at ASC
-     LIMIT 1`,
-    { cachePolicyKey: config.crawler.cachePolicyKey, incrementalCutoffAt }
-  );
-  return rows[0] ?? null;
-}
-
 export async function resetInterruptedFetchingTokens(staleAfterMs) {
   const staleSeconds = Math.max(0, Math.floor((Number(staleAfterMs) || 0) / 1000));
   const [result] = await getPool().query(
@@ -1008,14 +1029,6 @@ export async function refreshTokenFetchState(tokenId) {
     { tokenId, intervalCount, cachePolicyKey: config.crawler.cachePolicyKey }
   );
   return intervalCount;
-}
-
-export async function klineCount(symbol, intervalCode) {
-  const [rows] = await getPool().query(
-    `SELECT COUNT(*) AS count FROM kline_cache WHERE symbol=:symbol AND interval_code=:intervalCode`,
-    { symbol, intervalCode }
-  );
-  return Number(rows[0]?.count ?? 0);
 }
 
 export async function klineStats(symbol, intervalCode) {
@@ -1866,6 +1879,25 @@ function normalizeTradeJournalPayload(payload = {}) {
   };
 }
 
+function normalizeTradeJournalIntradayNote(payload = {}) {
+  const noteText = tradeJournalText(payload.noteText ?? payload.text ?? payload.note, 8000);
+  if (!noteText) throw new Error("盘中确定不能为空");
+  return {
+    noteText,
+    notedAt: tradeJournalNullableDate(payload.notedAt, "notedAt") ?? new Date()
+  };
+}
+
+function mapTradeJournalIntradayNote(row) {
+  return {
+    id: Number(row.id),
+    journalId: Number(row.journalId),
+    noteText: row.noteText ?? "",
+    notedAt: row.notedAt ?? null,
+    createdAt: row.createdAt ?? null
+  };
+}
+
 function mapTradeJournalRow(row) {
   return {
     id: Number(row.id),
@@ -1878,9 +1910,36 @@ function mapTradeJournalRow(row) {
     openReason: row.openReason ?? "",
     closeReason: row.closeReason ?? "",
     reviewSummary: row.reviewSummary ?? "",
+    intradayNotes: [],
     createdAt: row.createdAt ?? null,
     updatedAt: row.updatedAt ?? null
   };
+}
+
+async function attachTradeJournalIntradayNotes(items) {
+  const journalIds = items
+    .map((item) => Number(item.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!journalIds.length) return items;
+  const [rows] = await getPool().query(
+    `SELECT id, journal_id AS journalId, note_text AS noteText,
+      noted_at AS notedAt, created_at AS createdAt
+     FROM trade_journal_intraday_notes
+     WHERE journal_id IN (?)
+     ORDER BY noted_at ASC, id ASC`,
+    [journalIds]
+  );
+  const notesByJournalId = new Map();
+  for (const row of rows) {
+    const note = mapTradeJournalIntradayNote(row);
+    const notes = notesByJournalId.get(note.journalId) ?? [];
+    notes.push(note);
+    notesByJournalId.set(note.journalId, notes);
+  }
+  for (const item of items) {
+    item.intradayNotes = notesByJournalId.get(Number(item.id)) ?? [];
+  }
+  return items;
 }
 
 export async function listTradeJournal({
@@ -1911,6 +1970,12 @@ export async function listTradeJournal({
       OR open_reason LIKE :keyword
       OR close_reason LIKE :keyword
       OR review_summary LIKE :keyword
+      OR EXISTS (
+        SELECT 1
+        FROM trade_journal_intraday_notes
+        WHERE trade_journal_intraday_notes.journal_id = trade_journal.id
+          AND trade_journal_intraday_notes.note_text LIKE :keyword
+      )
     )`);
     params.keyword = `%${safeKeyword}%`;
   }
@@ -1927,8 +1992,9 @@ export async function listTradeJournal({
      LIMIT :pageSize OFFSET :offset`,
     params
   );
+  const items = await attachTradeJournalIntradayNotes(rows.map(mapTradeJournalRow));
   return {
-    items: rows.map(mapTradeJournalRow),
+    items,
     total: Number(countRows[0]?.total ?? 0),
     page: safePage,
     pageSize: safePageSize
@@ -1948,7 +2014,9 @@ export async function getTradeJournalEntry(id) {
      LIMIT 1`,
     { id: safeId }
   );
-  return rows[0] ? mapTradeJournalRow(rows[0]) : null;
+  if (!rows[0]) return null;
+  const [item] = await attachTradeJournalIntradayNotes([mapTradeJournalRow(rows[0])]);
+  return item;
 }
 
 export async function createTradeJournalEntry(payload = {}) {
@@ -1991,6 +2059,31 @@ export async function deleteTradeJournalEntry(id) {
   if (!Number.isInteger(safeId) || safeId <= 0) return 0;
   const [result] = await getPool().query("DELETE FROM trade_journal WHERE id=:id", { id: safeId });
   return result.affectedRows ?? 0;
+}
+
+export async function createTradeJournalIntradayNote(journalId, payload = {}) {
+  const safeJournalId = Number(journalId);
+  if (!Number.isInteger(safeJournalId) || safeJournalId <= 0) throw new Error("journal id is required");
+  const note = normalizeTradeJournalIntradayNote(payload);
+  const [entryRows] = await getPool().query(
+    "SELECT id FROM trade_journal WHERE id=:journalId LIMIT 1",
+    { journalId: safeJournalId }
+  );
+  if (!entryRows.length) return null;
+  const [result] = await getPool().query(
+    `INSERT INTO trade_journal_intraday_notes (journal_id, note_text, noted_at)
+     VALUES (:journalId, :noteText, :notedAt)`,
+    { journalId: safeJournalId, ...note }
+  );
+  const [rows] = await getPool().query(
+    `SELECT id, journal_id AS journalId, note_text AS noteText,
+      noted_at AS notedAt, created_at AS createdAt
+     FROM trade_journal_intraday_notes
+     WHERE id=:id
+     LIMIT 1`,
+    { id: result.insertId }
+  );
+  return rows[0] ? mapTradeJournalIntradayNote(rows[0]) : null;
 }
 
 function tradeText(value, maxLength, fallback = "") {
@@ -2315,16 +2408,6 @@ export async function readTradeEventHistoryAnalysis({
   };
 }
 
-export async function listActiveTokenSymbols() {
-  const [rows] = await getPool().query(
-    `SELECT id, symbol, base_asset AS baseAsset, category_type AS categoryType, category_label AS categoryLabel
-     FROM token_list
-     WHERE is_active=1
-     ORDER BY symbol`
-  );
-  return rows;
-}
-
 export async function listOpenInterestScanTokens() {
   const [rows] = await getPool().query(
     `SELECT t.id, t.symbol, t.base_asset AS baseAsset, t.category_type AS categoryType, t.category_label AS categoryLabel,
@@ -2442,6 +2525,30 @@ export function normalizeOptionalLimit(limit, max = 500) {
   return Math.max(1, Math.min(Math.max(1, Number(max) || 500), numeric));
 }
 
+function mapOpenInterestMonitorRow(row) {
+  return {
+    ...row,
+    currentOpenInterest: row.currentOpenInterest === null ? null : Number(row.currentOpenInterest),
+    currentOpenInterestValue: row.currentOpenInterestValue === null ? null : Number(row.currentOpenInterestValue),
+    changePercent: row.changePercent === null ? null : Number(row.changePercent),
+    change5mPct: row.change5mPct === null ? null : Number(row.change5mPct),
+    change15mPct: row.change15mPct === null ? null : Number(row.change15mPct),
+    change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
+    change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
+    change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
+    currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
+    currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
+    isStale: Boolean(row.isStale),
+    observedAgeSeconds: Number(row.observedAgeSeconds ?? 0),
+    hotRankHit: Boolean(row.hotRankHit),
+    fundingOneHour: Boolean(row.fundingOneHour),
+    multiCycleCount: Number(row.multiCycleCount ?? 0),
+    signalIntervals: String(row.signalIntervals ?? "")
+      .split(",")
+      .filter(Boolean)
+  };
+}
+
 export async function upsertOpenInterestSnapshot(item) {
   const safeSymbol = sanitizeDbSymbol(item?.symbol);
   if (!safeSymbol) return false;
@@ -2538,27 +2645,7 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
     ,
     { activeSeconds: hotRankActiveSeconds(), oiActiveSeconds: openInterestActiveSeconds(), limit: safeLimit }
   );
-  return rows.map((row) => ({
-    ...row,
-    currentOpenInterest: row.currentOpenInterest === null ? null : Number(row.currentOpenInterest),
-    currentOpenInterestValue: row.currentOpenInterestValue === null ? null : Number(row.currentOpenInterestValue),
-    changePercent: row.changePercent === null ? null : Number(row.changePercent),
-    change5mPct: row.change5mPct === null ? null : Number(row.change5mPct),
-    change15mPct: row.change15mPct === null ? null : Number(row.change15mPct),
-    change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
-    change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
-    change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
-    currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
-    currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
-    isStale: Boolean(row.isStale),
-    observedAgeSeconds: Number(row.observedAgeSeconds ?? 0),
-    hotRankHit: Boolean(row.hotRankHit),
-    fundingOneHour: Boolean(row.fundingOneHour),
-    multiCycleCount: Number(row.multiCycleCount ?? 0),
-    signalIntervals: String(row.signalIntervals ?? "")
-      .split(",")
-      .filter(Boolean)
-  }));
+  return rows.map(mapOpenInterestMonitorRow);
 }
 
 export async function listOpenInterestMonitorPage({
@@ -2643,27 +2730,7 @@ export async function listOpenInterestMonitorPage({
     params
   );
   return {
-    data: rows.map((row) => ({
-      ...row,
-      currentOpenInterest: row.currentOpenInterest === null ? null : Number(row.currentOpenInterest),
-      currentOpenInterestValue: row.currentOpenInterestValue === null ? null : Number(row.currentOpenInterestValue),
-      changePercent: row.changePercent === null ? null : Number(row.changePercent),
-      change5mPct: row.change5mPct === null ? null : Number(row.change5mPct),
-      change15mPct: row.change15mPct === null ? null : Number(row.change15mPct),
-      change1hPct: row.change1hPct === null ? null : Number(row.change1hPct),
-      change4hPct: row.change4hPct === null ? null : Number(row.change4hPct),
-      change1dPct: row.change1dPct === null ? null : Number(row.change1dPct),
-      currentPrice: row.currentPrice === null ? null : Number(row.currentPrice),
-      currentCloseTime: row.currentCloseTime === null ? null : Number(row.currentCloseTime),
-      isStale: Boolean(row.isStale),
-      observedAgeSeconds: Number(row.observedAgeSeconds ?? 0),
-      hotRankHit: Boolean(row.hotRankHit),
-      fundingOneHour: Boolean(row.fundingOneHour),
-      multiCycleCount: Number(row.multiCycleCount ?? 0),
-      signalIntervals: String(row.signalIntervals ?? "")
-        .split(",")
-        .filter(Boolean)
-    })),
+    data: rows.map(mapOpenInterestMonitorRow),
     total,
     page: effectivePage,
     pageSize: safePageSize
@@ -2696,7 +2763,8 @@ export async function getOpenInterestMonitorItem(symbol) {
       change_4h_pct AS change4hPct,
       change_1d_pct AS change1dPct,
       observed_at AS observedAt,
-      last_spike_alert_at AS lastSpikeAlertAt
+      last_spike_alert_at AS lastSpikeAlertAt,
+      last_spike_alert_signature AS lastSpikeAlertSignature
      FROM open_interest_monitor
      WHERE symbol=:symbol
      LIMIT 1`,
@@ -2713,39 +2781,17 @@ export async function getOpenInterestMonitorItem(symbol) {
   };
 }
 
-export async function markOpenInterestSpikeAlertSent(symbol) {
+export async function markOpenInterestSpikeAlertSent(symbol, alertState = {}) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return 0;
+  const signature = alertState.signature ? String(alertState.signature).slice(0, 255) : null;
+  const alertAtUpdate = alertState.preserveAlertAt ? "last_spike_alert_at=last_spike_alert_at" : "last_spike_alert_at=NOW(3)";
   const [result] = await getPool().query(
-    "UPDATE open_interest_monitor SET last_spike_alert_at=NOW(3) WHERE symbol=:symbol",
-    { symbol: safeSymbol }
-  );
-  return result.affectedRows ?? 0;
-}
-
-export async function insertKlinePage(token, intervalCode, klines) {
-  if (klines.length === 0) return 0;
-  const rows = klines.map((kline) => [
-    token.id,
-    token.symbol,
-    intervalCode,
-    Number(kline[0]),
-    Number(kline[6]),
-    kline[1],
-    kline[2],
-    kline[3],
-    kline[4],
-    kline[5],
-    kline[7] ?? null,
-    kline[8] ?? null
-  ]);
-  const [result] = await getPool().query(
-    `INSERT INTO kline_cache
-      (token_id, symbol, interval_code, open_time, close_time, open_price, high_price, low_price, close_price, volume, quote_volume, trade_count)
-     VALUES ?
-     ON DUPLICATE KEY UPDATE
-      token_id=VALUES(token_id)`,
-    [rows]
+    `UPDATE open_interest_monitor
+     SET ${alertAtUpdate},
+         last_spike_alert_signature=:signature
+     WHERE symbol=:symbol`,
+    { symbol: safeSymbol, signature }
   );
   return result.affectedRows ?? 0;
 }
@@ -2806,14 +2852,6 @@ export async function selectClosePrices(symbol, intervalCode) {
   }));
 }
 
-export async function selectPreviousSignal(symbol, intervalCode) {
-  const [rows] = await getPool().query(
-    `SELECT * FROM signal_result WHERE symbol=:symbol AND interval_code=:intervalCode LIMIT 1`,
-    { symbol, intervalCode }
-  );
-  return rows[0] ?? null;
-}
-
 export async function selectPreviousSignals(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return new Map();
@@ -2857,7 +2895,6 @@ export async function upsertSignals(token, signals) {
       signal_status=VALUES(signal_status),
       note=VALUES(note),
       signal_time=VALUES(signal_time),
-      telegram_sent_at=IF(alert_level <> VALUES(alert_level), NULL, telegram_sent_at),
       alert_level=VALUES(alert_level)`,
     [rows]
   );
@@ -2866,13 +2903,6 @@ export async function upsertSignals(token, signals) {
 
 export async function upsertSignal(token, signal) {
   return upsertSignals(token, [signal]);
-}
-
-export async function markSignalTelegramSent(symbol, intervalCode) {
-  await getPool().query(
-    `UPDATE signal_result SET telegram_sent_at=NOW(3) WHERE symbol=:symbol AND interval_code=:intervalCode`,
-    { symbol, intervalCode }
-  );
 }
 
 export async function getOverview() {
@@ -3011,88 +3041,6 @@ function hotRankSignalMatchSql(hotAlias, signalAlias) {
     OR (${baseAsset} LIKE '1000000%' AND ${hotAlias}.base_asset=SUBSTRING(${baseAsset}, 8))
     OR (${hotAlias}.base_asset LIKE '1000000%' AND ${baseAsset}=SUBSTRING(${hotAlias}.base_asset, 8))
   )`;
-}
-
-export async function getSignalsPage({ categories, levels, intervals, page = 1, pageSize = 20 }) {
-  const safeCategories = normalizeList(categories, SIGNAL_CATEGORIES);
-  const safeLevels = normalizeList(levels, SIGNAL_LEVELS);
-  const safeIntervals = normalizeList(intervals, SIGNAL_INTERVALS);
-  const safePageSize = Math.max(1, Math.min(100, Number(pageSize) || 20));
-  const safePage = Math.max(1, Number(page) || 1);
-  const offset = (safePage - 1) * safePageSize;
-
-  if (safeCategories.length === 0 || safeLevels.length === 0 || safeIntervals.length === 0) {
-    return { signals: [], total: 0, page: safePage, pageSize: safePageSize };
-  }
-
-  const alarmLevels = safeLevels.filter((level) => ["LEVEL1", "LEVEL2"].includes(level));
-  const multiRequired = safeIntervals.length > 1 && alarmLevels.length > 0 ? Math.min(3, safeIntervals.length) : 0;
-  const multiJoinSql =
-    multiRequired > 0
-      ? `LEFT JOIN (
-          SELECT
-            s2.symbol,
-            COUNT(DISTINCT s2.interval_code) AS multiMatchCount,
-            MIN(CASE s2.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 WHEN 'NONE' THEN 2 ELSE 3 END) AS multiBestLevelRank,
-            MAX(s2.signal_weight) AS multiBestWeight,
-            MAX(s2.updated_at) AS multiLatestUpdatedAt
-          FROM signal_result s2
-          JOIN token_list t2 ON t2.id=s2.token_id
-          WHERE s2.category_type IN (${quotedList(safeCategories)})
-            AND s2.alert_level IN (${quotedList(alarmLevels)})
-            AND s2.interval_code IN (${quotedList(safeIntervals)})
-            AND t2.is_active=1
-          GROUP BY s2.symbol
-        ) mp ON mp.symbol=s.symbol`
-      : "LEFT JOIN (SELECT NULL AS symbol, 0 AS multiMatchCount, 3 AS multiBestLevelRank, 0 AS multiBestWeight, NULL AS multiLatestUpdatedAt) mp ON mp.symbol=s.symbol";
-
-  const whereSql = `s.category_type IN (${quotedList(safeCategories)})
-    AND s.alert_level IN (${quotedList(safeLevels)})
-    AND s.interval_code IN (${quotedList(safeIntervals)})
-    AND t.is_active=1`;
-
-  const [countRows] = await getPool().query(
-    `SELECT COUNT(*) AS total
-     FROM signal_result s
-     JOIN token_list t ON t.id=s.token_id
-     WHERE ${whereSql}`
-  );
-
-  const [rows] = await getPool().query(
-    `SELECT s.symbol, s.category_type AS categoryType, t.category_label AS categoryLabel,
-      s.interval_code AS intervalCode, s.alert_level AS alertLevel, s.ma100, s.ma200,
-      s.current_price AS currentPrice, s.proximity_pct AS proximityPct, s.signal_weight AS signalWeight,
-      s.signal_status AS signalStatus, s.note, s.signal_time AS signalTime, s.updated_at AS updatedAt,
-      COALESCE(mp.multiMatchCount, 0) AS multiMatchCount,
-      :multiRequired AS multiMatchRequired,
-      IF(${hotRankHitSql("t")}, 1, 0) AS hotRankHit,
-      ${hotRankValueSql("t", "MIN(h.last_seen_rank)")} AS hotRank
-     FROM signal_result s
-     JOIN token_list t ON t.id=s.token_id
-     ${multiJoinSql}
-     WHERE ${whereSql}
-     ORDER BY
-      IF(hotRankHit=1 AND s.alert_level IN ('LEVEL1','LEVEL2'), 0, 1),
-      IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiBestLevelRank, 3), CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 WHEN 'NONE' THEN 2 ELSE 3 END),
-      IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, 0, 1),
-      IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiMatchCount, 0), 0) DESC,
-      IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, COALESCE(mp.multiBestWeight, 0), s.signal_weight) DESC,
-      IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, mp.multiLatestUpdatedAt, s.updated_at) DESC,
-      IF(COALESCE(mp.multiMatchCount, 0) >= :multiRequired AND :multiRequired > 1, s.symbol, ''),
-      CASE s.alert_level WHEN 'LEVEL1' THEN 0 WHEN 'LEVEL2' THEN 1 WHEN 'NONE' THEN 2 ELSE 3 END,
-      CASE s.interval_code WHEN '15m' THEN 0 WHEN '1h' THEN 1 WHEN '4h' THEN 2 WHEN '1d' THEN 3 ELSE 4 END,
-      s.signal_weight DESC,
-      s.updated_at DESC
-     LIMIT :pageSize OFFSET :offset`,
-    { pageSize: safePageSize, offset, multiRequired, hotRankActiveSeconds: hotRankActiveSeconds() }
-  );
-
-  return {
-    signals: rows,
-    total: Number(countRows[0]?.total ?? 0),
-    page: safePage,
-    pageSize: safePageSize
-  };
 }
 
 export async function getSignalGroupsPage({ categories, levels, intervals, page = 1, pageSize = 20 }) {
@@ -3525,27 +3473,12 @@ export async function getHotMaSignalsPage({ categories = "A,B", levels = "LEVEL1
   };
 }
 
-export async function isActiveHotRankSymbol(symbol) {
-  const safeSymbol = sanitizeDbSymbol(symbol);
-  if (!safeSymbol) return false;
-  const baseAsset = baseAssetFromSymbol(safeSymbol);
-  const unscaledBaseAsset = baseAsset.replace(/^(1000000|1000)/, "");
-  const [rows] = await getPool().query(
-    `SELECT 1 AS ok
-     FROM hot_rank_seen
-     WHERE (symbol=:symbol OR base_asset IN (:baseAsset, :unscaledBaseAsset))
-       AND last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)
-     LIMIT 1`,
-    { symbol: safeSymbol, baseAsset, unscaledBaseAsset, hotRankActiveSeconds: hotRankActiveSeconds() }
-  );
-  return rows.length > 0;
-}
-
 export async function selectHotMaSignalAlert(symbol, intervalCode) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return null;
   const [rows] = await getPool().query(
-    `SELECT symbol, interval_code AS intervalCode, alert_level AS alertLevel, signal_time AS signalTime, sent_at AS sentAt
+    `SELECT symbol, interval_code AS intervalCode, alert_level AS alertLevel, signal_time AS signalTime,
+      profile_key AS profileKey, source_mask AS sourceMask, context_signature AS contextSignature, sent_at AS sentAt
      FROM hot_ma_signal_alert
      WHERE symbol=:symbol AND interval_code=:intervalCode
      LIMIT 1`,
@@ -3554,18 +3487,27 @@ export async function selectHotMaSignalAlert(symbol, intervalCode) {
   return rows[0] ?? null;
 }
 
-export async function markHotMaSignalAlertSent(symbol, intervalCode, signal) {
+export async function markHotMaSignalAlertSent(symbol, intervalCode, signal, alertState = {}) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol || !["LEVEL1", "LEVEL2"].includes(signal?.alertLevel)) return;
   const signalTime = Number(signal.signalTime ?? Date.now());
+  const profileKey = alertState.profileKey ? String(alertState.profileKey).slice(0, 80) : null;
+  const sourceMask = Number.isFinite(Number(alertState.sourceMask)) ? Number(alertState.sourceMask) : 0;
+  const contextSignature = alertState.contextSignature ? String(alertState.contextSignature).slice(0, 255) : null;
+  const sentAtUpdate = alertState.preserveSentAt ? "sent_at=sent_at" : "sent_at=NOW(3)";
   await getPool().query(
-    `INSERT INTO hot_ma_signal_alert (symbol, interval_code, alert_level, signal_time, sent_at)
-     VALUES (:symbol, :intervalCode, :alertLevel, FROM_UNIXTIME(:signalTime / 1000), NOW(3))
+    `INSERT INTO hot_ma_signal_alert
+      (symbol, interval_code, alert_level, signal_time, profile_key, source_mask, context_signature, sent_at)
+     VALUES
+      (:symbol, :intervalCode, :alertLevel, FROM_UNIXTIME(:signalTime / 1000), :profileKey, :sourceMask, :contextSignature, NOW(3))
      ON DUPLICATE KEY UPDATE
       alert_level=VALUES(alert_level),
       signal_time=VALUES(signal_time),
-      sent_at=NOW(3)`,
-    { symbol: safeSymbol, intervalCode, alertLevel: signal.alertLevel, signalTime }
+      profile_key=VALUES(profile_key),
+      source_mask=VALUES(source_mask),
+      context_signature=VALUES(context_signature),
+      ${sentAtUpdate}`,
+    { symbol: safeSymbol, intervalCode, alertLevel: signal.alertLevel, signalTime, profileKey, sourceMask, contextSignature }
   );
 }
 
@@ -3914,7 +3856,7 @@ export async function listWatchlist() {
   const [rows] = await getPool().query(
     `SELECT w.id, w.symbol, w.base_asset AS baseAsset, w.note,
       w.alert_above AS alertAbove, w.alert_below AS alertBelow,
-      w.alert_enabled AS alertEnabled, w.last_alert_at AS lastAlertAt,
+      w.alert_enabled AS alertEnabled, w.last_alert_at AS lastAlertAt, w.last_alert_side AS lastAlertSide,
       w.current_price AS realtimePrice, UNIX_TIMESTAMP(w.current_price_time) * 1000 AS realtimePriceTime,
       w.created_at AS createdAt, w.updated_at AS updatedAt,
       t.category_label AS categoryLabel,
@@ -4128,6 +4070,7 @@ export async function upsertWatchlistItem({ symbol, note = "", alertAbove = null
       alert_above=VALUES(alert_above),
       alert_below=VALUES(alert_below),
       alert_enabled=VALUES(alert_enabled),
+      last_alert_side=NULL,
       updated_at=NOW()`,
     {
       symbol: normalized.symbol,
@@ -4163,8 +4106,22 @@ export async function updateWatchlistRealtimePrice(symbol, price, eventTime = Da
   return result.affectedRows ?? 0;
 }
 
-export async function markWatchlistAlertSent(symbol) {
+export async function markWatchlistAlertSent(symbol, side = null) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return;
-  await getPool().query("UPDATE watchlist SET last_alert_at=NOW(3) WHERE symbol=:symbol", { symbol: safeSymbol });
+  const safeSide = side === "above" || side === "below" ? side : null;
+  await getPool().query(
+    "UPDATE watchlist SET last_alert_at=NOW(3), last_alert_side=:side WHERE symbol=:symbol",
+    { symbol: safeSymbol, side: safeSide }
+  );
+}
+
+export async function clearWatchlistAlertSide(symbol) {
+  const safeSymbol = sanitizeDbSymbol(symbol);
+  if (!safeSymbol) return 0;
+  const [result] = await getPool().query(
+    "UPDATE watchlist SET last_alert_side=NULL WHERE symbol=:symbol AND last_alert_side IS NOT NULL",
+    { symbol: safeSymbol }
+  );
+  return result.affectedRows ?? 0;
 }

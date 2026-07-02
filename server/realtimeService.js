@@ -7,6 +7,7 @@ import {
   getWatchlistRealtimeState,
   refreshWatchlistRealtime,
   startWatchlistRealtime,
+  stopWatchlistRealtime,
   watchRealtimeEvents
 } from "./watchRealtime.js";
 
@@ -44,6 +45,15 @@ app.get("/internal/events", (request, response) => {
 
 await ensureDatabase();
 await startWatchlistRealtime({ alertSender: sendWatchlistTelegram });
-app.listen(config.service.realtimePort, config.service.host, () => {
+const server = app.listen(config.service.realtimePort, config.service.host, () => {
   console.log(`Realtime service running at http://${config.service.host}:${config.service.realtimePort}`);
 });
+
+function shutdownRealtimeService() {
+  stopWatchlistRealtime();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+
+process.once("SIGINT", shutdownRealtimeService);
+process.once("SIGTERM", shutdownRealtimeService);

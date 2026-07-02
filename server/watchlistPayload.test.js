@@ -4,6 +4,10 @@ import {
   normalizeWatchlistAlertPrice,
   normalizeWatchlistPayload
 } from "./db.js";
+import {
+  resolveWatchlistAlertSide,
+  shouldSendWatchlistPriceAlert
+} from "./watchRealtime.js";
 
 test("watchlist alert prices accept empty values and positive numbers", () => {
   assert.equal(normalizeWatchlistAlertPrice("", "alertAbove"), null);
@@ -41,4 +45,14 @@ test("watchlist payload rejects invalid alert ranges", () => {
     () => normalizeWatchlistPayload({ symbol: "BTCUSDT", alertAbove: "10", alertBelow: "20" }),
     /alertAbove must be greater than alertBelow/
   );
+});
+
+test("watchlist price alert state suppresses repeated alerts on the same side", () => {
+  const item = { alertAbove: 3000, alertBelow: 2000, lastAlertSide: null };
+
+  assert.equal(resolveWatchlistAlertSide(item, 3100), "above");
+  assert.equal(shouldSendWatchlistPriceAlert(item, "above"), true);
+  assert.equal(shouldSendWatchlistPriceAlert({ ...item, lastAlertSide: "above" }, "above"), false);
+  assert.equal(resolveWatchlistAlertSide({ ...item, lastAlertSide: "above" }, 2500), null);
+  assert.equal(shouldSendWatchlistPriceAlert({ ...item, lastAlertSide: null }, "below"), true);
 });

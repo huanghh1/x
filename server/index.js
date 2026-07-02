@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { config } from "./config.js";
 import {
   clearTriggerHistory,
+  createTradeJournalIntradayNote,
   createTradeJournalEntry,
   deleteTradeJournalEntry,
   deleteTriggerHistory,
@@ -486,6 +487,20 @@ app.put("/api/trade-journal/:id", requireLocalMutation, async (request, response
   }
 });
 
+app.post("/api/trade-journal/:id/intraday-notes", requireLocalMutation, async (request, response) => {
+  try {
+    const note = await createTradeJournalIntradayNote(request.params.id, request.body ?? {});
+    if (!note) {
+      response.status(404).json({ ok: false, error: "交易日记不存在" });
+      return;
+    }
+    response.json({ ok: true, note });
+  } catch (error) {
+    console.error("create trade journal intraday note failed", error);
+    response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 app.delete("/api/trade-journal/:id", requireLocalMutation, async (request, response) => {
   try {
     response.json({ ok: true, deleted: await deleteTradeJournalEntry(request.params.id) });
@@ -494,6 +509,21 @@ app.delete("/api/trade-journal/:id", requireLocalMutation, async (request, respo
     response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
 });
+
+async function runPreparedCodexAnalysis(prepared) {
+  const codexResult = await runCodexTradeAnalysis(prepared.prompt, {
+    command: config.tradeAnalysis.codex.command,
+    timeoutMs: config.tradeAnalysis.codex.timeoutMs
+  });
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    scope: prepared.report.scope,
+    title: prepared.report.title,
+    report: prepared.report,
+    analysis: codexResult.text
+  };
+}
 
 app.post("/api/trade-analysis/codex", requireLocalMutation, async (request, response) => {
   try {
@@ -519,18 +549,7 @@ app.post("/api/trade-analysis/codex", requireLocalMutation, async (request, resp
       tradeKey: body.tradeKey,
       contextEventLimit: config.tradeAnalysis.codex.contextEventLimit
     });
-    const codexResult = await runCodexTradeAnalysis(prepared.prompt, {
-      command: config.tradeAnalysis.codex.command,
-      timeoutMs: config.tradeAnalysis.codex.timeoutMs
-    });
-    response.json({
-      ok: true,
-      generatedAt: new Date().toISOString(),
-      scope: prepared.report.scope,
-      title: prepared.report.title,
-      report: prepared.report,
-      analysis: codexResult.text
-    });
+    response.json(await runPreparedCodexAnalysis(prepared));
   } catch (error) {
     console.error("run codex trade analysis failed", error);
     response.status(error.statusCode || 500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -569,18 +588,7 @@ app.post("/api/token-analysis/codex", requireLocalMutation, async (request, resp
       context: body.context,
       contextKlineLimit: body.contextKlineLimit ?? config.tradeAnalysis.codex.tokenContextKlineLimit
     });
-    const codexResult = await runCodexTradeAnalysis(prepared.prompt, {
-      command: config.tradeAnalysis.codex.command,
-      timeoutMs: config.tradeAnalysis.codex.timeoutMs
-    });
-    response.json({
-      ok: true,
-      generatedAt: new Date().toISOString(),
-      scope: prepared.report.scope,
-      title: prepared.report.title,
-      report: prepared.report,
-      analysis: codexResult.text
-    });
+    response.json(await runPreparedCodexAnalysis(prepared));
   } catch (error) {
     console.error("run codex token analysis failed", error);
     response.status(error.statusCode || 500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -661,21 +669,37 @@ function shouldRequestKlineRefresh(symbol, intervalCode, reason = "") {
   return true;
 }
 
+function hotRankQueryParams(query) {
+  const params = new URLSearchParams();
+  for (const key of ["chain", "limit", "targetLanguage", "socialLanguage", "timeRange"]) {
+    const value = Array.isArray(query[key]) ? query[key][0] : query[key];
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  }
+  return params;
+}
+
 app.get("/api/hot-rank", async (request, response) => {
+  const params = hotRankQueryParams(request.query);
+  const queryString = params.toString();
   try {
-    const payload = await getHotRank({
-      chain: String(request.query.chain ?? "all"),
-      limit: request.query.limit,
-      targetLanguage: String(request.query.targetLanguage ?? "zh"),
-      socialLanguage: String(request.query.socialLanguage ?? "ALL"),
-      timeRange: request.query.timeRange
-    });
-    response.json(payload);
+    response.json(await requestService("scheduler", `/internal/hot-rank${queryString ? `?${queryString}` : ""}`));
   } catch (error) {
-    response.status(502).json({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error)
-    });
+    console.warn("scheduler hot rank unavailable, falling back to api process:", error instanceof Error ? error.message : error);
+    try {
+      const payload = await getHotRank({
+        chain: String(request.query.chain ?? "all"),
+        limit: request.query.limit,
+        targetLanguage: String(request.query.targetLanguage ?? "zh"),
+        socialLanguage: String(request.query.socialLanguage ?? "ALL"),
+        timeRange: request.query.timeRange
+      });
+      response.json(payload);
+    } catch (fallbackError) {
+      response.status(502).json({
+        ok: false,
+        error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+      });
+    }
   }
 });
 

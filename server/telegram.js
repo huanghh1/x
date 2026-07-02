@@ -206,10 +206,6 @@ export async function postTelegram(text, replyMarkup = null) {
   });
 }
 
-export async function sendSignalTelegram(token, signal, context = {}) {
-  return { skipped: true, reason: "Standalone MA Telegram alerts are disabled by policy" };
-}
-
 export function formatHotMaSignalTelegram(token, signal, context = {}) {
   const multiCycleCount = Number(context.multiCycleCount ?? 0);
   const multiCycleIntervals = Array.isArray(context.multiCycleIntervals) ? context.multiCycleIntervals : [];

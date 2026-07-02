@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import {
+  clearWatchlistAlertSide,
   listWatchlist,
   listRealtimeKlineTokens,
   listTopFundingRealtimeTokens,
@@ -17,7 +18,6 @@ import { calculateSignal, INTERVALS } from "./ma.js";
 const WATCHLIST_SYNC_MS = 10_000;
 const RECONNECT_MS = 3_000;
 const PRICE_PERSIST_MS = 2_000;
-const ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 const KLINE_PERSIST_MS = {
   "15m": 5_000,
   "1h": 15_000,
@@ -40,6 +40,7 @@ const state = {
   openInterestTopCount: 0,
   lastPricePersistedAt: new Map(),
   lastKlinePersistedAt: new Map(),
+  alertingSymbols: new Set(),
   streamCount: 0,
   connectedAt: null,
   lastMessageAt: null,
@@ -150,20 +151,50 @@ function shouldPersistKline(symbol, interval, isClosed) {
   return true;
 }
 
+export function resolveWatchlistAlertSide(item, price) {
+  const aboveHit = item?.alertAbove !== null && item?.alertAbove !== undefined && price >= Number(item.alertAbove);
+  const belowHit = item?.alertBelow !== null && item?.alertBelow !== undefined && price <= Number(item.alertBelow);
+  if (aboveHit) return "above";
+  if (belowHit) return "below";
+  return null;
+}
+
+export function shouldSendWatchlistPriceAlert(item, side) {
+  if (side !== "above" && side !== "below") return false;
+  return item?.lastAlertSide !== side;
+}
+
 async function maybeSendPriceAlert(symbol, price, eventTime) {
   const item = state.watchItems.get(symbol);
   if (!item?.alertEnabled) return;
-  const lastAlertAt = item.lastAlertAt ? new Date(item.lastAlertAt).getTime() : 0;
-  if (eventTime - lastAlertAt < ALERT_COOLDOWN_MS) return;
-  const aboveHit = item.alertAbove !== null && item.alertAbove !== undefined && price >= Number(item.alertAbove);
-  const belowHit = item.alertBelow !== null && item.alertBelow !== undefined && price <= Number(item.alertBelow);
-  if (!aboveHit && !belowHit) return;
+  const side = resolveWatchlistAlertSide(item, price);
+  if (!side) {
+    if (item.lastAlertSide) {
+      await clearWatchlistAlertSide(symbol);
+      state.watchItems.set(symbol, { ...item, currentPrice: price, lastAlertSide: null });
+    }
+    return;
+  }
+  if (!shouldSendWatchlistPriceAlert(item, side)) return;
+  if (state.alertingSymbols.has(symbol)) return;
 
-  const reason = aboveHit ? `实时价 ${price} 高于提醒价 ${item.alertAbove}` : `实时价 ${price} 低于提醒价 ${item.alertBelow}`;
-  const result = state.alertSender ? await state.alertSender({ ...item, currentPrice: price }, reason) : { skipped: true };
-  if (!result.skipped) {
-    await markWatchlistAlertSent(symbol);
-    state.watchItems.set(symbol, { ...item, currentPrice: price, lastAlertAt: new Date(eventTime).toISOString() });
+  state.alertingSymbols.add(symbol);
+  try {
+    const reason = side === "above"
+      ? `实时价 ${price} 高于提醒价 ${item.alertAbove}`
+      : `实时价 ${price} 低于提醒价 ${item.alertBelow}`;
+    const result = state.alertSender ? await state.alertSender({ ...item, currentPrice: price }, reason) : { skipped: true };
+    if (!result.skipped) {
+      await markWatchlistAlertSent(symbol, side);
+      state.watchItems.set(symbol, {
+        ...item,
+        currentPrice: price,
+        lastAlertAt: new Date(eventTime).toISOString(),
+        lastAlertSide: side
+      });
+    }
+  } finally {
+    state.alertingSymbols.delete(symbol);
   }
 }
 

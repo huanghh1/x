@@ -67,6 +67,20 @@ app.post("/internal/unlock/check", async (request, response) => {
   response.json(await runTokenUnlockRefresh({ force: true }));
 });
 
+app.get("/internal/hot-rank", async (request, response) => {
+  try {
+    response.json(await getHotRank({
+      chain: String(request.query.chain ?? "all"),
+      limit: request.query.limit,
+      targetLanguage: String(request.query.targetLanguage ?? "zh"),
+      socialLanguage: String(request.query.socialLanguage ?? "ALL"),
+      timeRange: request.query.timeRange
+    }));
+  } catch (error) {
+    response.status(502).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 async function refreshHotRank() {
   const payload = await getHotRank({ chain: "all", limit: 30 });
   const fresh = await recordHotRankSnapshot(payload.tokens ?? []);

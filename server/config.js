@@ -23,6 +23,26 @@ function listEnv(name, fallback = []) {
     .filter(Boolean);
 }
 
+function validateUniqueServicePorts(service) {
+  const entries = [
+    ["API_PORT", service.apiPort],
+    ["CRAWLER_PORT", service.crawlerPort],
+    ["REALTIME_PORT", service.realtimePort],
+    ["SCHEDULER_PORT", service.schedulerPort]
+  ];
+  const seen = new Map();
+  for (const [name, port] of entries) {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`${name} must be an integer between 1 and 65535`);
+    }
+    const previous = seen.get(port);
+    if (previous) {
+      throw new Error(`Service port conflict: ${previous} and ${name} both use ${port}`);
+    }
+    seen.set(port, name);
+  }
+}
+
 const intervalLookbackDays = {
   "15m": numberEnv("KLINE_15M_LOOKBACK_DAYS", 60),
   "1h": numberEnv("KLINE_1H_LOOKBACK_DAYS", 183),
@@ -179,7 +199,6 @@ export const config = {
     spike1hPct: numberEnv("OPEN_INTEREST_SPIKE_1H_PCT", 10),
     spike4hPct: numberEnv("OPEN_INTEREST_SPIKE_4H_PCT", 20),
     spike1dPct: numberEnv("OPEN_INTEREST_SPIKE_1D_PCT", 40),
-    alertCooldownMs: numberEnv("OPEN_INTEREST_ALERT_COOLDOWN_MS", 30 * 60 * 1000),
     standaloneAlertEnabled: boolEnv("OPEN_INTEREST_STANDALONE_ALERT_ENABLED", true)
   },
   signal: {
@@ -224,3 +243,5 @@ export const config = {
     menuWarmIntervalMs: Math.max(10_000, numberEnv("TELEGRAM_MENU_WARM_INTERVAL_MS", 60_000))
   }
 };
+
+validateUniqueServicePorts(config.service);

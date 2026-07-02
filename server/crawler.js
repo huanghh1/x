@@ -108,6 +108,80 @@ async function withRetryableDatabaseOperation(label, operation, attempts = 3) {
 }
 
 const activeWorkers = new Map();
+const hotMaAlertingSymbols = new Set();
+
+function intervalSortIndex(intervalCode) {
+  const index = INTERVALS.indexOf(intervalCode);
+  return index === -1 ? INTERVALS.length : index;
+}
+
+function hasComparableHotMaAlertState(previousAlert) {
+  return Boolean(previousAlert?.profileKey && previousAlert?.contextSignature && Number(previousAlert?.sourceMask) > 0);
+}
+
+export function buildHotMaSignalAlertState(multiCycleSignals = [], context = {}) {
+  const intervalStates = (Array.isArray(multiCycleSignals) ? multiCycleSignals : [])
+    .map(({ intervalCode, signal }) => ({
+      intervalCode: String(intervalCode ?? signal?.intervalCode ?? ""),
+      alertLevel: signal?.alertLevel
+    }))
+    .filter(({ intervalCode, alertLevel }) => INTERVALS.includes(intervalCode) && ["LEVEL1", "LEVEL2"].includes(alertLevel))
+    .sort((a, b) => intervalSortIndex(a.intervalCode) - intervalSortIndex(b.intervalCode));
+  const alertLevel = ["LEVEL1", "LEVEL2"].includes(context.alertLevel)
+    ? context.alertLevel
+    : resolveBestAlertLevel(intervalStates.map(({ alertLevel: level }) => level));
+  const profile = context.profile ?? resolveSignalProfile({
+    fundingOneHour: context.fundingOneHour,
+    hotRank: context.hotRank,
+    multiCycleCount: intervalStates.length,
+    alertLevel,
+    oiSpike: context.oiSpike
+  });
+  const oiWindows = [
+    context.oiSpike5mHit ? "5m" : null,
+    context.oiSpike1hHit ? "1h" : null,
+    context.oiSpike4hHit ? "4h" : null,
+    context.oiSpike1dHit ? "1d" : null
+  ].filter(Boolean);
+  const intervalSignature = intervalStates
+    .map(({ intervalCode, alertLevel: level }) => `${intervalCode}:${level}`)
+    .join(",");
+  const sourceMask = Number(profile.sourceMask ?? 0);
+  const profileKey = String(profile.key ?? "");
+  const contextSignature = [
+    `profile=${profileKey}`,
+    `level=${alertLevel ?? "none"}`,
+    `sources=${sourceMask}`,
+    `funding=${context.fundingOneHour ? 1 : 0}`,
+    `hot=${context.hotRank ? 1 : 0}`,
+    `oi=${context.oiSpike ? 1 : 0}`,
+    `oiWindows=${oiWindows.join(",") || "none"}`,
+    `intervals=${intervalSignature || "none"}`
+  ].join(";");
+
+  return {
+    profileKey,
+    sourceMask,
+    contextSignature,
+    intervalSignature,
+    alertLevel
+  };
+}
+
+export function shouldSendHotMaSignalAlert({ previousAlert, signal, signalChanged = false, alertState }) {
+  if (!["LEVEL1", "LEVEL2"].includes(signal?.alertLevel)) return false;
+  if (!previousAlert) return true;
+  if (signalChanged) return true;
+  if (previousAlert.alertLevel && previousAlert.alertLevel !== signal.alertLevel) return true;
+  if (!hasComparableHotMaAlertState(previousAlert)) return false;
+  if (String(previousAlert.profileKey) !== String(alertState?.profileKey ?? "")) return true;
+  if (Number(previousAlert.sourceMask ?? 0) !== Number(alertState?.sourceMask ?? 0)) return true;
+  return String(previousAlert.contextSignature) !== String(alertState?.contextSignature ?? "");
+}
+
+export function shouldBackfillHotMaSignalAlertState(previousAlert) {
+  return Boolean(previousAlert && !hasComparableHotMaAlertState(previousAlert));
+}
 
 function normalizeCrawlerToken(token) {
   if (!token) return token;
@@ -390,31 +464,45 @@ async function recomputeAndNotifyToken(token) {
   await recordTriggerHistoryBatch(triggerEvents);
 
   if (multiCycleSignals.length > 0 && profile.sourceMask > 0) {
-    const alertStates = await Promise.all(
-      multiCycleSignals.map(async ({ intervalCode, signal }) => {
-        const previousAlert = await selectHotMaSignalAlert(token.symbol, intervalCode);
-        const previousSignalTime = previousAlert?.signalTime ? new Date(previousAlert.signalTime).getTime() : 0;
-        const signalTime = Number(signal.signalTime ?? 0);
-        return {
-          shouldSend:
-            !previousAlert ||
-            previousAlert.alertLevel !== signal.alertLevel ||
-            Math.abs(previousSignalTime - signalTime) > 1 ||
-            (multiCycleSignals.length >= 3 && previousMultiCycleCount < 3)
-        };
-      })
-    );
-    if (alertStates.some(({ shouldSend }) => shouldSend)) {
-      const representative = multiCycleSignals.find(({ signal }) => signal.alertLevel === bestAlertLevel)
-        ?? multiCycleSignals[0];
-      const result = await sendHotMaSignalTelegram(token, representative.signal, telegramContext);
-      if (!result.skipped) {
+    if (hotMaAlertingSymbols.has(token.symbol)) return;
+    hotMaAlertingSymbols.add(token.symbol);
+    try {
+      const alertState = buildHotMaSignalAlertState(multiCycleSignals, telegramContext);
+      const changedIntervals = new Set(newAlertSignals.map(({ intervalCode }) => intervalCode));
+      const alertStates = await Promise.all(
+        multiCycleSignals.map(async ({ intervalCode, signal }) => {
+          const previousAlert = await selectHotMaSignalAlert(token.symbol, intervalCode);
+          return {
+            shouldSend: shouldSendHotMaSignalAlert({
+              previousAlert,
+              signal,
+              signalChanged: changedIntervals.has(intervalCode),
+              alertState
+            }),
+            shouldBackfill: shouldBackfillHotMaSignalAlertState(previousAlert)
+          };
+        })
+      );
+      if (alertStates.some(({ shouldSend }) => shouldSend)) {
+        const representative = multiCycleSignals.find(({ signal }) => signal.alertLevel === bestAlertLevel)
+          ?? multiCycleSignals[0];
+        const result = await sendHotMaSignalTelegram(token, representative.signal, telegramContext);
+        if (!result.skipped) {
+          await Promise.all(
+            multiCycleSignals.map(({ intervalCode, signal }) =>
+              markHotMaSignalAlertSent(token.symbol, intervalCode, signal, alertState)
+            )
+          );
+        }
+      } else if (alertStates.some(({ shouldBackfill }) => shouldBackfill)) {
         await Promise.all(
           multiCycleSignals.map(({ intervalCode, signal }) =>
-            markHotMaSignalAlertSent(token.symbol, intervalCode, signal)
+            markHotMaSignalAlertSent(token.symbol, intervalCode, signal, { ...alertState, preserveSentAt: true })
           )
         );
       }
+    } finally {
+      hotMaAlertingSymbols.delete(token.symbol);
     }
   }
 }

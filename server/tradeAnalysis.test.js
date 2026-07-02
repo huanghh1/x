@@ -199,6 +199,89 @@ test("Binance userTrades enrich events without double-counting income PnL", asyn
   }
 });
 
+test("Binance symbol filter accepts base asset aliases", async () => {
+  const originalFetch = globalThis.fetch;
+  const start = Date.UTC(2026, 0, 2, 1, 0, 0);
+  const end = start + 60_000;
+  const userTradeSymbols = [];
+
+  try {
+    globalThis.fetch = async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/fapi/v1/income") {
+        return response([
+          {
+            incomeType: "REALIZED_PNL",
+            income: "10.00000000",
+            asset: "USDT",
+            symbol: "BTCUSDT",
+            time: start + 2000,
+            info: "btc-pnl",
+            tranId: "btc-pnl"
+          },
+          {
+            incomeType: "REALIZED_PNL",
+            income: "20.00000000",
+            asset: "USDT",
+            symbol: "ETHUSDT",
+            time: start + 3000,
+            info: "eth-pnl",
+            tranId: "eth-pnl"
+          }
+        ]);
+      }
+      if (parsed.pathname === "/fapi/v3/positionRisk") {
+        return response([
+          {
+            symbol: "BTCUSDT",
+            positionAmt: "0.25",
+            positionSide: "LONG",
+            entryPrice: "100",
+            markPrice: "110",
+            notional: "27.5",
+            unRealizedProfit: "2.5",
+            leverage: "5",
+            liquidationPrice: "50",
+            marginType: "cross",
+            updateTime: start + 5000
+          },
+          {
+            symbol: "ETHUSDT",
+            positionAmt: "1",
+            positionSide: "LONG",
+            entryPrice: "1000",
+            markPrice: "1010",
+            notional: "1010",
+            unRealizedProfit: "10",
+            leverage: "3",
+            liquidationPrice: "500",
+            marginType: "cross",
+            updateTime: start + 6000
+          }
+        ]);
+      }
+      if (parsed.pathname === "/fapi/v1/userTrades") {
+        userTradeSymbols.push(parsed.searchParams.get("symbol"));
+        return response([]);
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    };
+
+    const analysis = await getTradeAnalysis(testConfig(), {
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      symbol: "BTC"
+    });
+
+    assert.deepEqual(userTradeSymbols, ["BTCUSDT"]);
+    assert.deepEqual(analysis.summary.bySymbol.map((row) => row.symbol), ["BTCUSDT"]);
+    assert.equal(analysis.positions.length, 1);
+    assert.equal(analysis.positions[0].symbol, "BTCUSDT");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("symbol summaries are sorted by latest activity time", async () => {
   const originalFetch = globalThis.fetch;
   const start = Date.UTC(2026, 0, 3, 0, 0, 0);

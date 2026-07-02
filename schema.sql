@@ -85,7 +85,6 @@ CREATE TABLE IF NOT EXISTS signal_result (
   signal_status VARCHAR(48) NOT NULL,
   note VARCHAR(255) NOT NULL,
   signal_time DATETIME(3) NOT NULL,
-  telegram_sent_at DATETIME(3) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -132,6 +131,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
   current_price DECIMAL(32,12) NULL,
   current_price_time DATETIME(3) NULL,
   last_alert_at DATETIME(3) NULL,
+  last_alert_side ENUM('above','below') NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -145,6 +145,9 @@ CREATE TABLE IF NOT EXISTS hot_ma_signal_alert (
   interval_code ENUM('15m','1h','4h','1d') NOT NULL,
   alert_level ENUM('LEVEL1','LEVEL2') NOT NULL,
   signal_time DATETIME(3) NOT NULL,
+  profile_key VARCHAR(80) NULL,
+  source_mask TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  context_signature VARCHAR(255) NULL,
   sent_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (symbol, interval_code),
   KEY idx_hot_ma_sent_at (sent_at)
@@ -264,6 +267,7 @@ CREATE TABLE IF NOT EXISTS open_interest_monitor (
   change_1d_pct DECIMAL(18,8) NULL,
   observed_at DATETIME(3) NOT NULL,
   last_spike_alert_at DATETIME(3) NULL,
+  last_spike_alert_signature VARCHAR(255) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol),
@@ -312,7 +316,7 @@ CREATE TABLE IF NOT EXISTS token_unlock_cache (
   KEY idx_unlock_checked (checked_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 交易总结日记本：手动记录开仓理由、结束理由和后续复盘总结
+-- 交易总结日记本：手动记录开仓理由、盘中确定、结束理由和后续复盘总结
 CREATE TABLE IF NOT EXISTS trade_journal (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   title VARCHAR(160) NOT NULL,
@@ -330,4 +334,15 @@ CREATE TABLE IF NOT EXISTS trade_journal (
   KEY idx_trade_journal_status_time (status, opened_at, id),
   KEY idx_trade_journal_symbol_time (symbol, opened_at, id),
   KEY idx_trade_journal_updated (updated_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS trade_journal_intraday_notes (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  journal_id BIGINT UNSIGNED NOT NULL,
+  note_text TEXT NOT NULL,
+  noted_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_trade_journal_intraday_time (journal_id, noted_at, id),
+  CONSTRAINT fk_trade_journal_intraday_journal FOREIGN KEY (journal_id) REFERENCES trade_journal(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

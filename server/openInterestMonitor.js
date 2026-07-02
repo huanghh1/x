@@ -19,6 +19,7 @@ const WINDOW_MS = {
   "1d": 24 * 60 * 60 * 1000
 };
 const HISTORY_PERIOD_MS = 5 * 60 * 1000;
+const OI_WINDOW_ORDER = ["5m", "1h", "4h", "1d"];
 
 let timer = null;
 const retryQueue = new Set();
@@ -61,6 +62,47 @@ function baselineAt(rows, targetTime, maxLagMs = HISTORY_PERIOD_MS) {
   if (!match) return null;
   if (targetTime - match.timestamp >= maxLagMs) return null;
   return match;
+}
+
+function sortedSignalIntervals(intervals) {
+  const order = new Map(["15m", "1h", "4h", "1d"].map((interval, index) => [interval, index]));
+  return [...new Set((Array.isArray(intervals) ? intervals : []).map((item) => String(item)).filter(Boolean))]
+    .sort((a, b) => (order.get(a) ?? order.size) - (order.get(b) ?? order.size));
+}
+
+export function buildOpenInterestAlertState(spike = {}, context = {}) {
+  const windows = [
+    spike.hit5m ? "5m" : null,
+    spike.hit1h ? "1h" : null,
+    spike.hit4h ? "4h" : null,
+    spike.hit1d ? "1d" : null
+  ].filter(Boolean).sort((a, b) => OI_WINDOW_ORDER.indexOf(a) - OI_WINDOW_ORDER.indexOf(b));
+  const intervals = sortedSignalIntervals(context.intervals);
+  const signature = [
+    `windows=${windows.join(",") || "none"}`,
+    `level=${context.alertLevel ?? "none"}`,
+    `intervals=${intervals.join(",") || "none"}`,
+    `multi=${Number(context.multiCycleCount ?? intervals.length ?? 0)}`,
+    `funding=${context.fundingOneHour ? 1 : 0}`,
+    `hot=${context.hotRank ? 1 : 0}`
+  ].join(";");
+
+  return {
+    windows,
+    signature
+  };
+}
+
+export function shouldSendOpenInterestSpikeAlert({ previous, previousSpike, spike, alertState }) {
+  if (!spike?.hit) return false;
+  if (!previous?.lastSpikeAlertAt) return true;
+  if (!previousSpike?.hit) return true;
+  if (!previous.lastSpikeAlertSignature) return false;
+  return String(previous.lastSpikeAlertSignature) !== String(alertState?.signature ?? "");
+}
+
+export function shouldBackfillOpenInterestSpikeAlertState({ previous, previousSpike }) {
+  return Boolean(previous?.lastSpikeAlertAt && previousSpike?.hit && !previous.lastSpikeAlertSignature);
 }
 
 export function isOpenInterestHistoryUnavailable(error) {
@@ -107,8 +149,10 @@ async function scanToken(token) {
   await upsertOpenInterestSnapshot(snapshot);
   const spike = evaluateOpenInterestSpike(snapshot, config.openInterestMonitor);
   if (!spike.hit) return { updated: true, spike: false, alerted: false };
+  const previousSpike = evaluateOpenInterestSpike(previous ?? {}, config.openInterestMonitor);
 
   const context = await getSignalCorrelationContext(token.symbol);
+  const alertState = buildOpenInterestAlertState(spike, context);
   await recordTriggerHistory({
     eventKey: `oi:${token.symbol}:${snapshot.observedAt}`,
     symbol: token.symbol,
@@ -132,16 +176,18 @@ async function scanToken(token) {
     }
   });
 
-  const lastAlertAt = previous?.lastSpikeAlertAt ? new Date(previous.lastSpikeAlertAt).getTime() : 0;
-  if (Date.now() - lastAlertAt < config.openInterestMonitor.alertCooldownMs) {
+  if (!shouldSendOpenInterestSpikeAlert({ previous, previousSpike, spike, alertState })) {
+    if (shouldBackfillOpenInterestSpikeAlertState({ previous, previousSpike })) {
+      await markOpenInterestSpikeAlertSent(snapshot.symbol, { ...alertState, preserveAlertAt: true });
+    }
     return { updated: true, spike: true, alerted: false };
   }
   if (alertQueue.has(token.symbol)) return { updated: true, spike: true, alerted: false, alertQueued: true };
-  queueOpenInterestAlert(snapshot, context);
+  queueOpenInterestAlert(snapshot, context, alertState);
   return { updated: true, spike: true, alerted: true, alertQueued: true };
 }
 
-function queueOpenInterestAlert(snapshot, context) {
+function queueOpenInterestAlert(snapshot, context, alertState) {
   alertQueue.add(snapshot.symbol);
   monitorState.alertPendingCount = alertQueue.size;
   void (async () => {
@@ -151,7 +197,7 @@ function queueOpenInterestAlert(snapshot, context) {
         result = await sendStandaloneOpenInterestSpikeTelegram(snapshot);
       }
       if (!result.skipped) {
-        await markOpenInterestSpikeAlertSent(snapshot.symbol);
+        await markOpenInterestSpikeAlertSent(snapshot.symbol, alertState);
       }
     } catch (error) {
       const message = `${snapshot.symbol}: Telegram OI alert failed: ${error instanceof Error ? error.message : String(error)}`;

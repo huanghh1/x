@@ -77,6 +77,7 @@ const state = {
   fundingLoading: false,
   fundingError: "",
   fundingScanning: false,
+  fundingRequestId: 0,
   ioData: [],
   ioPage: 1,
   ioPageSize: 20,
@@ -122,6 +123,7 @@ const state = {
   tradeJournal: [],
   tradeJournalLoading: false,
   tradeJournalSaving: false,
+  tradeJournalIntradaySaving: false,
   tradeJournalError: "",
   tradeJournalPage: 1,
   tradeJournalPageSize: 10,
@@ -194,13 +196,6 @@ function formatFundingPercent(value) {
   const number = Number(value);
   if (value === null || value === undefined || !Number.isFinite(number)) return "--";
   return `${number > 0 ? "+" : ""}${(number * 100).toFixed(4)}%`;
-}
-
-function formatFundingBand(floor, cap) {
-  const floorText = formatFundingPercent(floor);
-  const capText = formatFundingPercent(cap);
-  if (floorText === "--" && capText === "--") return "--";
-  return `${floorText} / ${capText}`;
 }
 
 function formatUsd(value, digits = 2) {
@@ -805,17 +800,24 @@ function fundingStatusText() {
 }
 
 async function loadFundingRateTokens({ silent = false } = {}) {
+  const requestId = state.fundingRequestId + 1;
+  state.fundingRequestId = requestId;
   state.fundingLoading = true;
   state.fundingError = "";
   updateFundingControls();
   if (!silent) setText("#fundingStatus", "正在读取资金费率列表...");
   try {
     const payload = await api("/api/funding-rate-tokens");
+    if (requestId !== state.fundingRequestId) return false;
     state.fundingTokens = payload.tokens || [];
+    return true;
   } catch (error) {
+    if (requestId !== state.fundingRequestId) return false;
     state.fundingError = error instanceof Error ? error.message : String(error);
     console.error("load funding rate tokens failed", error);
+    return false;
   } finally {
+    if (requestId !== state.fundingRequestId) return;
     state.fundingLoading = false;
     updateFundingControls();
     renderFundingRateTokens();
@@ -892,7 +894,8 @@ async function scanFundingIntervals() {
   setText("#fundingStatus", "正在触发资金费率扫描...");
   try {
     const result = await api("/api/funding-interval/check", { method: "POST" });
-    await loadFundingRateTokens({ silent: true });
+    const refreshed = await loadFundingRateTokens({ silent: true });
+    if (!refreshed) return;
     if (state.fundingError) {
       setText("#fundingStatus", `扫描已返回，但列表刷新失败：${state.fundingError}`);
       return;
@@ -2018,10 +2021,35 @@ function tradeJournalTextHtml(value, fallback = "未填写") {
   return `<p>${escapeHtml(text).replaceAll("\n", "<br>")}</p>`;
 }
 
+function tradeJournalIntradayNotes(item) {
+  return Array.isArray(item?.intradayNotes) ? item.intradayNotes : [];
+}
+
 function tradeJournalExcerpt(value, maxLength = 84) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "未填写";
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function tradeJournalIntradayExcerpt(item) {
+  const notes = tradeJournalIntradayNotes(item);
+  if (!notes.length) return "未填写";
+  const latest = notes[notes.length - 1];
+  return `${notes.length} 条 · ${formatTime(latest.notedAt)} · ${tradeJournalExcerpt(latest.noteText, 52)}`;
+}
+
+function tradeJournalIntradayNotesHtml(notes, fallback = "暂无盘中确定") {
+  if (!notes.length) return `<p class="trade-journal-empty-text">${fallback}</p>`;
+  return `
+    <ol class="trade-journal-intraday-list">
+      ${notes.map((note) => `
+        <li>
+          <time>${escapeHtml(formatTime(note.notedAt))}</time>
+          ${tradeJournalTextHtml(note.noteText)}
+        </li>
+      `).join("")}
+    </ol>
+  `;
 }
 
 function renderTradeJournal() {
@@ -2063,6 +2091,10 @@ function renderTradeJournal() {
           <p>${escapeHtml(tradeJournalExcerpt(item.openReason))}</p>
         </section>
         <section>
+          <strong>盘中确定</strong>
+          <p>${escapeHtml(tradeJournalIntradayExcerpt(item))}</p>
+        </section>
+        <section>
           <strong>结束理由</strong>
           <p>${escapeHtml(tradeJournalExcerpt(item.closeReason))}</p>
         </section>
@@ -2079,6 +2111,10 @@ function renderTradeJournal() {
             ${tradeJournalTextHtml(item.openReason)}
           </section>
           <section>
+            <strong>盘中确定</strong>
+            ${tradeJournalIntradayNotesHtml(tradeJournalIntradayNotes(item))}
+          </section>
+          <section>
             <strong>结束理由</strong>
             ${tradeJournalTextHtml(item.closeReason)}
           </section>
@@ -2090,6 +2126,7 @@ function renderTradeJournal() {
       </details>
       <div class="trade-journal-card-actions">
         <button class="mini-link" type="button" data-trade-journal-action="edit" data-id="${Number(item.id)}">编辑</button>
+        <button class="mini-link" type="button" data-trade-journal-action="intraday" data-id="${Number(item.id)}">添加盘中确定</button>
         <button class="mini-link" type="button" data-trade-journal-action="append" data-id="${Number(item.id)}">追加复盘</button>
         <button class="mini-link danger" type="button" data-trade-journal-action="delete" data-id="${Number(item.id)}">删除</button>
       </div>
@@ -2103,6 +2140,7 @@ function updateTradeJournalStatus() {
   const parts = [];
   if (state.tradeJournalLoading) parts.push("读取中");
   if (state.tradeJournalSaving) parts.push("保存中");
+  if (state.tradeJournalIntradaySaving) parts.push("追加中");
   if (state.tradeJournalTotal) parts.push(`共 ${state.tradeJournalTotal} 条`);
   if (state.tradeJournalError) parts.push(`失败：${state.tradeJournalError}`);
   setText("#tradeJournalStatus", parts.join(" · ") || "等待读取");
@@ -2110,6 +2148,10 @@ function updateTradeJournalStatus() {
   if (saveButton) saveButton.disabled = state.tradeJournalSaving;
   const refreshButton = $("#refreshTradeJournalBtn");
   if (refreshButton) refreshButton.disabled = state.tradeJournalLoading;
+  const addIntradayButton = $("#addTradeJournalIntradayBtn");
+  if (addIntradayButton) {
+    addIntradayButton.disabled = state.tradeJournalIntradaySaving || !$("#tradeJournalIdInput")?.value;
+  }
 }
 
 function updateTradeJournalPagination() {
@@ -2142,7 +2184,20 @@ function tradeJournalFormPayload() {
   };
 }
 
-function setTradeJournalForm(item = null, { focusReview = false } = {}) {
+function renderTradeJournalIntradayEditor(entry = {}) {
+  const panel = $("#tradeJournalIntradayPanel");
+  if (!panel) return;
+  const hasEntry = Boolean(entry?.id);
+  panel.hidden = !hasEntry;
+  const target = $("#tradeJournalIntradayNotes");
+  if (target) {
+    target.innerHTML = hasEntry ? tradeJournalIntradayNotesHtml(tradeJournalIntradayNotes(entry)) : "";
+  }
+  const addButton = $("#addTradeJournalIntradayBtn");
+  if (addButton) addButton.disabled = state.tradeJournalIntradaySaving || !hasEntry;
+}
+
+function setTradeJournalForm(item = null, { focusReview = false, focusIntraday = false } = {}) {
   const entry = item ?? {};
   const idInput = $("#tradeJournalIdInput");
   if (idInput) idInput.value = entry.id ? String(entry.id) : "";
@@ -2164,6 +2219,9 @@ function setTradeJournalForm(item = null, { focusReview = false } = {}) {
   if (closeReasonInput) closeReasonInput.value = entry.closeReason ?? "";
   const reviewInput = $("#tradeJournalReviewInput");
   if (reviewInput) reviewInput.value = entry.reviewSummary ?? "";
+  const intradayInput = $("#tradeJournalIntradayInput");
+  if (intradayInput) intradayInput.value = "";
+  renderTradeJournalIntradayEditor(entry);
   setText("#tradeJournalFormTitle", entry.id ? `编辑交易日记 #${entry.id}` : "新建交易日记");
   const saveButton = $("#saveTradeJournalBtn");
   if (saveButton) saveButton.textContent = entry.id ? "保存修改" : "保存日记";
@@ -2171,6 +2229,12 @@ function setTradeJournalForm(item = null, { focusReview = false } = {}) {
     requestAnimationFrame(() => {
       reviewInput.focus();
       reviewInput.selectionStart = reviewInput.selectionEnd = reviewInput.value.length;
+    });
+  }
+  if (focusIntraday && intradayInput) {
+    requestAnimationFrame(() => {
+      intradayInput.focus();
+      intradayInput.selectionStart = intradayInput.selectionEnd = intradayInput.value.length;
     });
   }
 }
@@ -2203,14 +2267,55 @@ async function saveTradeJournal(event) {
   }
 }
 
+async function addTradeJournalIntradayNote() {
+  const id = $("#tradeJournalIdInput")?.value;
+  const input = $("#tradeJournalIntradayInput");
+  const noteText = String(input?.value ?? "").trim();
+  if (!id) return;
+  if (!noteText) {
+    state.tradeJournalError = "盘中确定不能为空";
+    updateTradeJournalStatus();
+    input?.focus();
+    return;
+  }
+  state.tradeJournalIntradaySaving = true;
+  state.tradeJournalError = "";
+  updateTradeJournalStatus();
+  renderTradeJournalIntradayEditor(tradeJournalById(id) ?? { id });
+  try {
+    await api(`/api/trade-journal/${encodeURIComponent(id)}/intraday-notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteText })
+    });
+    if (input) input.value = "";
+    await loadTradeJournal();
+    const refreshed = tradeJournalById(id);
+    if (refreshed) {
+      setTradeJournalForm(refreshed, { focusIntraday: true });
+    }
+  } catch (error) {
+    state.tradeJournalError = error instanceof Error ? error.message : String(error);
+    renderTradeJournal();
+  } finally {
+    state.tradeJournalIntradaySaving = false;
+    updateTradeJournalStatus();
+    const current = tradeJournalById(id);
+    if (current) renderTradeJournalIntradayEditor(current);
+  }
+}
+
 function bindTradeJournalActions(root) {
   root.querySelectorAll("[data-trade-journal-action]").forEach((button) => {
     button.addEventListener("click", async () => {
       const item = tradeJournalById(button.dataset.id);
       const action = button.dataset.tradeJournalAction;
       if (!item) return;
-      if (action === "edit" || action === "append") {
-        setTradeJournalForm(item, { focusReview: action === "append" });
+      if (action === "edit" || action === "append" || action === "intraday") {
+        setTradeJournalForm(item, {
+          focusReview: action === "append",
+          focusIntraday: action === "intraday"
+        });
         $("#tradeJournalForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
       }
@@ -3624,20 +3729,7 @@ function bindChartTools(shell, key) {
       drawChartForKey(key);
       return;
     }
-    const rect = canvas.getBoundingClientRect();
-    const layout = chartLayout(rect.width, rect.height || 430, settings);
-    settings.dragging = true;
-    settings.activePointerId = event.pointerId;
-    settings.dragMode = event.clientX - rect.left >= layout.plotRight
-      ? "price-scale"
-      : "chart-pan";
-    settings.dragStartX = event.clientX;
-    settings.dragStartY = event.clientY;
-    settings.dragStartStart = settings.start;
-    settings.dragStartScale = settings.priceScale;
-    settings.dragStartOffset = settings.priceOffset;
-    settings.dragStartSpan = chartPriceRange(payload, settings).baseSpan * settings.priceScale;
-    canvas.classList.add("is-dragging");
+    beginChartDrag(canvas, key, event, payload, settings, event.pointerId);
   });
 
   canvas.addEventListener("pointermove", (event) => {
@@ -3646,27 +3738,7 @@ function bindChartTools(shell, key) {
     if (!settings || !payload) return;
 
     if (settings.dragging) {
-      const rect = canvas.getBoundingClientRect();
-      const layout = chartLayout(rect.width, rect.height || 430, settings);
-      if (settings.dragMode === "price-scale") {
-        settings.priceScale = clamp(
-          settings.dragStartScale * Math.exp((event.clientY - settings.dragStartY) / 180),
-          0.15,
-          8
-        );
-        drawChartForKey(key);
-        return;
-      }
-      const slot = layout.width / Math.max(1, settings.visible);
-      const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
-      settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(chartKlineLength(payload), settings.visible));
-      settings.priceOffset =
-        settings.dragStartOffset +
-        ((event.clientY - settings.dragStartY) / Math.max(1, layout.height)) * settings.dragStartSpan;
-      settings.hoverIndex = null;
-      settings.hoverXRatio = null;
-      settings.hoverYRatio = null;
-      drawChartForKey(key);
+      updateChartDrag(canvas, key, event, payload, settings);
       return;
     }
 
@@ -3718,47 +3790,14 @@ function bindChartTools(shell, key) {
     const settings = state.chartState.get(key);
     const payload = state.chartCache.get(key);
     if (!settings || !payload || settings.dragging || settings.drawTool || event.button !== 0) return;
-    const rect = canvas.getBoundingClientRect();
-    const layout = chartLayout(rect.width, rect.height || 430, settings);
-    settings.dragging = true;
-    settings.dragMode = event.clientX - rect.left >= layout.plotRight ? "price-scale" : "chart-pan";
-    settings.dragStartX = event.clientX;
-    settings.dragStartY = event.clientY;
-    settings.dragStartStart = settings.start;
-    settings.dragStartScale = settings.priceScale;
-    settings.dragStartOffset = settings.priceOffset;
-    settings.dragStartSpan = chartPriceRange(payload, settings).baseSpan * settings.priceScale;
-    canvas.classList.add("is-dragging");
+    beginChartDrag(canvas, key, event, payload, settings);
   });
 
   canvas.addEventListener("mousemove", (event) => {
     const settings = state.chartState.get(key);
     const payload = state.chartCache.get(key);
     if (!settings?.dragging || !payload) return;
-    const rect = canvas.getBoundingClientRect();
-    const layout = chartLayout(rect.width, rect.height || 430, settings);
-    if (settings.dragMode === "price-scale") {
-      settings.priceScale = clamp(
-        settings.dragStartScale * Math.exp((event.clientY - settings.dragStartY) / 180),
-        0.15,
-        8
-      );
-    } else {
-      const slot = layout.width / Math.max(1, settings.visible);
-      const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
-      settings.start = clamp(
-        settings.dragStartStart - movedSlots,
-        0,
-        chartMaxStart(chartKlineLength(payload), settings.visible)
-      );
-      settings.priceOffset =
-        settings.dragStartOffset +
-        ((event.clientY - settings.dragStartY) / Math.max(1, layout.height)) * settings.dragStartSpan;
-      settings.hoverIndex = null;
-      settings.hoverXRatio = null;
-      settings.hoverYRatio = null;
-    }
-    drawChartForKey(key);
+    updateChartDrag(canvas, key, event, payload, settings);
   });
 
   canvas.addEventListener("mouseup", () => {
@@ -3777,6 +3816,45 @@ function bindChartTools(shell, key) {
     settings.hoverYRatio = null;
     drawChartForKey(key);
   });
+}
+
+function beginChartDrag(canvas, key, event, payload, settings, pointerId = null) {
+  const rect = canvas.getBoundingClientRect();
+  const layout = chartLayout(rect.width, rect.height || 430, settings);
+  settings.dragging = true;
+  settings.activePointerId = pointerId;
+  settings.dragMode = event.clientX - rect.left >= layout.plotRight ? "price-scale" : "chart-pan";
+  settings.dragStartX = event.clientX;
+  settings.dragStartY = event.clientY;
+  settings.dragStartStart = settings.start;
+  settings.dragStartScale = settings.priceScale;
+  settings.dragStartOffset = settings.priceOffset;
+  settings.dragStartSpan = chartPriceRange(payload, settings).baseSpan * settings.priceScale;
+  canvas.classList.add("is-dragging");
+}
+
+function updateChartDrag(canvas, key, event, payload, settings) {
+  const rect = canvas.getBoundingClientRect();
+  const layout = chartLayout(rect.width, rect.height || 430, settings);
+  if (settings.dragMode === "price-scale") {
+    settings.priceScale = clamp(
+      settings.dragStartScale * Math.exp((event.clientY - settings.dragStartY) / 180),
+      0.15,
+      8
+    );
+    drawChartForKey(key);
+    return;
+  }
+  const slot = layout.width / Math.max(1, settings.visible);
+  const movedSlots = Math.round((event.clientX - settings.dragStartX) / slot);
+  settings.start = clamp(settings.dragStartStart - movedSlots, 0, chartMaxStart(chartKlineLength(payload), settings.visible));
+  settings.priceOffset =
+    settings.dragStartOffset +
+    ((event.clientY - settings.dragStartY) / Math.max(1, layout.height)) * settings.dragStartSpan;
+  settings.hoverIndex = null;
+  settings.hoverXRatio = null;
+  settings.hoverYRatio = null;
+  drawChartForKey(key);
 }
 
 function finishChartPointer(key) {
@@ -4361,6 +4439,7 @@ $("#newTradeJournalBtn")?.addEventListener("click", () => {
   $("#tradeJournalForm")?.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 $("#resetTradeJournalFormBtn")?.addEventListener("click", resetTradeJournalForm);
+$("#addTradeJournalIntradayBtn")?.addEventListener("click", addTradeJournalIntradayNote);
 $("#refreshTradeJournalBtn")?.addEventListener("click", () => loadTradeJournal());
 $("#applyTradeJournalFilterBtn")?.addEventListener("click", () => {
   state.tradeJournalPage = 1;
@@ -4422,6 +4501,8 @@ $("#clearTriggerHistoryBtn")?.addEventListener("click", async () => {
     await api("/api/trigger-history", { method: "DELETE" });
     state.triggerHistory = [];
     state.triggerHistoryTotal = 0;
+    state.triggerHistoryPage = 1;
+    state.selectedTriggerIds.clear();
     renderTriggerHistory();
   } catch (error) {
     console.error("clear trigger history failed", error);

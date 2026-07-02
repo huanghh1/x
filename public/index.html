@@ -533,7 +533,7 @@
           <div class="section-head">
             <div>
               <h2 id="tradeJournalTitle">交易总结</h2>
-              <p>像日记本一样记录每一笔开单：为什么开、为什么结束，以及后面追加的复盘总结。</p>
+              <p>像日记本一样记录每一笔开单：为什么开、盘中怎么确定、为什么结束，以及后面追加的复盘总结。</p>
             </div>
             <div class="table-actions">
               <span id="tradeJournalStatus" class="selection-count">等待读取</span>
@@ -545,7 +545,7 @@
           <div class="trade-journal-toolbar" aria-label="trade journal filters">
             <label>
               <span>关键词</span>
-              <input id="tradeJournalSearchInput" type="search" placeholder="搜索标题、交易对、理由或复盘" autocomplete="off" />
+              <input id="tradeJournalSearchInput" type="search" placeholder="搜索标题、交易对、理由、盘中确定或复盘" autocomplete="off" />
             </label>
             <label>
               <span>状态</span>
@@ -611,6 +611,16 @@
                 <span>开仓理由</span>
                 <textarea id="tradeJournalOpenReasonInput" required placeholder="当时为什么开这笔单？信号、结构、情绪、仓位依据都可以写。"></textarea>
               </label>
+              <div id="tradeJournalIntradayPanel" class="trade-journal-intraday-panel" hidden>
+                <label class="trade-journal-note">
+                  <span>盘中确定</span>
+                  <textarea id="tradeJournalIntradayInput" placeholder="盘中遇到更能确定这笔交易的原因，写在这里追加。"></textarea>
+                </label>
+                <div class="trade-journal-intraday-actions">
+                  <button id="addTradeJournalIntradayBtn" class="ghost-button" type="button">添加盘中确定</button>
+                </div>
+                <div id="tradeJournalIntradayNotes" class="trade-journal-intraday-notes"></div>
+              </div>
               <label class="trade-journal-note">
                 <span>结束理由</span>
                 <textarea id="tradeJournalCloseReasonInput" placeholder="为什么平仓、止损、止盈或放弃？"></textarea>

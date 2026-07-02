@@ -475,7 +475,7 @@ async function fetchBinancePositions(config, symbol) {
   const rows = await fetchBinanceSigned(config, "/fapi/v3/positionRisk", {});
   return (Array.isArray(rows) ? rows : [])
     .filter((item) => Math.abs(toNumber(item.positionAmt)) > 0)
-    .filter((item) => !symbol || String(item.symbol ?? "").toUpperCase() === symbol)
+    .filter((item) => symbolMatchesValue(item.symbol, symbol))
     .map((item) => ({
       id: `binance-position:${item.symbol}:${item.positionSide ?? "BOTH"}`,
       source: "binance",
@@ -504,7 +504,7 @@ async function fetchBinanceEvents(config, window, symbol) {
   ]);
   if (income.status === "rejected") throw income.reason;
   const incomeRows = (Array.isArray(income.value) ? income.value : [])
-    .filter((item) => !symbol || String(item.symbol ?? "").toUpperCase() === symbol);
+    .filter((item) => symbolMatchesValue(item.symbol, symbol));
   const positionSymbols = positionsResult.status === "fulfilled" ? positionsResult.value.map((item) => item.symbol).filter(Boolean) : [];
   const tradeTimesBySymbol = new Map();
   for (const row of incomeRows) {
@@ -517,7 +517,7 @@ async function fetchBinanceEvents(config, window, symbol) {
   const tradeSymbols = Array.from(new Set([
     ...tradeTimesBySymbol.keys(),
     ...positionSymbols
-  ])).filter((item) => !symbol || item === symbol);
+  ])).filter((item) => symbolMatchesValue(item, symbol));
   const tradeResults = await mapLimit(tradeSymbols, 3, (tradeSymbol) =>
     fetchBinanceTradesForSymbol(config, tradeSymbol, window, tradeTimesBySymbol.get(tradeSymbol) ?? [])
   );
