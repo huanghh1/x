@@ -183,6 +183,10 @@ export function shouldBackfillHotMaSignalAlertState(previousAlert) {
   return Boolean(previousAlert && !hasComparableHotMaAlertState(previousAlert));
 }
 
+export function shouldSuppressHotMaSignalAfterOiAlert(context = {}) {
+  return Boolean(context?.oiSpike && (context.oiLastSpikeAlertAt || context.oiAlertPending));
+}
+
 function normalizeCrawlerToken(token) {
   if (!token) return token;
   const baseAsset = token.base_asset ?? token.baseAsset ?? "";
@@ -434,6 +438,8 @@ async function recomputeAndNotifyToken(token) {
   telegramContext.oiSpike1hHit = correlation.oiSpike1hHit;
   telegramContext.oiSpike4hHit = correlation.oiSpike4hHit;
   telegramContext.oiSpike1dHit = correlation.oiSpike1dHit;
+  telegramContext.oiLastSpikeAlertAt = correlation.oiLastSpikeAlertAt;
+  telegramContext.oiAlertPending = correlation.oiAlertPending;
   telegramContext.alertLevel = bestAlertLevel;
   telegramContext.profile = profile;
   const compositeChanged = newAlertSignals.length > 0 || (multiCycleSignals.length >= 3 && previousMultiCycleCount < 3);
@@ -484,15 +490,23 @@ async function recomputeAndNotifyToken(token) {
         })
       );
       if (alertStates.some(({ shouldSend }) => shouldSend)) {
-        const representative = multiCycleSignals.find(({ signal }) => signal.alertLevel === bestAlertLevel)
-          ?? multiCycleSignals[0];
-        const result = await sendHotMaSignalTelegram(token, representative.signal, telegramContext);
-        if (!result.skipped) {
+        if (shouldSuppressHotMaSignalAfterOiAlert(telegramContext)) {
           await Promise.all(
             multiCycleSignals.map(({ intervalCode, signal }) =>
               markHotMaSignalAlertSent(token.symbol, intervalCode, signal, alertState)
             )
           );
+        } else {
+          const representative = multiCycleSignals.find(({ signal }) => signal.alertLevel === bestAlertLevel)
+            ?? multiCycleSignals[0];
+          const result = await sendHotMaSignalTelegram(token, representative.signal, telegramContext);
+          if (!result.skipped) {
+            await Promise.all(
+              multiCycleSignals.map(({ intervalCode, signal }) =>
+                markHotMaSignalAlertSent(token.symbol, intervalCode, signal, alertState)
+              )
+            );
+          }
         }
       } else if (alertStates.some(({ shouldBackfill }) => shouldBackfill)) {
         await Promise.all(

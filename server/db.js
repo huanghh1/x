@@ -2824,7 +2824,9 @@ export async function getSignalCorrelationContext(symbol) {
       intervals: [],
       oiSpike: false,
       oiChange5mPct: null,
-      oiChange1hPct: null
+      oiChange1hPct: null,
+      oiLastSpikeAlertAt: null,
+      oiAlertPending: false
     };
   }
   const [signalRows] = await getPool().query(
@@ -2860,7 +2862,9 @@ export async function getSignalCorrelationContext(symbol) {
     `SELECT change_5m_pct AS change5mPct,
       change_1h_pct AS change1hPct,
       change_4h_pct AS change4hPct,
-      change_1d_pct AS change1dPct
+      change_1d_pct AS change1dPct,
+      last_spike_alert_at AS lastSpikeAlertAt,
+      last_spike_alert_signature AS lastSpikeAlertSignature
      FROM open_interest_monitor
      WHERE symbol=:symbol
        AND observed_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
@@ -2868,6 +2872,20 @@ export async function getSignalCorrelationContext(symbol) {
     { symbol: safeSymbol, activeSeconds: openInterestActiveSeconds() }
   );
   const oiSpike = evaluateOpenInterestSpike(oiRows[0], config.openInterestMonitor);
+  let oiAlertPending = false;
+  if (oiSpike.hit) {
+    const [pendingRows] = await getPool().query(
+      `SELECT 1 AS pending
+       FROM telegram_alert_queue
+       WHERE alert_type='OI_SPIKE'
+         AND symbol=:symbol
+         AND status IN ('PENDING','SENDING')
+         AND created_at >= DATE_SUB(NOW(3), INTERVAL :activeSeconds SECOND)
+       LIMIT 1`,
+      { symbol: safeSymbol, activeSeconds: openInterestActiveSeconds() }
+    );
+    oiAlertPending = pendingRows.length > 0;
+  }
   return {
     hotRank: hotRows.length > 0,
     fundingOneHour: fundingRows.length > 0,
@@ -2882,7 +2900,10 @@ export async function getSignalCorrelationContext(symbol) {
     oiSpike5mHit: oiSpike.hit5m,
     oiSpike1hHit: oiSpike.hit1h,
     oiSpike4hHit: oiSpike.hit4h,
-    oiSpike1dHit: oiSpike.hit1d
+    oiSpike1dHit: oiSpike.hit1d,
+    oiLastSpikeAlertAt: oiRows[0]?.lastSpikeAlertAt ?? null,
+    oiLastSpikeAlertSignature: oiRows[0]?.lastSpikeAlertSignature ?? null,
+    oiAlertPending
   };
 }
 

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildHotMaSignalAlertState,
   shouldBackfillHotMaSignalAlertState,
+  shouldSuppressHotMaSignalAfterOiAlert,
   shouldSendHotMaSignalAlert
 } from "./crawler.js";
 
@@ -88,6 +89,38 @@ test("legacy hot MA Telegram rows are backfilled instead of resent only for miss
       previousAlert: legacyAlert,
       signal: { alertLevel: "LEVEL2" },
       alertState
+    }),
+    false
+  );
+});
+
+test("hot MA Telegram is suppressed after an OI alert is already sent or pending", () => {
+  assert.equal(
+    shouldSuppressHotMaSignalAfterOiAlert({
+      oiSpike: true,
+      oiLastSpikeAlertAt: new Date()
+    }),
+    true
+  );
+  assert.equal(
+    shouldSuppressHotMaSignalAfterOiAlert({
+      oiSpike: true,
+      oiAlertPending: true
+    }),
+    true
+  );
+  assert.equal(
+    shouldSuppressHotMaSignalAfterOiAlert({
+      oiSpike: true,
+      oiLastSpikeAlertAt: null,
+      oiAlertPending: false
+    }),
+    false
+  );
+  assert.equal(
+    shouldSuppressHotMaSignalAfterOiAlert({
+      oiSpike: false,
+      oiLastSpikeAlertAt: new Date()
     }),
     false
   );
