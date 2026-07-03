@@ -143,8 +143,6 @@ const state = {
   tradeJournalSourceLoading: false,
   tradeJournalSourceError: "",
   selectedTradeJournalSourceKey: "",
-  tradeJournalSourcePickerOpen: false,
-  tradeJournalSourceActiveKey: "",
   tradeJournalError: "",
   tradeJournalPage: 1,
   tradeJournalPageSize: 2,
@@ -160,13 +158,6 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
-
-const tradeJournalSourceSelectForEnhancement = $("#tradeJournalSourceSelect");
-if (tradeJournalSourceSelectForEnhancement) {
-  document.body.classList.add("has-custom-source-picker");
-  tradeJournalSourceSelectForEnhancement.tabIndex = -1;
-  tradeJournalSourceSelectForEnhancement.setAttribute("aria-hidden", "true");
-}
 
 function closestElement(target, selector) {
   return target instanceof Element ? target.closest(selector) : null;
@@ -184,6 +175,308 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+const CUSTOM_SELECT_EXCLUDED_SELECTOR = [
+  "#mobilePageSelect",
+  "#signals select",
+  "[data-page-section='signals'] select",
+  "select[data-native-select]"
+].join(", ");
+
+function shouldEnhanceCustomSelect(select) {
+  return select instanceof HTMLSelectElement && !select.matches(CUSTOM_SELECT_EXCLUDED_SELECTOR);
+}
+
+function customSelectLabelText(select) {
+  const ariaLabel = String(select.getAttribute("aria-label") ?? "").trim();
+  if (ariaLabel) return ariaLabel;
+  const labelledBy = String(select.getAttribute("aria-labelledby") ?? "").trim();
+  if (labelledBy) {
+    const text = labelledBy
+      .split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent?.trim() ?? "")
+      .filter(Boolean)
+      .join(" ");
+    if (text) return text;
+  }
+  const parentLabel = select.closest("label");
+  if (parentLabel) {
+    const text = Array.from(parentLabel.childNodes)
+      .filter((node) => node !== select && !(node instanceof HTMLElement && node.dataset.customSelectFor))
+      .map((node) => node.textContent?.trim() ?? "")
+      .filter(Boolean)
+      .join(" ");
+    if (text) return text;
+  }
+  const previous = select.previousElementSibling;
+  if (previous?.textContent?.trim()) return previous.textContent.trim();
+  return "选择";
+}
+
+function customSelectBaseId(select) {
+  if (!select.id) select.id = `customSelect${Math.random().toString(36).slice(2, 9)}`;
+  return select.id;
+}
+
+function customSelectOptionGroups(select) {
+  const groups = [];
+  let looseOptions = [];
+  for (const child of select.children) {
+    if (child instanceof HTMLOptGroupElement) {
+      if (looseOptions.length) {
+        groups.push({ label: "", options: looseOptions });
+        looseOptions = [];
+      }
+      groups.push({
+        label: child.label || "",
+        options: Array.from(child.children).filter((item) => item instanceof HTMLOptionElement)
+      });
+      continue;
+    }
+    if (child instanceof HTMLOptionElement) looseOptions.push(child);
+  }
+  if (looseOptions.length) groups.push({ label: "", options: looseOptions });
+  return groups.filter((group) => group.options.length);
+}
+
+function firstEnabledCustomOption(select) {
+  return Array.from(select.options).find((option) => !option.disabled) ?? null;
+}
+
+function customSelectActiveOption(select) {
+  const value = select.dataset.customSelectActiveValue ?? select.value;
+  return Array.from(select.options).find((option) => option.value === value && !option.disabled) ?? firstEnabledCustomOption(select);
+}
+
+function setCustomSelectOpen(select, open) {
+  const wrapper = select.nextElementSibling?.dataset.customSelectFor === select.id ? select.nextElementSibling : null;
+  if (!wrapper) return;
+  const canOpen = !select.disabled && Array.from(select.options).some((option) => !option.disabled);
+  wrapper.dataset.open = open && canOpen ? "true" : "false";
+  if (wrapper.dataset.open === "true") {
+    select.dataset.customSelectActiveValue = select.value || customSelectActiveOption(select)?.value || "";
+  }
+  renderCustomSelect(select);
+}
+
+function closeAllCustomSelects(exceptSelect = null) {
+  document.querySelectorAll("select[data-custom-select-enhanced='true']").forEach((select) => {
+    if (select === exceptSelect) return;
+    const wrapper = select.nextElementSibling?.dataset.customSelectFor === select.id ? select.nextElementSibling : null;
+    if (wrapper) wrapper.dataset.open = "false";
+    renderCustomSelect(select);
+  });
+}
+
+function moveCustomSelectActive(select, delta) {
+  const enabled = Array.from(select.options).filter((option) => !option.disabled);
+  if (!enabled.length) return;
+  const current = customSelectActiveOption(select);
+  const currentIndex = Math.max(0, enabled.indexOf(current));
+  const next = enabled[(currentIndex + delta + enabled.length) % enabled.length];
+  select.dataset.customSelectActiveValue = next.value;
+  setCustomSelectOpen(select, true);
+}
+
+function commitCustomSelectValue(select, value) {
+  const option = Array.from(select.options).find((item) => item.value === value && !item.disabled);
+  if (!option) return;
+  select.value = option.value;
+  select.dataset.customSelectActiveValue = option.value;
+  setCustomSelectOpen(select, false);
+  renderCustomSelect(select);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function customSelectOptionHtml(select, option, index) {
+  const selected = option.value === select.value;
+  const active = option.value === customSelectActiveOption(select)?.value;
+  const disabled = option.disabled;
+  return `
+    <div
+      id="${escapeHtml(customSelectBaseId(select))}CustomOption${index}"
+      class="trade-journal-source-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}${disabled ? " is-disabled" : ""}"
+      role="option"
+      aria-selected="${selected ? "true" : "false"}"
+      aria-disabled="${disabled ? "true" : "false"}"
+      data-custom-select-value="${escapeHtml(option.value)}"
+      data-active="${active ? "true" : "false"}"
+    >
+      <span>${escapeHtml(option.textContent?.trim() || option.label || option.value || "--")}</span>
+    </div>
+  `;
+}
+
+function renderCustomSelect(select) {
+  if (!shouldEnhanceCustomSelect(select)) return;
+  const wrapper = select.nextElementSibling?.dataset.customSelectFor === select.id ? select.nextElementSibling : null;
+  if (!wrapper) return;
+  const button = wrapper.querySelector("[data-custom-select-button]");
+  const text = wrapper.querySelector("[data-custom-select-text]");
+  const list = wrapper.querySelector("[data-custom-select-list]");
+  if (!button || !text || !list) return;
+
+  const open = wrapper.dataset.open === "true" && !select.disabled;
+  const selected = select.selectedOptions[0];
+  const selectedText = selected?.textContent?.trim() || customSelectLabelText(select);
+  const active = customSelectActiveOption(select);
+  const activeIndex = Array.from(select.options).indexOf(active);
+  text.textContent = selectedText;
+  button.disabled = select.disabled;
+  button.dataset.state = select.disabled ? "disabled" : select.value ? "filled" : "empty";
+  button.setAttribute("aria-expanded", String(open));
+  if (open && activeIndex >= 0) {
+    button.setAttribute("aria-activedescendant", `${customSelectBaseId(select)}CustomOption${activeIndex}`);
+  } else {
+    button.removeAttribute("aria-activedescendant");
+  }
+
+  let optionIndex = 0;
+  list.innerHTML = customSelectOptionGroups(select).map((group) => {
+    const rows = group.options.map((option) => customSelectOptionHtml(select, option, optionIndex++)).join("");
+    return `
+      <div class="trade-journal-source-group" role="presentation">
+        ${group.label ? `<div class="trade-journal-source-group-label">${escapeHtml(group.label)}</div>` : ""}
+        ${rows}
+      </div>
+    `;
+  }).join("");
+  list.hidden = !open;
+  if (open) {
+    requestAnimationFrame(() => {
+      list.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+    });
+  }
+}
+
+function enhanceCustomSelect(select) {
+  if (!shouldEnhanceCustomSelect(select) || select.dataset.customSelectEnhanced === "true") return;
+  const id = customSelectBaseId(select);
+  const label = customSelectLabelText(select);
+  select.dataset.customSelectEnhanced = "true";
+  select.tabIndex = -1;
+  select.setAttribute("aria-hidden", "true");
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "trade-journal-source-combobox custom-select";
+  wrapper.dataset.customSelectFor = id;
+  wrapper.dataset.open = "false";
+  wrapper.innerHTML = `
+    <button
+      class="trade-journal-source-button"
+      type="button"
+      aria-haspopup="listbox"
+      aria-expanded="false"
+      aria-controls="${escapeHtml(id)}CustomList"
+      aria-label="${escapeHtml(label)}"
+      data-custom-select-button
+    >
+      <span data-custom-select-text>${escapeHtml(label)}</span>
+      <span class="trade-journal-source-arrow" aria-hidden="true"></span>
+    </button>
+    <div
+      id="${escapeHtml(id)}CustomList"
+      class="trade-journal-source-list"
+      role="listbox"
+      aria-label="${escapeHtml(label)}"
+      data-custom-select-list
+      hidden
+    ></div>
+  `;
+  select.insertAdjacentElement("afterend", wrapper);
+
+  const button = wrapper.querySelector("[data-custom-select-button]");
+  const list = wrapper.querySelector("[data-custom-select-list]");
+  button?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const willOpen = wrapper.dataset.open !== "true";
+    closeAllCustomSelects(select);
+    setCustomSelectOpen(select, willOpen);
+  });
+  button?.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (wrapper.dataset.open === "true") moveCustomSelectActive(select, 1);
+      else setCustomSelectOpen(select, true);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (wrapper.dataset.open === "true") moveCustomSelectActive(select, -1);
+      else setCustomSelectOpen(select, true);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (wrapper.dataset.open === "true") commitCustomSelectValue(select, customSelectActiveOption(select)?.value ?? "");
+      else setCustomSelectOpen(select, true);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setCustomSelectOpen(select, false);
+    }
+  });
+  list?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const option = closestElement(event.target, "[data-custom-select-value]");
+    if (!option || option.getAttribute("aria-disabled") === "true") return;
+    commitCustomSelectValue(select, option.dataset.customSelectValue ?? "");
+    requestAnimationFrame(() => button?.focus());
+  });
+  list?.addEventListener("pointerdown", (event) => {
+    if (event.pointerType && event.pointerType !== "mouse") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const option = closestElement(event.target, "[data-custom-select-value]");
+    if (!option || option.getAttribute("aria-disabled") === "true") return;
+    commitCustomSelectValue(select, option.dataset.customSelectValue ?? "");
+    requestAnimationFrame(() => button?.focus());
+  });
+  list?.addEventListener("pointerover", (event) => {
+    const option = closestElement(event.target, "[data-custom-select-value]");
+    if (!option || option.getAttribute("aria-disabled") === "true") return;
+    select.dataset.customSelectActiveValue = option.dataset.customSelectValue ?? "";
+    list.querySelectorAll("[data-custom-select-value]").forEach((item) => {
+      const active = item === option;
+      item.classList.toggle("is-active", active);
+      item.dataset.active = active ? "true" : "false";
+    });
+    const activeIndex = Array.from(select.options).findIndex((item) => item.value === select.dataset.customSelectActiveValue);
+    if (activeIndex >= 0) button?.setAttribute("aria-activedescendant", `${customSelectBaseId(select)}CustomOption${activeIndex}`);
+  });
+  document.body.classList.add("has-custom-source-picker", "has-custom-selects");
+  renderCustomSelect(select);
+}
+
+function enhanceCustomSelects(root = document) {
+  root.querySelectorAll("select").forEach((select) => enhanceCustomSelect(select));
+  bindCustomSelectDocumentEvents();
+}
+
+function syncCustomSelect(select) {
+  if (!select) return;
+  enhanceCustomSelect(select);
+  renderCustomSelect(select);
+}
+
+function syncAllCustomSelects() {
+  document.querySelectorAll("select[data-custom-select-enhanced='true']").forEach((select) => renderCustomSelect(select));
+}
+
+function bindCustomSelectDocumentEvents() {
+  if (document.body.dataset.customSelectEventsBound === "true") return;
+  document.body.dataset.customSelectEventsBound = "true";
+  document.addEventListener("click", (event) => {
+    if (closestElement(event.target, "[data-custom-select-for]")) return;
+    closeAllCustomSelects();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAllCustomSelects();
+  });
 }
 
 function clamp(value, min, max) {
@@ -1688,11 +1981,13 @@ function renderTradeSymbolSelect() {
     : state.tradeCodexScope === "all"
       ? "全部复盘不需要选择"
       : "当前复盘范围不需要选择";
+  const placeholderDisabled = canSelectRow && rows.length ? " disabled" : "";
   select.innerHTML = [
-    `<option value="">${placeholder}</option>`,
+    `<option value=""${placeholderDisabled}>${placeholder}</option>`,
     ...rows.map((row) => `<option value="${escapeHtml(tradeSymbolRowKey(row))}">${escapeHtml(tradeSymbolOptionLabel(row))}</option>`)
   ].join("");
   select.value = canSelectRow && selected ? tradeSymbolRowKey(selected) : "";
+  syncCustomSelect(select);
 }
 
 function renderTradeCodexPanel() {
@@ -2151,110 +2446,6 @@ function selectedTradeJournalSourceOption() {
   return tradeJournalSourceOptions().all.find((option) => option.key === state.selectedTradeJournalSourceKey) ?? null;
 }
 
-function tradeJournalSourceOptionKeys() {
-  return tradeJournalSourceOptions().all.map((option) => option.key);
-}
-
-function syncTradeJournalSourceActiveKey(options) {
-  const keys = options.all.map((option) => option.key);
-  if (!keys.length) {
-    state.tradeJournalSourceActiveKey = "";
-    return;
-  }
-  if (!keys.includes(state.tradeJournalSourceActiveKey)) {
-    state.tradeJournalSourceActiveKey = state.selectedTradeJournalSourceKey || keys[0];
-  }
-}
-
-function setTradeJournalSourcePickerOpen(open) {
-  const options = tradeJournalSourceOptions();
-  const canOpen = Boolean(options.all.length && !state.tradeJournalSourceLoading);
-  state.tradeJournalSourcePickerOpen = Boolean(open && canOpen);
-  if (state.tradeJournalSourcePickerOpen) {
-    state.tradeJournalSourceActiveKey = state.selectedTradeJournalSourceKey || state.tradeJournalSourceActiveKey;
-  }
-  syncTradeJournalSourceActiveKey(options);
-  renderTradeJournalSourcePicker();
-}
-
-function moveTradeJournalSourceActive(delta) {
-  const keys = tradeJournalSourceOptionKeys();
-  if (!keys.length) return;
-  const currentIndex = Math.max(0, keys.indexOf(state.tradeJournalSourceActiveKey));
-  const nextIndex = (currentIndex + delta + keys.length) % keys.length;
-  state.tradeJournalSourceActiveKey = keys[nextIndex];
-  state.tradeJournalSourcePickerOpen = true;
-  renderTradeJournalSourcePicker();
-}
-
-function renderTradeJournalSourceGroup(title, options, indexOffset) {
-  if (!options.length) return { html: "", nextIndex: indexOffset };
-  let nextIndex = indexOffset;
-  const rows = options.map((option) => {
-    const index = nextIndex;
-    nextIndex += 1;
-    const selected = option.key === state.selectedTradeJournalSourceKey;
-    const active = option.key === state.tradeJournalSourceActiveKey;
-    return `
-      <div
-        id="tradeJournalSourceOption${index}"
-        class="trade-journal-source-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}"
-        role="option"
-        aria-selected="${selected ? "true" : "false"}"
-        data-trade-journal-source-key="${escapeHtml(option.key)}"
-        data-active="${active ? "true" : "false"}"
-      >
-        <span>${escapeHtml(option.label)}</span>
-      </div>
-    `;
-  }).join("");
-  return {
-    html: `
-      <div class="trade-journal-source-group" role="presentation">
-        <div class="trade-journal-source-group-label">${escapeHtml(title)}</div>
-        ${rows}
-      </div>
-    `,
-    nextIndex
-  };
-}
-
-function renderTradeJournalSourceCombobox(options, placeholder, selected) {
-  const button = $("#tradeJournalSourceButton");
-  const buttonText = $("#tradeJournalSourceButtonText");
-  const list = $("#tradeJournalSourceList");
-  if (!button || !buttonText || !list) return;
-
-  const disabled = state.tradeJournalSourceLoading || !options.all.length;
-  if (disabled) state.tradeJournalSourcePickerOpen = false;
-  syncTradeJournalSourceActiveKey(options);
-
-  const activeIndex = options.all.findIndex((option) => option.key === state.tradeJournalSourceActiveKey);
-  const expanded = Boolean(state.tradeJournalSourcePickerOpen && !disabled);
-  button.disabled = disabled;
-  button.dataset.state = state.tradeJournalSourceLoading ? "loading" : selected ? "filled" : "empty";
-  button.setAttribute("aria-expanded", String(expanded));
-  if (expanded && activeIndex >= 0) {
-    button.setAttribute("aria-activedescendant", `tradeJournalSourceOption${activeIndex}`);
-  } else {
-    button.removeAttribute("aria-activedescendant");
-  }
-  buttonText.textContent = selected?.label || placeholder;
-
-  let index = 0;
-  const positionGroup = renderTradeJournalSourceGroup("当前持仓", options.positions, index);
-  index = positionGroup.nextIndex;
-  const tradeGroup = renderTradeJournalSourceGroup("交易组", options.trades, index);
-  list.innerHTML = positionGroup.html + tradeGroup.html;
-  list.hidden = !expanded;
-
-  if (expanded) {
-    requestAnimationFrame(() => {
-      list.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
-    });
-  }
-}
-
 function renderTradeJournalSourcePicker() {
   const select = $("#tradeJournalSourceSelect");
   if (!select) return;
@@ -2271,10 +2462,11 @@ function renderTradeJournalSourcePicker() {
   const tradeHtml = options.trades.length
     ? `<optgroup label="交易组">${options.trades.map((option) => `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</optgroup>`
     : "";
-  select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>${positionHtml}${tradeHtml}`;
+  const placeholderDisabled = options.all.length ? " disabled" : "";
+  select.innerHTML = `<option value=""${placeholderDisabled}>${escapeHtml(placeholder)}</option>${positionHtml}${tradeHtml}`;
   select.value = state.selectedTradeJournalSourceKey;
   select.disabled = state.tradeJournalSourceLoading || !options.all.length;
-  renderTradeJournalSourceCombobox(options, placeholder, selectedTradeJournalSourceOption());
+  syncCustomSelect(select);
 
   const refreshButton = $("#refreshTradeJournalSourcesBtn");
   if (refreshButton) {
@@ -2300,8 +2492,6 @@ function renderTradeJournalSourcePicker() {
 
 function applyTradeJournalSourceOption(key) {
   state.selectedTradeJournalSourceKey = key || "";
-  state.tradeJournalSourcePickerOpen = false;
-  state.tradeJournalSourceActiveKey = key || "";
   const option = selectedTradeJournalSourceOption();
   renderTradeJournalSourcePicker();
   if (!option) return;
@@ -2316,6 +2506,7 @@ function applyTradeJournalSourceOption(key) {
   if (openedInput) openedInput.value = option.openedAt ? toDatetimeLocal(option.openedAt) : "";
   const closedInput = $("#tradeJournalClosedAtInput");
   if (closedInput) closedInput.value = option.closedAt ? toDatetimeLocal(option.closedAt) : "";
+  syncAllCustomSelects();
 }
 
 async function loadTradeJournalSources({ refresh = false } = {}) {
@@ -2604,6 +2795,7 @@ function setTradeJournalForm(item = null, { focusReview = false, focusIntraday =
   if (intradayInput) intradayInput.value = "";
   renderTradeJournalIntradayEditor(entry);
   renderTradeJournalSourcePicker();
+  syncAllCustomSelects();
   setText("#tradeJournalFormTitle", entry.id ? `编辑交易日记 #${entry.id}` : "新建交易日记");
   const saveButton = $("#saveTradeJournalBtn");
   if (saveButton) saveButton.textContent = entry.id ? "保存修改" : "保存日记";
@@ -3631,7 +3823,10 @@ function setPage(page) {
     link.classList.toggle("active", link.dataset.navPage === page);
   });
   const mobileSelect = $("#mobilePageSelect");
-  if (mobileSelect) mobileSelect.value = page;
+  if (mobileSelect) {
+    mobileSelect.value = page;
+    syncCustomSelect(mobileSelect);
+  }
   if (page === "heat" && !state.hotRankLoading) loadHotRank({ silent: hasCurrentHotRankData() });
   if (page === "watch") loadWatchlist();
   else updateWatchRealtime();
@@ -4962,60 +5157,6 @@ $("#refreshTradeJournalSourcesBtn")?.addEventListener("click", () => loadTradeJo
 $("#tradeJournalSourceSelect")?.addEventListener("change", (event) => {
   applyTradeJournalSourceOption(event.currentTarget.value);
 });
-$("#tradeJournalSourceButton")?.addEventListener("click", () => {
-  setTradeJournalSourcePickerOpen(!state.tradeJournalSourcePickerOpen);
-});
-$("#tradeJournalSourceButton")?.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    if (state.tradeJournalSourcePickerOpen) moveTradeJournalSourceActive(1);
-    else setTradeJournalSourcePickerOpen(true);
-    return;
-  }
-  if (event.key === "ArrowUp") {
-    event.preventDefault();
-    if (state.tradeJournalSourcePickerOpen) moveTradeJournalSourceActive(-1);
-    else setTradeJournalSourcePickerOpen(true);
-    return;
-  }
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    if (state.tradeJournalSourcePickerOpen && state.tradeJournalSourceActiveKey) {
-      applyTradeJournalSourceOption(state.tradeJournalSourceActiveKey);
-      requestAnimationFrame(() => $("#tradeJournalSourceButton")?.focus());
-    } else {
-      setTradeJournalSourcePickerOpen(true);
-    }
-    return;
-  }
-  if (event.key === "Escape") {
-    event.preventDefault();
-    setTradeJournalSourcePickerOpen(false);
-  }
-});
-$("#tradeJournalSourceList")?.addEventListener("click", (event) => {
-  const option = closestElement(event.target, "[data-trade-journal-source-key]");
-  if (!option) return;
-  applyTradeJournalSourceOption(option.dataset.tradeJournalSourceKey || "");
-  requestAnimationFrame(() => $("#tradeJournalSourceButton")?.focus());
-});
-$("#tradeJournalSourceList")?.addEventListener("pointerover", (event) => {
-  const option = closestElement(event.target, "[data-trade-journal-source-key]");
-  const key = option?.dataset.tradeJournalSourceKey || "";
-  if (!key || key === state.tradeJournalSourceActiveKey) return;
-  state.tradeJournalSourceActiveKey = key;
-  renderTradeJournalSourcePicker();
-});
-document.addEventListener("click", (event) => {
-  if (!state.tradeJournalSourcePickerOpen) return;
-  if (closestElement(event.target, "[data-trade-journal-source-picker]")) return;
-  setTradeJournalSourcePickerOpen(false);
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.tradeJournalSourcePickerOpen) {
-    setTradeJournalSourcePickerOpen(false);
-  }
-});
 $("#applyTradeJournalFilterBtn")?.addEventListener("click", () => {
   state.tradeJournalPage = 1;
   loadTradeJournal();
@@ -5230,6 +5371,7 @@ function scheduleVisiblePoll(label, intervalMs, callback) {
   });
 }
 
+enhanceCustomSelects();
 updateFilterControls();
 setPage(pageFromHash());
 void bootstrap();

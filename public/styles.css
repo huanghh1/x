@@ -1889,6 +1889,11 @@ td.mono span { display: block; white-space: nowrap; }
     color: var(--ink-strong);
     background: var(--surface-raised);
   }
+  body.has-custom-selects .mobile-page-select + .trade-journal-source-combobox {
+    display: block;
+    width: min(220px, 100%);
+    justify-self: center;
+  }
   .pool-switch nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .runtime-service-grid { grid-template-columns: 1fr; }
   .pool-item { border-bottom: 1px solid var(--line); }
@@ -2830,11 +2835,17 @@ main,
   min-width: 0;
 }
 
-body.has-custom-source-picker .trade-journal-source-combobox {
+body.has-custom-source-picker .trade-journal-source-combobox,
+body.has-custom-selects .trade-journal-source-combobox {
   display: block;
 }
 
-body.has-custom-source-picker .trade-journal-source-native {
+body.has-custom-selects .mobile-page-select + .trade-journal-source-combobox {
+  display: none;
+}
+
+body.has-custom-source-picker .trade-journal-source-native,
+body.has-custom-selects select[data-custom-select-enhanced="true"] {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -3018,6 +3029,12 @@ body.has-custom-source-picker .trade-journal-source-native {
 
 .trade-journal-source-option.is-active {
   background: color-mix(in oklch, var(--accent) 12%, var(--surface-raised));
+}
+
+.trade-journal-source-option.is-disabled {
+  color: var(--ink-muted);
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .trade-journal-fields {
