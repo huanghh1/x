@@ -140,9 +140,14 @@ const state = {
   tradeJournalLoading: false,
   tradeJournalSaving: false,
   tradeJournalIntradaySaving: false,
+  tradeJournalSourceLoading: false,
+  tradeJournalSourceError: "",
+  selectedTradeJournalSourceKey: "",
+  tradeJournalSourcePickerOpen: false,
+  tradeJournalSourceActiveKey: "",
   tradeJournalError: "",
   tradeJournalPage: 1,
-  tradeJournalPageSize: 10,
+  tradeJournalPageSize: 2,
   tradeJournalTotal: 0,
   selectedRuntimeLogIds: new Set(),
   watchRealtimeSocket: null,
@@ -155,6 +160,17 @@ const state = {
 };
 
 const $ = (selector) => document.querySelector(selector);
+
+const tradeJournalSourceSelectForEnhancement = $("#tradeJournalSourceSelect");
+if (tradeJournalSourceSelectForEnhancement) {
+  document.body.classList.add("has-custom-source-picker");
+  tradeJournalSourceSelectForEnhancement.tabIndex = -1;
+  tradeJournalSourceSelectForEnhancement.setAttribute("aria-hidden", "true");
+}
+
+function closestElement(target, selector) {
+  return target instanceof Element ? target.closest(selector) : null;
+}
 
 function setText(selector, value) {
   const element = $(selector);
@@ -826,6 +842,9 @@ async function loadFundingRateTokens({ silent = false } = {}) {
     const payload = await api("/api/funding-rate-tokens");
     if (requestId !== state.fundingRequestId) return false;
     state.fundingTokens = payload.tokens || [];
+    if (Number(payload.watchlistAdded ?? 0) > 0) {
+      void loadWatchlist({ silent: true });
+    }
     return true;
   } catch (error) {
     if (requestId !== state.fundingRequestId) return false;
@@ -2003,6 +2022,320 @@ function bindTradeSymbolSelection(root) {
   });
 }
 
+function tradeJournalComparableSymbol(value) {
+  const compact = String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return compact.endsWith("USDT") && compact.length > 4 ? compact.slice(0, -4) : compact;
+}
+
+function tradeJournalSymbolsMatch(left, right) {
+  const a = tradeJournalComparableSymbol(left);
+  const b = tradeJournalComparableSymbol(right);
+  return Boolean(a && b && a === b);
+}
+
+function tradeJournalSourceSide(value) {
+  const text = String(value ?? "").toLowerCase();
+  if (text.includes("short") || text.includes("sell")) return "SHORT";
+  if (text.includes("long") || text.includes("buy")) return "LONG";
+  if (text.includes("spot")) return "SPOT";
+  return "";
+}
+
+function tradeJournalSourceKey(kind, item = {}) {
+  return JSON.stringify([
+    kind,
+    item.id || item.key || "",
+    item.source || "",
+    item.symbol || "",
+    item.openedAt ?? item.firstTime ?? null,
+    item.closedAt ?? item.lastTime ?? null
+  ]);
+}
+
+function tradeJournalEventsForSourceSymbol(source, symbol) {
+  return (state.tradeAnalysis?.events ?? [])
+    .filter((event) =>
+      String(event.source ?? "") === String(source ?? "") &&
+      tradeJournalSymbolsMatch(event.symbol, symbol) &&
+      Number.isFinite(Number(event.time))
+    )
+    .sort((a, b) => Number(a.time) - Number(b.time));
+}
+
+function tradeJournalEventMatchesSide(event, journalSide) {
+  if (!journalSide) return true;
+  const text = [
+    event.direction,
+    event.positionSide,
+    event.side,
+    event.type,
+    event.rawType
+  ].join(" ").toLowerCase();
+  if (journalSide === "LONG") return text.includes("long") || text.includes("buy");
+  if (journalSide === "SHORT") return text.includes("short") || text.includes("sell");
+  return true;
+}
+
+function inferTradeJournalPositionOpenedAt(position) {
+  const side = tradeJournalSourceSide(position.side);
+  const events = tradeJournalEventsForSourceSymbol(position.source, position.symbol)
+    .filter((event) => String(event.rawType ?? "") !== "CURRENT_POSITION")
+    .filter((event) => /trade|fill|user_trade/i.test(`${event.type ?? ""} ${event.rawType ?? ""} ${event.direction ?? ""}`))
+    .filter((event) => tradeJournalEventMatchesSide(event, side));
+  const openEvents = events.filter((event) => /open|buy|sell|long|short/i.test(`${event.direction ?? ""} ${event.positionSide ?? ""} ${event.side ?? ""}`));
+  const firstOpen = openEvents[0] ?? events[0];
+  return firstOpen?.time ?? position.updatedAt ?? null;
+}
+
+function inferTradeJournalRowSide(row) {
+  const events = tradeJournalEventsForSourceSymbol(row.source, row.symbol);
+  const directional = events.find((event) => tradeJournalSourceSide(`${event.direction ?? ""} ${event.positionSide ?? ""} ${event.side ?? ""}`));
+  return tradeJournalSourceSide(`${directional?.direction ?? ""} ${directional?.positionSide ?? ""} ${directional?.side ?? ""}`);
+}
+
+function tradeJournalOpenPositionForRow(row) {
+  return (state.tradeAnalysis?.positions ?? []).find((position) =>
+    String(position.source ?? "") === String(row.source ?? "") &&
+    tradeJournalSymbolsMatch(position.symbol, row.symbol)
+  ) ?? null;
+}
+
+function tradeJournalSourceOptions() {
+  const positions = Array.isArray(state.tradeAnalysis?.positions) ? state.tradeAnalysis.positions : [];
+  const positionOptions = positions.map((position) => {
+    const side = tradeJournalSourceSide(position.side);
+    const openedAt = inferTradeJournalPositionOpenedAt(position);
+    const label = `${position.sourceLabel || position.source || "--"} · ${position.symbol || "--"} · 当前持仓 · ${tradeJournalSideLabel(side)}`;
+    return {
+      kind: "position",
+      key: tradeJournalSourceKey("position", { ...position, openedAt }),
+      label,
+      symbol: position.symbol || "",
+      side,
+      status: "OPEN",
+      openedAt,
+      closedAt: null,
+      detail: `数量 ${formatNumber(position.quantity, 6)} · 开仓均价 ${formatNumber(position.entryPrice, 6)} · 未实现 ${formatUsd(position.unrealizedPnl)}`
+    };
+  });
+
+  const rows = sortTradeSymbolRowsByTime(tradeAnalysisRows());
+  const rowOptions = rows.map((row) => {
+    const openPosition = tradeJournalOpenPositionForRow(row);
+    const side = openPosition ? tradeJournalSourceSide(openPosition.side) : inferTradeJournalRowSide(row);
+    const openedAt = row.firstTime ?? null;
+    const closedAt = openPosition ? null : row.lastTime ?? null;
+    const label = `${row.sourceLabel || row.source || "--"} · ${row.symbol || "--"} · ${formatTime(row.firstTime)} → ${openPosition ? "开单中" : formatTime(row.lastTime)} · 净收益 ${formatUsd(row.net)}`;
+    return {
+      kind: "trade",
+      key: tradeJournalSourceKey("trade", { ...row, key: tradeSymbolRowKey(row), openedAt, closedAt }),
+      label,
+      symbol: row.symbol || "",
+      side,
+      status: openPosition ? "OPEN" : "ENDED",
+      openedAt,
+      closedAt,
+      detail: `交易组 · 已实现 ${formatUsd(row.realizedPnl)} · 手续费 ${formatUsd(row.feeCost)} · 资金费 ${formatUsd(row.funding)}`
+    };
+  });
+
+  return {
+    positions: positionOptions,
+    trades: rowOptions,
+    all: [...positionOptions, ...rowOptions]
+  };
+}
+
+function selectedTradeJournalSourceOption() {
+  if (!state.selectedTradeJournalSourceKey) return null;
+  return tradeJournalSourceOptions().all.find((option) => option.key === state.selectedTradeJournalSourceKey) ?? null;
+}
+
+function tradeJournalSourceOptionKeys() {
+  return tradeJournalSourceOptions().all.map((option) => option.key);
+}
+
+function syncTradeJournalSourceActiveKey(options) {
+  const keys = options.all.map((option) => option.key);
+  if (!keys.length) {
+    state.tradeJournalSourceActiveKey = "";
+    return;
+  }
+  if (!keys.includes(state.tradeJournalSourceActiveKey)) {
+    state.tradeJournalSourceActiveKey = state.selectedTradeJournalSourceKey || keys[0];
+  }
+}
+
+function setTradeJournalSourcePickerOpen(open) {
+  const options = tradeJournalSourceOptions();
+  const canOpen = Boolean(options.all.length && !state.tradeJournalSourceLoading);
+  state.tradeJournalSourcePickerOpen = Boolean(open && canOpen);
+  if (state.tradeJournalSourcePickerOpen) {
+    state.tradeJournalSourceActiveKey = state.selectedTradeJournalSourceKey || state.tradeJournalSourceActiveKey;
+  }
+  syncTradeJournalSourceActiveKey(options);
+  renderTradeJournalSourcePicker();
+}
+
+function moveTradeJournalSourceActive(delta) {
+  const keys = tradeJournalSourceOptionKeys();
+  if (!keys.length) return;
+  const currentIndex = Math.max(0, keys.indexOf(state.tradeJournalSourceActiveKey));
+  const nextIndex = (currentIndex + delta + keys.length) % keys.length;
+  state.tradeJournalSourceActiveKey = keys[nextIndex];
+  state.tradeJournalSourcePickerOpen = true;
+  renderTradeJournalSourcePicker();
+}
+
+function renderTradeJournalSourceGroup(title, options, indexOffset) {
+  if (!options.length) return { html: "", nextIndex: indexOffset };
+  let nextIndex = indexOffset;
+  const rows = options.map((option) => {
+    const index = nextIndex;
+    nextIndex += 1;
+    const selected = option.key === state.selectedTradeJournalSourceKey;
+    const active = option.key === state.tradeJournalSourceActiveKey;
+    return `
+      <div
+        id="tradeJournalSourceOption${index}"
+        class="trade-journal-source-option${selected ? " is-selected" : ""}${active ? " is-active" : ""}"
+        role="option"
+        aria-selected="${selected ? "true" : "false"}"
+        data-trade-journal-source-key="${escapeHtml(option.key)}"
+        data-active="${active ? "true" : "false"}"
+      >
+        <span>${escapeHtml(option.label)}</span>
+      </div>
+    `;
+  }).join("");
+  return {
+    html: `
+      <div class="trade-journal-source-group" role="presentation">
+        <div class="trade-journal-source-group-label">${escapeHtml(title)}</div>
+        ${rows}
+      </div>
+    `,
+    nextIndex
+  };
+}
+
+function renderTradeJournalSourceCombobox(options, placeholder, selected) {
+  const button = $("#tradeJournalSourceButton");
+  const buttonText = $("#tradeJournalSourceButtonText");
+  const list = $("#tradeJournalSourceList");
+  if (!button || !buttonText || !list) return;
+
+  const disabled = state.tradeJournalSourceLoading || !options.all.length;
+  if (disabled) state.tradeJournalSourcePickerOpen = false;
+  syncTradeJournalSourceActiveKey(options);
+
+  const activeIndex = options.all.findIndex((option) => option.key === state.tradeJournalSourceActiveKey);
+  const expanded = Boolean(state.tradeJournalSourcePickerOpen && !disabled);
+  button.disabled = disabled;
+  button.dataset.state = state.tradeJournalSourceLoading ? "loading" : selected ? "filled" : "empty";
+  button.setAttribute("aria-expanded", String(expanded));
+  if (expanded && activeIndex >= 0) {
+    button.setAttribute("aria-activedescendant", `tradeJournalSourceOption${activeIndex}`);
+  } else {
+    button.removeAttribute("aria-activedescendant");
+  }
+  buttonText.textContent = selected?.label || placeholder;
+
+  let index = 0;
+  const positionGroup = renderTradeJournalSourceGroup("当前持仓", options.positions, index);
+  index = positionGroup.nextIndex;
+  const tradeGroup = renderTradeJournalSourceGroup("交易组", options.trades, index);
+  list.innerHTML = positionGroup.html + tradeGroup.html;
+  list.hidden = !expanded;
+
+  if (expanded) {
+    requestAnimationFrame(() => {
+      list.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+    });
+  }
+}
+
+function renderTradeJournalSourcePicker() {
+  const select = $("#tradeJournalSourceSelect");
+  if (!select) return;
+  const options = tradeJournalSourceOptions();
+  if (state.selectedTradeJournalSourceKey && !options.all.some((option) => option.key === state.selectedTradeJournalSourceKey)) {
+    state.selectedTradeJournalSourceKey = "";
+  }
+  const placeholder = state.tradeJournalSourceLoading
+    ? "正在同步交易来源"
+    : options.all.length ? "选择一笔交易来源" : "暂无可选交易来源";
+  const positionHtml = options.positions.length
+    ? `<optgroup label="当前持仓">${options.positions.map((option) => `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</optgroup>`
+    : "";
+  const tradeHtml = options.trades.length
+    ? `<optgroup label="交易组">${options.trades.map((option) => `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</optgroup>`
+    : "";
+  select.innerHTML = `<option value="">${escapeHtml(placeholder)}</option>${positionHtml}${tradeHtml}`;
+  select.value = state.selectedTradeJournalSourceKey;
+  select.disabled = state.tradeJournalSourceLoading || !options.all.length;
+  renderTradeJournalSourceCombobox(options, placeholder, selectedTradeJournalSourceOption());
+
+  const refreshButton = $("#refreshTradeJournalSourcesBtn");
+  if (refreshButton) {
+    refreshButton.disabled = state.tradeJournalSourceLoading || state.tradeAnalysisLoading || state.tradeAnalysisRefreshing;
+    refreshButton.textContent = state.tradeJournalSourceLoading || state.tradeAnalysisLoading || state.tradeAnalysisRefreshing
+      ? "同步中"
+      : "同步来源";
+  }
+
+  const hint = $("#tradeJournalSourceHint");
+  if (!hint) return;
+  const selected = selectedTradeJournalSourceOption();
+  if (state.tradeJournalSourceError) {
+    hint.textContent = `交易来源同步失败：${state.tradeJournalSourceError}`;
+  } else if (selected) {
+    hint.textContent = `已选择 ${selected.label}；${selected.detail}`;
+  } else if (state.tradeAnalysis?.generatedAt) {
+    hint.textContent = `来源来自交易分析 ${formatTime(state.tradeAnalysis.generatedAt)}；可选择当前持仓或交易组自动回填。`;
+  } else {
+    hint.textContent = "可选择当前持仓或交易分析里的交易组，自动回填交易对、方向、开仓与结束时间。";
+  }
+}
+
+function applyTradeJournalSourceOption(key) {
+  state.selectedTradeJournalSourceKey = key || "";
+  state.tradeJournalSourcePickerOpen = false;
+  state.tradeJournalSourceActiveKey = key || "";
+  const option = selectedTradeJournalSourceOption();
+  renderTradeJournalSourcePicker();
+  if (!option) return;
+
+  const symbolInput = $("#tradeJournalSymbolInput");
+  if (symbolInput) symbolInput.value = String(option.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  const sideInput = $("#tradeJournalSideInput");
+  if (sideInput) sideInput.value = option.side || "";
+  const statusInput = $("#tradeJournalStatusInput");
+  if (statusInput) statusInput.value = option.status || "OPEN";
+  const openedInput = $("#tradeJournalOpenedAtInput");
+  if (openedInput) openedInput.value = option.openedAt ? toDatetimeLocal(option.openedAt) : "";
+  const closedInput = $("#tradeJournalClosedAtInput");
+  if (closedInput) closedInput.value = option.closedAt ? toDatetimeLocal(option.closedAt) : "";
+}
+
+async function loadTradeJournalSources({ refresh = false } = {}) {
+  if (state.tradeJournalSourceLoading) return;
+  state.tradeJournalSourceLoading = true;
+  state.tradeJournalSourceError = "";
+  renderTradeJournalSourcePicker();
+  updateTradeJournalStatus();
+  try {
+    await loadTradeAnalysis({ refresh, advanceWindow: refresh });
+    state.tradeJournalSourceError = state.tradeAnalysisError || "";
+  } catch (error) {
+    state.tradeJournalSourceError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.tradeJournalSourceLoading = false;
+    renderTradeJournalSourcePicker();
+    updateTradeJournalStatus();
+  }
+}
+
 function tradeJournalStatusLabel(status) {
   if (status === "OPEN") return "开单中";
   if (status === "ENDED") return "已结束";
@@ -2097,6 +2430,7 @@ function tradeJournalIntradayNotesHtml(notes, fallback = "暂无盘中确定") {
 }
 
 function renderTradeJournal() {
+  renderTradeJournalSourcePicker();
   updateTradeJournalStatus();
   const target = $("#tradeJournalRows");
   if (!target) return;
@@ -2185,7 +2519,9 @@ function updateTradeJournalStatus() {
   if (state.tradeJournalLoading) parts.push("读取中");
   if (state.tradeJournalSaving) parts.push("保存中");
   if (state.tradeJournalIntradaySaving) parts.push("追加中");
+  if (state.tradeJournalSourceLoading) parts.push("同步交易来源");
   if (state.tradeJournalTotal) parts.push(`共 ${state.tradeJournalTotal} 条`);
+  if (state.tradeJournalSourceError) parts.push(`来源失败：${state.tradeJournalSourceError}`);
   if (state.tradeJournalError) parts.push(`失败：${state.tradeJournalError}`);
   setText("#tradeJournalStatus", parts.join(" · ") || "等待读取");
   const saveButton = $("#saveTradeJournalBtn");
@@ -2200,7 +2536,7 @@ function updateTradeJournalStatus() {
 
 function updateTradeJournalPagination() {
   const total = Number(state.tradeJournalTotal ?? 0);
-  const pageSize = Number(state.tradeJournalPageSize ?? 10);
+  const pageSize = Number(state.tradeJournalPageSize ?? 2);
   const page = Number(state.tradeJournalPage ?? 1);
   const totalPages = Math.ceil(total / pageSize) || 1;
   setText("#tradeJournalPaginationSummary", total ? `第 ${page} / ${totalPages} 页，共 ${total} 条` : "--");
@@ -2243,6 +2579,7 @@ function renderTradeJournalIntradayEditor(entry = {}) {
 
 function setTradeJournalForm(item = null, { focusReview = false, focusIntraday = false } = {}) {
   const entry = item ?? {};
+  state.selectedTradeJournalSourceKey = "";
   const idInput = $("#tradeJournalIdInput");
   if (idInput) idInput.value = entry.id ? String(entry.id) : "";
   const titleInput = $("#tradeJournalTitleInput");
@@ -2266,6 +2603,7 @@ function setTradeJournalForm(item = null, { focusReview = false, focusIntraday =
   const intradayInput = $("#tradeJournalIntradayInput");
   if (intradayInput) intradayInput.value = "";
   renderTradeJournalIntradayEditor(entry);
+  renderTradeJournalSourcePicker();
   setText("#tradeJournalFormTitle", entry.id ? `编辑交易日记 #${entry.id}` : "新建交易日记");
   const saveButton = $("#saveTradeJournalBtn");
   if (saveButton) saveButton.textContent = entry.id ? "保存修改" : "保存日记";
@@ -3305,7 +3643,14 @@ function setPage(page) {
     alignTradeAnalysisAnchor();
     loadTradeAnalysis();
   }
-  if (page === "trade-journal") loadTradeJournal();
+  if (page === "trade-journal") {
+    loadTradeJournal();
+    if (!state.tradeAnalysis && !state.tradeJournalSourceLoading) {
+      loadTradeJournalSources({ refresh: false });
+    } else {
+      renderTradeJournalSourcePicker();
+    }
+  }
 }
 
 function toggleRow(key) {
@@ -4613,6 +4958,64 @@ $("#newTradeJournalBtn")?.addEventListener("click", () => {
 $("#resetTradeJournalFormBtn")?.addEventListener("click", resetTradeJournalForm);
 $("#addTradeJournalIntradayBtn")?.addEventListener("click", addTradeJournalIntradayNote);
 $("#refreshTradeJournalBtn")?.addEventListener("click", () => loadTradeJournal());
+$("#refreshTradeJournalSourcesBtn")?.addEventListener("click", () => loadTradeJournalSources({ refresh: true }));
+$("#tradeJournalSourceSelect")?.addEventListener("change", (event) => {
+  applyTradeJournalSourceOption(event.currentTarget.value);
+});
+$("#tradeJournalSourceButton")?.addEventListener("click", () => {
+  setTradeJournalSourcePickerOpen(!state.tradeJournalSourcePickerOpen);
+});
+$("#tradeJournalSourceButton")?.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (state.tradeJournalSourcePickerOpen) moveTradeJournalSourceActive(1);
+    else setTradeJournalSourcePickerOpen(true);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (state.tradeJournalSourcePickerOpen) moveTradeJournalSourceActive(-1);
+    else setTradeJournalSourcePickerOpen(true);
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (state.tradeJournalSourcePickerOpen && state.tradeJournalSourceActiveKey) {
+      applyTradeJournalSourceOption(state.tradeJournalSourceActiveKey);
+      requestAnimationFrame(() => $("#tradeJournalSourceButton")?.focus());
+    } else {
+      setTradeJournalSourcePickerOpen(true);
+    }
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    setTradeJournalSourcePickerOpen(false);
+  }
+});
+$("#tradeJournalSourceList")?.addEventListener("click", (event) => {
+  const option = closestElement(event.target, "[data-trade-journal-source-key]");
+  if (!option) return;
+  applyTradeJournalSourceOption(option.dataset.tradeJournalSourceKey || "");
+  requestAnimationFrame(() => $("#tradeJournalSourceButton")?.focus());
+});
+$("#tradeJournalSourceList")?.addEventListener("pointerover", (event) => {
+  const option = closestElement(event.target, "[data-trade-journal-source-key]");
+  const key = option?.dataset.tradeJournalSourceKey || "";
+  if (!key || key === state.tradeJournalSourceActiveKey) return;
+  state.tradeJournalSourceActiveKey = key;
+  renderTradeJournalSourcePicker();
+});
+document.addEventListener("click", (event) => {
+  if (!state.tradeJournalSourcePickerOpen) return;
+  if (closestElement(event.target, "[data-trade-journal-source-picker]")) return;
+  setTradeJournalSourcePickerOpen(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.tradeJournalSourcePickerOpen) {
+    setTradeJournalSourcePickerOpen(false);
+  }
+});
 $("#applyTradeJournalFilterBtn")?.addEventListener("click", () => {
   state.tradeJournalPage = 1;
   loadTradeJournal();

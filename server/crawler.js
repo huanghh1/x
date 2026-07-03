@@ -294,6 +294,16 @@ export async function initializeTokenUniverse() {
 
 export async function runDailyKlineAudit({ syncUniverse = true } = {}) {
   if (auditState.running) return { skipped: true, reason: "K 线审计正在运行", ...auditState };
+  if (crawlerState.running) {
+    return {
+      skipped: true,
+      reason: "抓取服务正在运行，跳过本次 K 线审计，避免重复入队",
+      crawlerRunning: true,
+      runMode: crawlerState.runMode,
+      runStartedAt: crawlerState.runStartedAt,
+      processedTokenCount: crawlerState.processedTokenCount
+    };
+  }
   auditState.running = true;
   auditState.lastStartedAt = new Date().toISOString();
   auditState.lastError = null;

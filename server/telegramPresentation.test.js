@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { config } from "./config.js";
 import {
+  formatOpenInterestSpikeTelegram,
   formatHotMaSignalTelegram,
+  formatStandaloneOpenInterestSpikeTelegram,
   telegramApi,
   telegramTokenCopyButton,
   telegramTokenLine
 } from "./telegram.js";
 import {
   getTelegramBotState,
+  heatRankKeyboard,
   oiFilterKeyboard,
   signalKeyboard,
   signalRowText,
@@ -60,6 +63,57 @@ test("multi-cycle Telegram alert is rendered as one aggregated message", () => {
   assert.doesNotMatch(text, /^周期状态：/m);
   assert.doesNotMatch(text, /^MA100：/m);
   assert.doesNotMatch(text, /不构成投资建议/);
+});
+
+test("Telegram alerts name the OI spike hit periods", () => {
+  const text = formatHotMaSignalTelegram(
+    { symbol: "OIUSDT", category_label: "Alpha 合约无现货" },
+    {
+      intervalCode: "15m",
+      alertLevel: "LEVEL2",
+      currentPrice: 0.12,
+      ma100: 0.11,
+      ma200: 0.10,
+      signalStatus: "二级警报",
+      note: "测试"
+    },
+    {
+      oiSpike: true,
+      oiChange5mPct: 2.45,
+      oiChange1hPct: 9.5,
+      oiChange4hPct: 21,
+      oiSpike5mHit: true,
+      oiSpike1hHit: false,
+      oiSpike4hHit: true,
+      oiSpike1dHit: false
+    }
+  );
+
+  assert.match(text, /<b>OI命中周期：<\/b>\n  • <b>5分钟 2\.45%<\/b>\n  • <b>4小时 21\.00%<\/b>/);
+  assert.doesNotMatch(text, /^OI：/m);
+});
+
+test("OI spike Telegram text names threshold-hit periods", () => {
+  const item = {
+    symbol: "PERPUSDT",
+    change5mPct: 1.5,
+    change15mPct: 3.2,
+    change1hPct: 12.5,
+    change4hPct: 18,
+    change1dPct: 41,
+    currentOpenInterest: 12345,
+    currentOpenInterestValue: 67890
+  };
+  const comboText = formatOpenInterestSpikeTelegram(item, {
+    intervals: ["15m"],
+    alertLevel: "LEVEL2",
+    multiCycleCount: 1
+  });
+  const standaloneText = formatStandaloneOpenInterestSpikeTelegram(item);
+
+  assert.match(comboText, /<b>OI命中周期：<\/b>\n  • <b>1小时 12\.50%<\/b>\n  • <b>1天 41\.00%<\/b>/);
+  assert.match(standaloneText, /<b>OI命中周期：<\/b>\n  • <b>1小时 12\.50%<\/b>\n  • <b>1天 41\.00%<\/b>/);
+  assert.doesNotMatch(standaloneText, /触发区间/);
 });
 
 test("Telegram signal menu shows OI spike changes as a matched combination", () => {
@@ -132,6 +186,20 @@ test("Telegram OI controls fall back to safe defaults for invalid callback data"
   assert.equal(keyboard.inline_keyboard[0][0].text, "✓ 5m");
   assert.equal(keyboard.inline_keyboard[1][0].text, "✓ 从高到低");
   assert.equal(keyboard.inline_keyboard[0][1].callback_data, "oi:15m:desc");
+});
+
+test("Telegram heat rank controls use paginated callbacks", () => {
+  const keyboard = heatRankKeyboard({ page: 2, total: 30, pageSize: 8, symbols: ["AAAUSDT", "BBBUSDT"] });
+
+  assert.deepEqual(
+    keyboard.inline_keyboard[0],
+    [
+      { text: "‹ 上一页", callback_data: "heat:1" },
+      { text: "2/4", callback_data: "noop" },
+      { text: "下一页 ›", callback_data: "heat:3" }
+    ]
+  );
+  assert.equal(keyboard.inline_keyboard.flat().find((button) => button.callback_data === "heat").text, "【热度排行】");
 });
 
 test("Telegram text splitter prefers line boundaries", () => {

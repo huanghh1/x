@@ -4587,6 +4587,24 @@ export async function upsertWatchlistItem({ symbol, note = "", alertAbove = null
   return listWatchlist();
 }
 
+export async function addWatchlistItemsIfMissing(items = [], { note = "" } = {}) {
+  const safeNote = String(note ?? "").slice(0, 255);
+  const bySymbol = new Map();
+  for (const item of Array.isArray(items) ? items : [items]) {
+    const symbol = sanitizeDbSymbol(typeof item === "string" ? item : item?.symbol);
+    if (!symbol || bySymbol.has(symbol)) continue;
+    bySymbol.set(symbol, [symbol, baseAssetFromSymbol(symbol), safeNote, 1]);
+  }
+  const rows = Array.from(bySymbol.values());
+  if (!rows.length) return 0;
+  const [result] = await getPool().query(
+    `INSERT IGNORE INTO watchlist (symbol, base_asset, note, alert_enabled)
+     VALUES ?`,
+    [rows]
+  );
+  return Number(result.affectedRows ?? 0);
+}
+
 export async function deleteWatchlistItem(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return 0;

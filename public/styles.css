@@ -2792,6 +2792,234 @@ main,
   font-size: 12px;
 }
 
+.trade-journal-source-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  border: 1px solid color-mix(in oklch, var(--accent) 18%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklch, var(--surface-raised) 88%, var(--surface-accent, var(--color-accent-soft)));
+  padding: 12px;
+}
+
+.trade-journal-source-panel p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Hallmark · component: combobox · genre: utilitarian · theme: existing pink workbench
+ * states: default · hover · focus · active · disabled · loading · error · success
+ * contrast: pass (46-50)
+ */
+.trade-journal-source-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.trade-journal-source-combobox {
+  position: relative;
+  display: none;
+  min-width: 0;
+}
+
+body.has-custom-source-picker .trade-journal-source-combobox {
+  display: block;
+}
+
+body.has-custom-source-picker .trade-journal-source-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  border: 0;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.trade-journal-source-button {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 12px;
+  color: var(--ink-strong);
+  background: linear-gradient(180deg, var(--surface-raised), var(--surface-soft));
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--surface-raised) 86%, transparent),
+    0 1px 2px color-mix(in oklch, var(--ink-muted) 12%, transparent);
+  font: inherit;
+  font-weight: 800;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  transition:
+    background-color 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    border-color 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    box-shadow 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    transform 100ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.trade-journal-source-button span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trade-journal-source-arrow {
+  width: 9px;
+  height: 9px;
+  justify-self: center;
+  border-right: 2px solid var(--accent-strong);
+  border-bottom: 2px solid var(--accent-strong);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.trade-journal-source-button[aria-expanded="true"] .trade-journal-source-arrow {
+  transform: translateY(2px) rotate(225deg);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .trade-journal-source-button:hover {
+    border-color: var(--accent);
+    background: linear-gradient(180deg, var(--surface-raised), var(--surface-panel));
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklch, var(--surface-raised) 88%, transparent),
+      0 6px 16px color-mix(in oklch, var(--accent) 10%, transparent);
+  }
+}
+
+.trade-journal-source-button:focus-visible {
+  border-color: var(--accent);
+  outline-color: color-mix(in oklch, var(--focus) 42%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--surface-raised) 88%, transparent),
+    0 0 0 4px color-mix(in oklch, var(--focus) 15%, transparent);
+}
+
+.trade-journal-source-button:active {
+  transform: translateY(1px);
+}
+
+.trade-journal-source-button:disabled {
+  color: var(--ink-muted);
+  cursor: not-allowed;
+  opacity: 0.58;
+  box-shadow: none;
+}
+
+.trade-journal-source-button[data-state="loading"] {
+  cursor: progress;
+}
+
+.trade-journal-source-list {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: min(336px, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px;
+  color: var(--ink-strong);
+  background: var(--surface-raised);
+  box-shadow: 0 18px 42px color-mix(in oklch, var(--ink-muted) 20%, transparent);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--accent) 50%, var(--line-strong)) transparent;
+}
+
+.trade-journal-source-list[hidden] {
+  display: none;
+}
+
+.trade-journal-source-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.trade-journal-source-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.trade-journal-source-list::-webkit-scrollbar-thumb {
+  border: 3px solid var(--surface-raised);
+  border-radius: var(--radius-pill);
+  background: color-mix(in oklch, var(--accent) 50%, var(--line-strong));
+}
+
+.trade-journal-source-group + .trade-journal-source-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.trade-journal-source-group-label {
+  padding: 6px 8px 5px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.trade-journal-source-option {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 0 8px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.trade-journal-source-option::before {
+  content: "";
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.trade-journal-source-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trade-journal-source-option.is-selected::before {
+  content: "✓";
+}
+
+.trade-journal-source-option.is-selected {
+  color: var(--accent-strong);
+  background: color-mix(in oklch, var(--accent) 9%, var(--surface-raised));
+}
+
+.trade-journal-source-option.is-active {
+  background: color-mix(in oklch, var(--accent) 12%, var(--surface-raised));
+}
+
 .trade-journal-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3241,6 +3469,14 @@ main,
   .trade-journal-toolbar .ghost-button,
   .trade-journal-form-actions .ghost-button {
     flex: 1 0 auto;
+  }
+
+  .trade-journal-source-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-journal-source-panel .ghost-button {
+    width: 100%;
   }
 
   .trade-journal-fields {

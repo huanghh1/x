@@ -52,6 +52,7 @@ const pollingErrorLog = {
 const OI_TIME_WINDOWS = new Set(["5m", "15m", "1h", "4h", "1d"]);
 const OI_SORTS = new Set(["asc", "desc"]);
 const TELEGRAM_HOT_RANK_LIMIT = 30;
+const TELEGRAM_HOT_RANK_PAGE_SIZE = 8;
 const TELEGRAM_MENU_LIST_LIMIT = 30;
 const TELEGRAM_OI_LIMIT = 10;
 
@@ -496,30 +497,43 @@ async function sendHotMa(chatId, page = 1, messageId = null) {
   });
 }
 
-async function sendHeat(chatId, messageId = null) {
+export function heatRankKeyboard({ page, total, pageSize, symbols }) {
+  const keyboard = { inline_keyboard: [] };
+  keyboard.inline_keyboard.push(pageButtons({ prefix: "heat", page, total, pageSize }));
+  keyboard.inline_keyboard.push(...tokenOperationRows(symbols));
+  return appendMainNavigation(keyboard, "heat");
+}
+
+async function sendHeat(chatId, page = 1, messageId = null) {
   const payload = await menuCache.get("heat", () => getHotRank({ chain: "all", limit: TELEGRAM_HOT_RANK_LIMIT }));
   const visibleTokens = payload.tokens ?? [];
-  const rows = visibleTokens.map((token) =>
+  const safePage = clampPage(page, visibleTokens.length, TELEGRAM_HOT_RANK_PAGE_SIZE);
+  const startIndex = (safePage - 1) * TELEGRAM_HOT_RANK_PAGE_SIZE;
+  const pageTokens = visibleTokens.slice(startIndex, startIndex + TELEGRAM_HOT_RANK_PAGE_SIZE);
+  const rows = pageTokens.map((token) =>
     `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 热度 ${escapeHtml(token.heat)} · 币安 ${escapeHtml(token.binanceHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
   );
+  const totalPages = Math.max(1, Math.ceil(visibleTokens.length / TELEGRAM_HOT_RANK_PAGE_SIZE));
   const flags = [
     payload.stale ? "使用上次缓存" : null,
     !payload.stale && payload.partial ? "部分链失败" : null,
     Array.isArray(payload.errors) && payload.errors.length ? `错误 ${payload.errors.length} 条` : null
   ].filter(Boolean);
-  const keyboard = appendMainNavigation(
-    { inline_keyboard: tokenOperationRows(visibleTokens.map((token) => token.symbol)) },
-    "heat"
-  );
   await sendOrEditMessage({
     chatId,
     messageId,
     text: [
-      rows.length ? `<b>综合热度排行 · 共 ${rows.length} 个</b>` : "<b>综合热度排行</b>",
+      "<b>综合热度排行</b>",
+      rows.length ? `第 ${safePage}/${totalPages} 页 · 共 ${visibleTokens.length} 个代币` : null,
       `来源：${escapeHtml(payload.source || "Binance Web3 Social Hype")}${flags.length ? ` · ${escapeHtml(flags.join(" · "))}` : ""}`,
-      rows.length ? rows.join("\n") : "暂无热度数据。"
-    ].join("\n"),
-    replyMarkup: keyboard
+      rows.length ? rows.join("\n\n") : "暂无热度数据。"
+    ].filter(Boolean).join("\n\n"),
+    replyMarkup: heatRankKeyboard({
+      page: safePage,
+      total: visibleTokens.length,
+      pageSize: TELEGRAM_HOT_RANK_PAGE_SIZE,
+      symbols: pageTokens.map((token) => token.symbol)
+    })
   });
 }
 
@@ -655,7 +669,11 @@ async function handleCallback(callback) {
   try {
     if (data === "noop") return;
     const messageId = callback?.message?.message_id ?? null;
-    if (data === "heat") return sendHeat(chatId, messageId);
+    if (data === "heat") return sendHeat(chatId, 1, messageId);
+    if (data.startsWith("heat:")) {
+      const [, page] = data.split(":");
+      return sendHeat(chatId, page, messageId);
+    }
     if (data === "watch") return sendWatch(chatId, messageId);
     if (data === "funding") return sendFunding(chatId, messageId);
     if (data.startsWith("funding_confirm:")) {

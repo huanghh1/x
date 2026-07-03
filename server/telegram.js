@@ -36,22 +36,68 @@ function formatOiChange(value) {
     : `${numeric.toFixed(2)}%`;
 }
 
-function oiChangeSummary(source, prefix = "oi") {
-  const key = (name) => `${prefix}${name}`;
-  const intervals = [
-    ["5分钟", source?.[key("Change5mPct")], source?.[key("Spike5mHit")]],
-    ["1小时", source?.[key("Change1hPct")], source?.[key("Spike1hHit")]],
-    ["4小时", source?.[key("Change4hPct")], source?.[key("Spike4hHit")]],
-    ["1天", source?.[key("Change1dPct")], source?.[key("Spike1dHit")]]
-  ];
-  const available = intervals.filter(([, value]) => {
+const OI_SPIKE_WINDOWS = [
+  {
+    label: "5分钟",
+    changeSuffix: "Change5mPct",
+    hitSuffix: "Spike5mHit",
+    changeKey: "change5mPct",
+    hitKey: "spike5mHit",
+    thresholdKey: "spike5mPct"
+  },
+  {
+    label: "1小时",
+    changeSuffix: "Change1hPct",
+    hitSuffix: "Spike1hHit",
+    changeKey: "change1hPct",
+    hitKey: "spike1hHit",
+    thresholdKey: "spike1hPct"
+  },
+  {
+    label: "4小时",
+    changeSuffix: "Change4hPct",
+    hitSuffix: "Spike4hHit",
+    changeKey: "change4hPct",
+    hitKey: "spike4hHit",
+    thresholdKey: "spike4hPct"
+  },
+  {
+    label: "1天",
+    changeSuffix: "Change1dPct",
+    hitSuffix: "Spike1dHit",
+    changeKey: "change1dPct",
+    hitKey: "spike1dHit",
+    thresholdKey: "spike1dPct"
+  }
+];
+
+function oiWindowDetails(source, prefix = "oi") {
+  const key = (suffix, fallback) => prefix ? `${prefix}${suffix}` : fallback;
+  return OI_SPIKE_WINDOWS.map((window) => {
+    const value = source?.[key(window.changeSuffix, window.changeKey)];
     const numeric = Number(value);
-    return value !== null && value !== undefined && Number.isFinite(numeric);
+    const available = value !== null && value !== undefined && Number.isFinite(numeric);
+    const hitFlag = source?.[key(window.hitSuffix, window.hitKey)];
+    const threshold = Number(config.openInterestMonitor[window.thresholdKey]);
+    const hit = hitFlag === true ||
+      (hitFlag !== false && available && Number.isFinite(threshold) && numeric >= threshold);
+    return { ...window, value, available, hit };
   });
-  const hits = available.filter(([, , hit]) => hit);
-  return (hits.length ? hits : available)
-    .map(([label, value]) => `${label} ${formatOiChange(value)}`)
-    .join(" · ");
+}
+
+function oiHitPeriodItems(source, prefix = "oi") {
+  return oiWindowDetails(source, prefix)
+    .filter(({ hit }) => hit)
+    .map(({ label, value }) => `${label} ${formatOiChange(value)}`);
+}
+
+function formatOiHitPeriodBlock(source, prefix = "oi") {
+  const items = oiHitPeriodItems(source, prefix);
+  if (!items.length) return `OI命中周期：<b>暂无命中周期</b>`;
+  return [
+    "<b>OI命中周期：</b>",
+    ...items.map((item) => `  • <b>${escapeHtml(item)}</b>`)
+  ].join("\n");
 }
 
 function tokenSearchTerm(token) {
@@ -227,7 +273,7 @@ export function formatHotMaSignalTelegram(token, signal, context = {}) {
     context.hotRank ? "热度确认：该代币当前在综合热度排行内" : null,
     context.fundingOneHour ? "资金费率：当前为 1 小时结算周期" : null,
     context.oiSpike
-      ? `OI：${escapeHtml(oiChangeSummary(context) || "暂无可用变化率")}`
+      ? formatOiHitPeriodBlock(context)
       : null,
     `触发周期：<b>${escapeHtml(intervalText)}</b>${multiCycleCount > 1 ? `（共 ${escapeHtml(multiCycleCount)} 个）` : ""}`,
     isAggregated ? null : `现价：${escapeHtml(signal.currentPrice)}`,
@@ -305,7 +351,7 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
     Number(item.oneHourAlertCount ?? 0) > 0 ? `重复提醒：第 ${escapeHtml(Number(item.oneHourAlertCount) + 1)} 次，确认后停止循环推送` : "确认状态：待确认，5分钟后仍未确认会重复推送",
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
     context.oiSpike
-      ? `OI：${escapeHtml(oiChangeSummary(context) || "暂无可用变化率")}`
+      ? formatOiHitPeriodBlock(context)
       : null,
     item.lastChangedAt ? `变化时间：${escapeHtml(new Date(item.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null
   ].filter(Boolean).join("\n");
@@ -314,28 +360,28 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
   return { skipped: false, result };
 }
 
-export async function sendOpenInterestSpikeTelegram(item, context = {}) {
-  if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
-  if (!config.telegram.botToken || !config.telegram.chatId) {
-    return { skipped: true, reason: "Telegram missing config" };
-  }
-  const profile = resolveSignalProfile({
+function openInterestSignalProfile(context = {}) {
+  return resolveSignalProfile({
     fundingOneHour: context.fundingOneHour,
     oiSpike: true,
     hotRank: context.hotRank,
     multiCycleCount: context.multiCycleCount,
     alertLevel: context.alertLevel
   });
-  if (!profile.sourceMask) return { skipped: true, reason: "No MA alert for OI combination" };
+}
+
+export function formatOpenInterestSpikeTelegram(item, context = {}) {
+  const profile = openInterestSignalProfile(context);
   const matches = [
     context.hotRank ? "热度排行" : null,
     context.fundingOneHour ? "1小时资金费率" : null,
     Number(context.multiCycleCount ?? 0) >= 3 ? `多周期 ${context.multiCycleCount}` : null
   ].filter(Boolean);
   const intervals = Array.isArray(context.intervals) ? context.intervals : [];
-  const text = [
+  return [
     `<b>[${escapeHtml(profile.label)}]</b>`,
     `交易对：${telegramTokenLine(item.symbol)}`,
+    formatOiHitPeriodBlock(item, ""),
     `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b>`,
     `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b>`,
     `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b>`,
@@ -346,8 +392,32 @@ export async function sendOpenInterestSpikeTelegram(item, context = {}) {
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
     `暴涨条件：5分钟 ≥ ${escapeHtml(config.openInterestMonitor.spike5mPct)}% 或 1小时 ≥ ${escapeHtml(config.openInterestMonitor.spike1hPct)}% 或 4小时 ≥ ${escapeHtml(config.openInterestMonitor.spike4hPct)}% 或 1天 ≥ ${escapeHtml(config.openInterestMonitor.spike1dPct)}%`
   ].filter(Boolean).join("\n");
-  const result = await postTelegram(text, signalReplyMarkup(item, "oi"));
+}
+
+export async function sendOpenInterestSpikeTelegram(item, context = {}) {
+  if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
+  if (!config.telegram.botToken || !config.telegram.chatId) {
+    return { skipped: true, reason: "Telegram missing config" };
+  }
+  const profile = openInterestSignalProfile(context);
+  if (!profile.sourceMask) return { skipped: true, reason: "No MA alert for OI combination" };
+  const result = await postTelegram(formatOpenInterestSpikeTelegram(item, context), signalReplyMarkup(item, "oi"));
   return { skipped: false, result };
+}
+
+export function formatStandaloneOpenInterestSpikeTelegram(item) {
+  return [
+    "<b>🚨 [OI持仓量暴涨警报]</b>",
+    `交易对：${telegramTokenLine(item.symbol)}`,
+    formatOiHitPeriodBlock(item, ""),
+    `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b> (阈值: ${config.openInterestMonitor.spike5mPct}%)`,
+    `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b> (阈值: ${config.openInterestMonitor.spike1hPct}%)`,
+    `15分钟变化：<b>${escapeHtml(formatOiChange(item.change15mPct))}</b>`,
+    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b> (阈值: ${config.openInterestMonitor.spike4hPct}%)`,
+    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b> (阈值: ${config.openInterestMonitor.spike1dPct}%)`,
+    `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
+    `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`
+  ].filter(Boolean).join("\n");
 }
 
 export async function sendStandaloneOpenInterestSpikeTelegram(item) {
@@ -359,34 +429,7 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
     return { skipped: true, reason: "Standalone OI alert disabled" };
   }
 
-  const hitIntervals = [];
-  if (item.change5mPct !== null && item.change5mPct >= config.openInterestMonitor.spike5mPct) {
-    hitIntervals.push(`5分钟: ${formatOiChange(item.change5mPct)}`);
-  }
-  if (item.change1hPct !== null && item.change1hPct >= config.openInterestMonitor.spike1hPct) {
-    hitIntervals.push(`1小时: ${formatOiChange(item.change1hPct)}`);
-  }
-  if (item.change4hPct !== null && item.change4hPct >= config.openInterestMonitor.spike4hPct) {
-    hitIntervals.push(`4小时: ${formatOiChange(item.change4hPct)}`);
-  }
-  if (item.change1dPct !== null && item.change1dPct >= config.openInterestMonitor.spike1dPct) {
-    hitIntervals.push(`1天: ${formatOiChange(item.change1dPct)}`);
-  }
-
-  const text = [
-    "<b>🚨 [OI持仓量暴涨警报]</b>",
-    `交易对：${telegramTokenLine(item.symbol)}`,
-    hitIntervals.length ? `触发区间：\n${hitIntervals.map((t) => `  • ${escapeHtml(t)}`).join("\n")}` : null,
-    `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b> (阈值: ${config.openInterestMonitor.spike5mPct}%)`,
-    `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b> (阈值: ${config.openInterestMonitor.spike1hPct}%)`,
-    `15分钟变化：<b>${escapeHtml(formatOiChange(item.change15mPct))}</b>`,
-    `4小时变化：<b>${escapeHtml(formatOiChange(item.change4hPct))}</b> (阈值: ${config.openInterestMonitor.spike4hPct}%)`,
-    `1天变化：<b>${escapeHtml(formatOiChange(item.change1dPct))}</b> (阈值: ${config.openInterestMonitor.spike1dPct}%)`,
-    `当前持仓量：${escapeHtml(item.currentOpenInterest)}`,
-    `持仓价值：${escapeHtml(item.currentOpenInterestValue)}`
-  ].filter(Boolean).join("\n");
-
-  const result = await postTelegram(text, signalReplyMarkup(item, "oi"));
+  const result = await postTelegram(formatStandaloneOpenInterestSpikeTelegram(item), signalReplyMarkup(item, "oi"));
   return { skipped: false, result };
 }
 

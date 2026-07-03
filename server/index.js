@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { config } from "./config.js";
 import {
+  addWatchlistItemsIfMissing,
   clearTriggerHistory,
   createTradeJournalIntradayNote,
   createTradeJournalEntry,
@@ -997,7 +998,22 @@ app.delete("/api/trigger-history", requireLocalMutation, async (request, respons
 app.get("/api/funding-rate-tokens", async (_request, response) => {
   try {
     const tokens = await listOneHourFundingIntervals();
-    response.json({ ok: true, tokens, total: tokens.length });
+    const watchlistAdded = await addWatchlistItemsIfMissing(tokens, { note: "资金费率 1小时结算自动加入" });
+    if (watchlistAdded > 0) {
+      void requestService("crawler", "/internal/watchlist/refresh", {
+        method: "POST",
+        body: JSON.stringify({ full: true }),
+        timeoutMs: 60_000
+      }).catch((error) => console.error("funding watchlist post-refresh failed", error));
+      void requestService("realtime", "/internal/refresh", { method: "POST", body: "{}" })
+        .catch((error) => console.error("funding watchlist realtime refresh failed", error));
+      void requestService("scheduler", "/internal/unlock/check", {
+        method: "POST",
+        body: "{}",
+        timeoutMs: 60_000
+      }).catch((error) => console.error("funding watchlist unlock refresh failed", error));
+    }
+    response.json({ ok: true, tokens, total: tokens.length, watchlistAdded });
   } catch (error) {
     console.error("get funding rate tokens failed", error);
     response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
