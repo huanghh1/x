@@ -1,6 +1,7 @@
 const ALL_CATEGORIES = ["A", "B"];
 const ALL_LEVELS = ["LEVEL1", "LEVEL2"];
 const ALL_INTERVALS = ["15m", "1h", "4h", "1d"];
+const OI_REALTIME_WINDOWS = ["5m", "15m", "1h", "4h", "1d"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const TRADE_MAX_LOOKBACK_DAYS = 90;
@@ -45,6 +46,8 @@ const state = {
   levels: new Set(["LEVEL1", "LEVEL2"]),
   intervals: new Set(ALL_INTERVALS),
   signals: [],
+  signalRealtimeRows: [],
+  signalRealtimeRequestId: 0,
   totalSignals: 0,
   page: 1,
   pageSize: 20,
@@ -89,6 +92,7 @@ const state = {
   fundingScanning: false,
   fundingRequestId: 0,
   ioData: [],
+  ioRealtimeRows: [],
   ioPage: 1,
   ioPageSize: 20,
   ioTotal: 0,
@@ -96,6 +100,7 @@ const state = {
   ioError: "",
   ioMonitor: null,
   ioRequestId: 0,
+  ioRealtimeRequestId: 0,
   ioLastLoadedAt: null,
   ioScanning: false,
   ioWindow: "5m",
@@ -945,6 +950,7 @@ async function loadIOMonitoring() {
     state.ioPageSize = payload.pageSize || state.ioPageSize;
     state.ioMonitor = payload.monitor || null;
     state.ioLastLoadedAt = payload.generatedAt || new Date().toISOString();
+    await loadIORealtimeRows();
   } catch (error) {
     if (requestId !== state.ioRequestId) return;
     state.ioError = `OI 数据读取失败：${error instanceof Error ? error.message : String(error)}`;
@@ -954,6 +960,31 @@ async function loadIOMonitoring() {
     state.ioLoading = false;
     renderIOMonitoring();
   }
+}
+
+async function loadIORealtimeRows() {
+  const requestId = state.ioRealtimeRequestId + 1;
+  state.ioRealtimeRequestId = requestId;
+  const rows = [];
+  const results = await Promise.allSettled(OI_REALTIME_WINDOWS.map(async (timeWindow) => {
+    const params = new URLSearchParams({
+      timeWindow,
+      sort: "desc",
+      page: "1",
+      pageSize: "5"
+    });
+    const payload = await api(`/api/oi-monitoring?${params.toString()}`);
+    for (const item of payload.data ?? []) {
+      rows.push({ ...item, realtimeWindow: timeWindow });
+    }
+  }));
+  const failures = results.filter((result) => result.status === "rejected");
+  if (failures.length) {
+    console.warn("load OI realtime top rows partially failed", failures.map((result) => result.reason));
+  }
+  if (requestId !== state.ioRealtimeRequestId) return;
+  state.ioRealtimeRows = rows;
+  updateWatchRealtime();
 }
 
 function renderIOMonitoring() {
@@ -2914,16 +2945,35 @@ function closeWatchRealtime() {
   state.watchRealtimeSignature = "";
 }
 
+function signalRealtimeIntervals(row) {
+  const intervals = new Set();
+  const selectedInterval = state.signalChartIntervals.get(row.symbol);
+  for (const interval of [selectedInterval, row.intervalCode, ...(Array.isArray(row.intervals) ? row.intervals : [])]) {
+    if (ALL_INTERVALS.includes(interval)) intervals.add(interval);
+  }
+  if (!intervals.size) intervals.add("15m");
+  return intervals;
+}
+
+function oiRealtimeKlineInterval(timeWindow) {
+  return timeWindow === "5m" ? "15m" : ALL_INTERVALS.includes(timeWindow) ? timeWindow : "15m";
+}
+
+function ioRealtimeSymbols() {
+  return new Set(state.ioRealtimeRows.map((item) => String(item.symbol ?? "").toUpperCase()).filter(Boolean));
+}
+
 function watchRealtimeStreams() {
   const streams = new Set();
   if (state.currentView === "signals") {
-    for (const row of state.signals) {
+    const signalRows = state.signalRealtimeRows.length ? state.signalRealtimeRows : state.signals;
+    for (const row of signalRows) {
       const symbol = String(row.symbol ?? "").toLowerCase();
       if (!symbol) continue;
-      const preferredInterval = state.signalChartIntervals.get(row.symbol) ?? row.intervalCode ?? "15m";
-      const interval = ALL_INTERVALS.includes(preferredInterval) ? preferredInterval : "15m";
       streams.add(`${symbol}@ticker`);
-      streams.add(`${symbol}@kline_${interval}`);
+      for (const interval of signalRealtimeIntervals(row)) {
+        streams.add(`${symbol}@kline_${interval}`);
+      }
     }
   }
   if (state.currentView === "watch") {
@@ -2936,15 +2986,20 @@ function watchRealtimeStreams() {
     }
   }
   if (state.currentView === "funding") {
-    for (const token of state.fundingTokens.slice(0, 5)) {
+    const interval = ALL_INTERVALS.includes(state.fundingInterval) ? state.fundingInterval : "15m";
+    for (const token of state.fundingTokens) {
       const symbol = String(token.symbol ?? "").toLowerCase();
-      if (symbol) streams.add(`${symbol}@ticker`);
+      if (!symbol) continue;
+      streams.add(`${symbol}@ticker`);
+      streams.add(`${symbol}@kline_${interval}`);
     }
   }
   if (state.currentView === "io") {
-    for (const item of state.ioData.slice(0, 5)) {
+    for (const item of state.ioRealtimeRows) {
       const symbol = String(item.symbol ?? "").toLowerCase();
-      if (symbol) streams.add(`${symbol}@ticker`);
+      if (!symbol) continue;
+      streams.add(`${symbol}@ticker`);
+      streams.add(`${symbol}@kline_${oiRealtimeKlineInterval(item.realtimeWindow)}`);
     }
   }
   const expandedCharts = [
@@ -2952,7 +3007,9 @@ function watchRealtimeStreams() {
       ? state.signals.find((row) => rowKey(row) === state.expandedKey)?.symbol
       : null,
     state.currentView === "funding" ? state.fundingExpandedSymbol : null,
-    state.currentView === "io" ? state.ioExpandedSymbol : null
+    state.currentView === "io" && ioRealtimeSymbols().has(String(state.ioExpandedSymbol ?? "").toUpperCase())
+      ? state.ioExpandedSymbol
+      : null
   ].filter(Boolean);
   for (const symbol of expandedCharts) {
     const interval =
@@ -3259,6 +3316,8 @@ function toggleRow(key) {
 async function loadSignalsPage() {
   if (state.categories.size === 0 || state.levels.size === 0 || state.intervals.size === 0) {
     state.signals = [];
+    state.signalRealtimeRows = [];
+    state.signalRealtimeRequestId += 1;
     state.totalSignals = 0;
     return;
   }
@@ -3278,7 +3337,35 @@ async function loadSignalsPage() {
   if (state.page > totalPages) {
     state.page = totalPages;
     await loadSignalsPage();
+    return;
   }
+  await loadSignalRealtimeRows();
+}
+
+async function loadSignalRealtimeRows() {
+  const requestId = state.signalRealtimeRequestId + 1;
+  state.signalRealtimeRequestId = requestId;
+  const pageSize = 100;
+  const baseParams = {
+    categories: Array.from(state.categories).join(","),
+    levels: Array.from(state.levels).join(","),
+    intervals: Array.from(state.intervals).join(","),
+    pageSize: String(pageSize)
+  };
+  const rows = [];
+  let page = 1;
+  let total = state.totalSignals;
+  while (rows.length < total || page === 1) {
+    const params = new URLSearchParams({ ...baseParams, page: String(page) });
+    const response = await api(`/api/signals?${params.toString()}`);
+    rows.push(...(response.signals ?? []));
+    total = Number(response.total ?? rows.length);
+    if (!response.signals?.length || rows.length >= total) break;
+    page += 1;
+  }
+  if (requestId !== state.signalRealtimeRequestId) return;
+  state.signalRealtimeRows = rows;
+  updateWatchRealtime();
 }
 
 async function refreshAll({ keepPage = true } = {}) {
@@ -4725,20 +4812,38 @@ window.addEventListener("resize", () => {
   }
 });
 
+function scheduleVisiblePoll(label, intervalMs, callback) {
+  let lastRunAt = Date.now();
+  const run = () => {
+    if (document.visibilityState === "hidden") return;
+    lastRunAt = Date.now();
+    Promise.resolve()
+      .then(callback)
+      .catch((error) => console.error(`${label} failed`, error));
+  };
+  setInterval(run, intervalMs);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && Date.now() - lastRunAt >= intervalMs) run();
+  });
+}
+
 updateFilterControls();
 setPage(pageFromHash());
 void bootstrap();
 void refreshAll({ keepPage: false });
-if (state.currentView !== "heat") loadHotRank({ silent: true });
-loadWatchlist();
-setInterval(() => loadHotRank({ silent: true }), 5 * 60 * 1000);
-setInterval(() => {
-  if (state.currentView === "watch") loadWatchlist({ silent: true });
-}, 60 * 1000);
-setInterval(() => {
-  if (state.currentView === "signals") refreshAll({ keepPage: true });
-}, 60 * 1000);
-setInterval(() => {
-  if (state.currentView === "io") loadIOMonitoring();
-}, 3 * 60 * 1000);
-setInterval(updateOiAgeLabels, 30 * 1000);
+if (state.currentView !== "heat") void loadHotRank({ silent: true });
+void loadWatchlist();
+scheduleVisiblePoll("hot rank refresh", 5 * 60 * 1000, () => loadHotRank({ silent: true }));
+scheduleVisiblePoll("watchlist refresh", 60 * 1000, () => {
+  if (state.currentView === "watch") return loadWatchlist({ silent: true });
+  return null;
+});
+scheduleVisiblePoll("signals refresh", 60 * 1000, () => {
+  if (state.currentView === "signals") return refreshAll({ keepPage: true });
+  return null;
+});
+scheduleVisiblePoll("oi monitoring refresh", 3 * 60 * 1000, () => {
+  if (state.currentView === "io") return loadIOMonitoring();
+  return null;
+});
+scheduleVisiblePoll("oi age labels", 30 * 1000, updateOiAgeLabels);

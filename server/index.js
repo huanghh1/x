@@ -76,6 +76,27 @@ function requireSensitiveRead(request, response, next) {
   response.status(403).json({ ok: false, error: "sensitive API is only available from localhost" });
 }
 
+async function respondWithServiceJson(response, service, pathname, options = {}, statusCode = 503) {
+  try {
+    response.json(await requestService(service, pathname, options));
+  } catch (error) {
+    response.status(statusCode).json({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function mergeOpenInterestMonitorQueueState(openInterestMonitor, telegramAlertQueue) {
+  if (!openInterestMonitor) return null;
+  const stats = telegramAlertQueue?.stats ?? {};
+  const alertPendingCount = Math.max(0, Number(stats.pending ?? 0)) + Math.max(0, Number(stats.sending ?? 0));
+  return {
+    ...openInterestMonitor,
+    alertPendingCount
+  };
+}
+
 app.get("/api/health", async (_request, response) => {
   try {
     await pingDatabase();
@@ -88,7 +109,10 @@ app.get("/api/health", async (_request, response) => {
       maintenance: services.scheduler?.maintenance ?? null,
       watchRealtime: services.realtime?.watchRealtime ?? null,
       fundingMonitor: services.scheduler?.fundingMonitor ?? null,
-      openInterestMonitor: services.scheduler?.openInterestMonitor ?? null,
+      openInterestMonitor: mergeOpenInterestMonitorQueueState(
+        services.scheduler?.openInterestMonitor,
+        services.scheduler?.telegramAlertQueue
+      ),
       telegram: { ...telegramState(), bot: services.scheduler?.telegramBot ?? null },
       now: new Date().toISOString()
     });
@@ -267,7 +291,7 @@ function runtimeStateErrors(services) {
   return items;
 }
 
-app.get("/api/runtime-logs", async (request, response) => {
+app.get("/api/runtime-logs", requireSensitiveRead, async (request, response) => {
   try {
     const limit = Math.max(20, Math.min(300, Number(request.query.limit) || 120));
     const services = await serviceStates();
@@ -346,35 +370,31 @@ app.delete("/api/runtime-logs", requireLocalMutation, async (request, response) 
 });
 
 app.post("/api/bootstrap", requireLocalMutation, async (_request, response) => {
-  try {
-    response.json(await requestService("crawler", "/internal/bootstrap", { method: "POST", body: "{}" }));
-  } catch (error) {
-    response.status(503).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
-  }
+  await respondWithServiceJson(response, "crawler", "/internal/bootstrap", { method: "POST", body: "{}" });
 });
 
 app.post("/api/crawl/start", requireLocalMutation, async (_request, response) => {
-  response.json(await requestService("crawler", "/internal/crawl/start", { method: "POST", body: "{}" }));
+  await respondWithServiceJson(response, "crawler", "/internal/crawl/start", { method: "POST", body: "{}" });
 });
 
 app.post("/api/crawl/stop", requireLocalMutation, async (_request, response) => {
-  response.json(await requestService("crawler", "/internal/crawl/stop", { method: "POST", body: "{}" }));
+  await respondWithServiceJson(response, "crawler", "/internal/crawl/stop", { method: "POST", body: "{}" });
 });
 
 app.post("/api/kline-audit", requireLocalMutation, async (_request, response) => {
-  response.json(await requestService("crawler", "/internal/kline/audit", {
+  await respondWithServiceJson(response, "crawler", "/internal/kline/audit", {
     method: "POST",
     body: "{}",
     timeoutMs: 60_000
-  }));
+  });
 });
 
 app.post("/api/kline-tails", requireLocalMutation, async (_request, response) => {
-  response.json(await requestService("crawler", "/internal/kline/tails", {
+  await respondWithServiceJson(response, "crawler", "/internal/kline/tails", {
     method: "POST",
     body: "{}",
     timeoutMs: 10 * 60 * 1000
-  }));
+  });
 });
 
 app.get("/api/kline-health", async (_request, response) => {
@@ -410,7 +430,10 @@ app.get("/api/overview", async (_request, response) => {
     crawler: services.crawler?.crawler ?? null,
     watchRealtime: services.realtime?.watchRealtime ?? null,
     fundingMonitor: services.scheduler?.fundingMonitor ?? null,
-    openInterestMonitor: services.scheduler?.openInterestMonitor ?? null,
+    openInterestMonitor: mergeOpenInterestMonitorQueueState(
+      services.scheduler?.openInterestMonitor,
+      services.scheduler?.telegramAlertQueue
+    ),
     tokenUnlock: services.scheduler?.tokenUnlock ?? null,
     telegram: { ...telegramState(), bot: services.scheduler?.telegramBot ?? null },
     database: "connected"
@@ -796,11 +819,11 @@ app.get("/api/watchlist/:symbol/unlock", async (request, response) => {
 });
 
 app.post("/api/watchlist/unlock/refresh", requireLocalMutation, async (_request, response) => {
-  response.json(await requestService("scheduler", "/internal/unlock/check", {
+  await respondWithServiceJson(response, "scheduler", "/internal/unlock/check", {
     method: "POST",
     body: "{}",
     timeoutMs: 60_000
-  }));
+  });
 });
 
 function sanitizeSymbol(value) {
@@ -999,7 +1022,7 @@ async function handleOpenInterestMonitoring(request, response) {
       })),
       timeWindow,
       sort,
-      monitor: scheduler?.openInterestMonitor ?? null
+      monitor: mergeOpenInterestMonitorQueueState(scheduler?.openInterestMonitor, scheduler?.telegramAlertQueue)
     });
   } catch (error) {
     console.error("get oi monitoring failed", error);

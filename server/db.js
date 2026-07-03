@@ -4,6 +4,8 @@ import { config } from "./config.js";
 import { evaluateOpenInterestSpike } from "./openInterestSpike.js";
 import { resolveBestAlertLevel, resolveSignalProfile, SIGNAL_PRIORITY } from "./signalPriority.js";
 
+const KLINE_COMPLETION_INTERVALS = ["15m", "1h", "4h", "1d"];
+
 let pool;
 let databaseInitPromise;
 
@@ -1073,24 +1075,55 @@ export async function markTokenPartial(tokenId, error) {
 }
 
 export async function refreshTokenFetchState(tokenId) {
-  const [counts] = await getPool().query(
-    `SELECT COUNT(DISTINCT interval_code) AS intervalCount
-     FROM kline_cache
-     WHERE token_id=:tokenId`,
-    { tokenId }
+  const intervalRowsSql = KLINE_COMPLETION_INTERVALS
+    .map((_, index) => `SELECT :interval${index} AS interval_code, :targetStart${index} AS target_start_time, :targetEnd${index} AS target_end_time`)
+    .join(" UNION ALL ");
+  const params = { tokenId };
+  KLINE_COMPLETION_INTERVALS.forEach((intervalCode, index) => {
+    const target = klineCompletionTarget(intervalCode);
+    params[`interval${index}`] = intervalCode;
+    params[`targetStart${index}`] = target.targetStartTime;
+    params[`targetEnd${index}`] = target.targetEndTime;
+  });
+  const [rows] = await getPool().query(
+    `SELECT intervals.interval_code AS intervalCode,
+      COUNT(k.id) AS cachedCount,
+      MIN(k.open_time) AS earliestOpenTime,
+      MAX(k.open_time) AS latestOpenTime,
+      MAX(a.first_open_time) AS firstAvailableOpenTime
+     FROM token_list t
+     JOIN (${intervalRowsSql}) intervals
+     LEFT JOIN kline_cache k FORCE INDEX (idx_kline_token_interval_time)
+       ON k.token_id=t.id
+      AND k.interval_code=intervals.interval_code
+      AND k.open_time >= intervals.target_start_time
+      AND k.open_time <= intervals.target_end_time
+     LEFT JOIN kline_availability a
+       ON a.symbol=t.symbol
+      AND a.interval_code=intervals.interval_code
+     WHERE t.id=:tokenId
+     GROUP BY intervals.interval_code
+     ORDER BY FIELD(intervals.interval_code, '15m','1h','4h','1d')`,
+    params
   );
-  const intervalCount = Number(counts[0]?.intervalCount ?? 0);
+  const completion = summarizeTokenKlineCompletion(rows);
   await getPool().query(
     `UPDATE token_list
-     SET fetched_interval_count=:intervalCount,
-         fetch_status=IF(:intervalCount >= total_interval_count, 'completed', IF(:intervalCount > 0, 'partial', fetch_status)),
+     SET fetched_interval_count=:fetchedIntervalCount,
+         fetch_status=:fetchStatus,
          current_interval=NULL,
-         cache_completed_at=IF(:intervalCount >= total_interval_count, NOW(3), cache_completed_at),
-         cache_policy_key=IF(:intervalCount >= total_interval_count, :cachePolicyKey, cache_policy_key)
+         cache_completed_at=IF(:completed, NOW(3), NULL),
+         cache_policy_key=IF(:completed, :cachePolicyKey, NULL)
      WHERE id=:tokenId`,
-    { tokenId, intervalCount, cachePolicyKey: config.crawler.cachePolicyKey }
+    {
+      tokenId,
+      fetchedIntervalCount: completion.fetchedIntervalCount,
+      fetchStatus: completion.fetchStatus,
+      completed: completion.completed ? 1 : 0,
+      cachePolicyKey: config.crawler.cachePolicyKey
+    }
   );
-  return intervalCount;
+  return completion.fetchedIntervalCount;
 }
 
 export async function klineStats(symbol, intervalCode) {
@@ -1120,9 +1153,85 @@ function intervalMs(intervalCode) {
   }[intervalCode] ?? 60 * 60 * 1000;
 }
 
-function latestClosedKlineOpenTime(intervalCode) {
+function latestClosedKlineOpenTimeAt(intervalCode, now = Date.now()) {
   const ms = intervalMs(intervalCode);
-  return Math.floor(Date.now() / ms) * ms - ms;
+  return Math.floor(Number(now) / ms) * ms - ms;
+}
+
+function latestClosedKlineOpenTime(intervalCode) {
+  return latestClosedKlineOpenTimeAt(intervalCode);
+}
+
+function klineCompletionTarget(intervalCode, retentionLimits = config.crawler.retentionLimits, now = Date.now()) {
+  const expectedCount = Math.max(200, Number(retentionLimits?.[intervalCode]) || 200);
+  const targetEndTime = latestClosedKlineOpenTimeAt(intervalCode, now);
+  return {
+    expectedCount,
+    targetEndTime,
+    targetStartTime: targetEndTime - (expectedCount - 1) * intervalMs(intervalCode)
+  };
+}
+
+function nullableNumber(value) {
+  if (value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function summarizeTokenKlineCompletion(rows = [], {
+  retentionLimits = config.crawler.retentionLimits,
+  now = Date.now()
+} = {}) {
+  const rowByInterval = new Map(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => [normalizeIntervalCode(row?.intervalCode ?? row?.interval_code), row])
+      .filter(([intervalCode]) => intervalCode)
+  );
+  let fetchedIntervalCount = 0;
+  let completeIntervalCount = 0;
+  const incompleteIntervals = [];
+
+  for (const intervalCode of KLINE_COMPLETION_INTERVALS) {
+    const row = rowByInterval.get(intervalCode) ?? {};
+    const cachedCount = Math.max(0, Number(row.cachedCount ?? row.cached_count ?? 0) || 0);
+    const earliestOpenTime = nullableNumber(row.earliestOpenTime ?? row.earliest_open_time);
+    const latestOpenTime = nullableNumber(row.latestOpenTime ?? row.latest_open_time);
+    const firstAvailableOpenTime = nullableNumber(row.firstAvailableOpenTime ?? row.first_available_open_time);
+    const target = klineCompletionTarget(intervalCode, retentionLimits, now);
+    const hasRows = cachedCount > 0;
+    if (hasRows) fetchedIntervalCount += 1;
+    const naturalHistoryShortfall = isNaturalKlineHistoryShortfall({
+      cachedCount,
+      expectedCount: target.expectedCount,
+      earliestOpenTime,
+      firstAvailableOpenTime,
+      targetStartTime: target.targetStartTime,
+      intervalMsValue: intervalMs(intervalCode)
+    });
+    const hasFreshTail = latestOpenTime !== null && latestOpenTime >= target.targetEndTime;
+    const hasTargetCoverage = cachedCount >= target.expectedCount || naturalHistoryShortfall;
+    if (hasRows && hasFreshTail && hasTargetCoverage) {
+      completeIntervalCount += 1;
+    } else {
+      incompleteIntervals.push({
+        intervalCode,
+        cachedCount,
+        expectedCount: target.expectedCount,
+        latestOpenTime,
+        targetEndTime: target.targetEndTime,
+        naturalHistoryShortfall
+      });
+    }
+  }
+
+  const completed = completeIntervalCount >= KLINE_COMPLETION_INTERVALS.length;
+  return {
+    fetchedIntervalCount,
+    completeIntervalCount,
+    completed,
+    fetchStatus: completed ? "completed" : (fetchedIntervalCount > 0 ? "partial" : "pending"),
+    incompleteIntervals
+  };
 }
 
 function normalizeIntervalCode(value) {
@@ -1423,6 +1532,7 @@ export async function cleanupExpiredData() {
   const hotRankDays = Math.max(1, Number(config.maintenance.hotRankRetentionDays) || 7);
   const ioDays = Math.max(1, Number(config.maintenance.ioRetentionDays) || 7);
   const oiSampleDays = Math.max(2, Number(config.openInterestMonitor.sampleRetentionDays) || 3);
+  // trade_event_history is the durable archive for API-limited trade analysis data; do not expire it here.
   const [triggerHistory, hotSnapshots, staleHotRows, staleOpenInterest, staleOpenInterestSamples, staleTelegramAlerts, staleUnlocks] = await Promise.all([
     cleanupTriggerHistoryRetention(),
     deleteInBatches(

@@ -7,8 +7,30 @@ import {
   normalizeFundingIntervalSnapshotItems,
   normalizeHotRankSeenTokens,
   normalizeOptionalLimit,
-  selectOpenInterestSampleBaselines
+  selectOpenInterestSampleBaselines,
+  summarizeTokenKlineCompletion
 } from "./db.js";
+
+const completionIntervals = ["15m", "1h", "4h", "1d"];
+const completionRetentionLimits = { "15m": 200, "1h": 200, "4h": 200, "1d": 200 };
+
+function intervalMs(intervalCode) {
+  return {
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000
+  }[intervalCode];
+}
+
+function completionTarget(intervalCode, now, expectedCount = 200) {
+  const ms = intervalMs(intervalCode);
+  const targetEndTime = Math.floor(now / ms) * ms - ms;
+  return {
+    targetEndTime,
+    targetStartTime: targetEndTime - (expectedCount - 1) * ms
+  };
+}
 
 test("optional query limits keep null unbounded instead of coercing it to LIMIT 1", () => {
   assert.equal(normalizeOptionalLimit(null), null);
@@ -146,4 +168,56 @@ test("tail kline gaps are detected when latest cached candle is stale", () => {
 
   assert.equal(detectKlineTailGap(targetEndTime, targetEndTime, intervalMs), null);
   assert.equal(detectKlineTailGap(null, targetEndTime, intervalMs), null);
+});
+
+test("token kline completion requires target coverage and a fresh tail", () => {
+  const now = Date.UTC(2026, 0, 1, 12, 30);
+  const completeRows = completionIntervals.map((intervalCode) => {
+    const target = completionTarget(intervalCode, now);
+    return {
+      intervalCode,
+      cachedCount: 200,
+      earliestOpenTime: target.targetStartTime,
+      latestOpenTime: target.targetEndTime
+    };
+  });
+
+  assert.deepEqual(
+    summarizeTokenKlineCompletion(completeRows, { now, retentionLimits: completionRetentionLimits }).fetchStatus,
+    "completed"
+  );
+
+  const sparseRows = completionIntervals.map((intervalCode) => {
+    const target = completionTarget(intervalCode, now);
+    return {
+      intervalCode,
+      cachedCount: 1,
+      earliestOpenTime: target.targetEndTime,
+      latestOpenTime: target.targetEndTime
+    };
+  });
+  const sparseSummary = summarizeTokenKlineCompletion(sparseRows, { now, retentionLimits: completionRetentionLimits });
+  assert.equal(sparseSummary.fetchStatus, "partial");
+  assert.equal(sparseSummary.fetchedIntervalCount, 4);
+  assert.equal(sparseSummary.completeIntervalCount, 0);
+});
+
+test("token kline completion accepts natural history shortfall for newly listed symbols", () => {
+  const now = Date.UTC(2026, 0, 1, 12, 30);
+  const naturalRows = completionIntervals.map((intervalCode) => {
+    const ms = intervalMs(intervalCode);
+    const target = completionTarget(intervalCode, now);
+    const firstAvailableOpenTime = target.targetStartTime + 10 * ms;
+    return {
+      intervalCode,
+      cachedCount: 190,
+      earliestOpenTime: firstAvailableOpenTime,
+      latestOpenTime: target.targetEndTime,
+      firstAvailableOpenTime
+    };
+  });
+  const summary = summarizeTokenKlineCompletion(naturalRows, { now, retentionLimits: completionRetentionLimits });
+
+  assert.equal(summary.fetchStatus, "completed");
+  assert.equal(summary.completeIntervalCount, 4);
 });

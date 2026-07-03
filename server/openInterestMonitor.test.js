@@ -6,7 +6,10 @@ import {
   buildOpenInterestSnapshotFromSample,
   effectiveOpenInterestScanLimit,
   isOpenInterestHistoryUnavailable,
-  selectScanBatch
+  markOpenInterestHistoryBootstrapAttempt,
+  resetOpenInterestHistoryBootstrapAttempts,
+  selectScanBatch,
+  shouldAttemptOpenInterestHistoryBootstrap
 } from "./openInterestMonitor.js";
 
 test("buildOpenInterestSnapshot computes changes from aligned 5-minute history", () => {
@@ -86,6 +89,43 @@ test("OI history 403 is treated as endpoint unavailable", () => {
     true
   );
   assert.equal(isOpenInterestHistoryUnavailable(new Error("BTCUSDT open interest history HTTP 500")), false);
+});
+
+test("OI history bootstrap can retry after the configured cooldown", () => {
+  const originalRetryMs = config.openInterestMonitor.historyBootstrapRetryMs;
+  config.openInterestMonitor.historyBootstrapRetryMs = 60_000;
+  resetOpenInterestHistoryBootstrapAttempts();
+
+  try {
+    assert.equal(shouldAttemptOpenInterestHistoryBootstrap("BTCUSDT", 1_000_000), true);
+
+    markOpenInterestHistoryBootstrapAttempt("BTCUSDT", { now: 1_000_000 });
+
+    assert.equal(shouldAttemptOpenInterestHistoryBootstrap("BTCUSDT", 1_059_999), false);
+    assert.equal(shouldAttemptOpenInterestHistoryBootstrap("BTCUSDT", 1_060_000), true);
+  } finally {
+    config.openInterestMonitor.historyBootstrapRetryMs = originalRetryMs;
+    resetOpenInterestHistoryBootstrapAttempts();
+  }
+});
+
+test("OI history bootstrap waits longer after an unavailable history endpoint", () => {
+  const originalRetryMs = config.openInterestMonitor.historyBootstrapRetryMs;
+  const originalUnavailableRetryMs = config.openInterestMonitor.historyUnavailableRetryMs;
+  config.openInterestMonitor.historyBootstrapRetryMs = 60_000;
+  config.openInterestMonitor.historyUnavailableRetryMs = 300_000;
+  resetOpenInterestHistoryBootstrapAttempts();
+
+  try {
+    markOpenInterestHistoryBootstrapAttempt("ETHUSDT", { unavailable: true, now: 2_000_000 });
+
+    assert.equal(shouldAttemptOpenInterestHistoryBootstrap("ETHUSDT", 2_060_000), false);
+    assert.equal(shouldAttemptOpenInterestHistoryBootstrap("ETHUSDT", 2_300_000), true);
+  } finally {
+    config.openInterestMonitor.historyBootstrapRetryMs = originalRetryMs;
+    config.openInterestMonitor.historyUnavailableRetryMs = originalUnavailableRetryMs;
+    resetOpenInterestHistoryBootstrapAttempts();
+  }
 });
 
 test("selectScanBatch scans the full token universe for current OI samples", () => {

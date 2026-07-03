@@ -26,7 +26,7 @@ const OI_WINDOW_ORDER = ["5m", "1h", "4h", "1d"];
 
 let timer = null;
 const retryQueue = new Set();
-const historyBootstrapAttempted = new Set();
+const historyBootstrapAttempts = new Map();
 
 const monitorState = {
   running: false,
@@ -133,6 +133,34 @@ export function isOpenInterestHistoryUnavailable(error) {
   return /\bopen interest history HTTP 403\b/i.test(message);
 }
 
+export function resetOpenInterestHistoryBootstrapAttempts() {
+  historyBootstrapAttempts.clear();
+}
+
+export function markOpenInterestHistoryBootstrapAttempt(symbol, { unavailable = false, now = Date.now() } = {}) {
+  const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  const attemptedAt = Number(now);
+  if (!safeSymbol || !Number.isFinite(attemptedAt)) return false;
+  historyBootstrapAttempts.set(safeSymbol, {
+    attemptedAt,
+    unavailable: Boolean(unavailable)
+  });
+  return true;
+}
+
+export function shouldAttemptOpenInterestHistoryBootstrap(symbol, now = Date.now()) {
+  const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  if (!safeSymbol) return false;
+  const previous = historyBootstrapAttempts.get(safeSymbol);
+  if (!previous) return true;
+  const attemptedAt = Number(previous.attemptedAt);
+  if (!Number.isFinite(attemptedAt)) return true;
+  const retryMs = previous.unavailable
+    ? config.openInterestMonitor.historyUnavailableRetryMs
+    : config.openInterestMonitor.historyBootstrapRetryMs;
+  return Number(now) - attemptedAt >= retryMs;
+}
+
 export function buildOpenInterestSnapshot(symbol, rows) {
   const latest = rows.at(-1);
   if (!latest) return null;
@@ -197,7 +225,7 @@ async function buildCachedOpenInterestSnapshot(sample) {
 }
 
 async function bootstrapOpenInterestHistorySamples(symbol) {
-  if (historyBootstrapAttempted.has(symbol)) return { attempted: false, count: 0 };
+  if (!shouldAttemptOpenInterestHistoryBootstrap(symbol)) return { attempted: false, count: 0 };
   let rows;
   try {
     rows = await fetchOpenInterestHistory({
@@ -206,7 +234,9 @@ async function bootstrapOpenInterestHistorySamples(symbol) {
       limit: config.openInterestMonitor.historyLimit
     });
   } catch (error) {
-    if (isOpenInterestHistoryUnavailable(error)) historyBootstrapAttempted.add(symbol);
+    if (isOpenInterestHistoryUnavailable(error)) {
+      markOpenInterestHistoryBootstrapAttempt(symbol, { unavailable: true });
+    }
     throw error;
   }
   const samples = rows.map((row) => ({
@@ -217,7 +247,7 @@ async function bootstrapOpenInterestHistorySamples(symbol) {
     source: "history"
   }));
   await upsertOpenInterestSamples(samples);
-  historyBootstrapAttempted.add(symbol);
+  markOpenInterestHistoryBootstrapAttempt(symbol);
   return { attempted: true, count: samples.length };
 }
 
@@ -241,7 +271,7 @@ async function scanToken(token, { markPrices = new Map(), claimHistoryBootstrap 
   let historyBootstrap = { attempted: false, count: 0 };
   let historyBootstrapError = null;
   let historyBootstrapDeferred = false;
-  if (snapshotNeedsHistoryBootstrap(snapshot) && !historyBootstrapAttempted.has(token.symbol)) {
+  if (snapshotNeedsHistoryBootstrap(snapshot) && shouldAttemptOpenInterestHistoryBootstrap(token.symbol)) {
     if (!claimHistoryBootstrap()) {
       historyBootstrapDeferred = true;
     } else {
@@ -364,6 +394,8 @@ export function getOpenInterestMonitorState() {
     spike4hPct: config.openInterestMonitor.spike4hPct,
     spike1dPct: config.openInterestMonitor.spike1dPct,
     retryDelayMs: config.openInterestMonitor.retryDelayMs,
+    historyBootstrapRetryMs: config.openInterestMonitor.historyBootstrapRetryMs,
+    historyUnavailableRetryMs: config.openInterestMonitor.historyUnavailableRetryMs,
     sampleRetentionDays: config.openInterestMonitor.sampleRetentionDays,
     standaloneAlertEnabled: config.openInterestMonitor.standaloneAlertEnabled,
     ...monitorState

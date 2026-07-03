@@ -1,23 +1,31 @@
 import dotenv from "dotenv";
 
-dotenv.config({ path: ".env.local" });
-dotenv.config();
+dotenv.config({ path: ".env.local", quiet: true });
+dotenv.config({ quiet: true });
 
-function numberEnv(name, fallback) {
-  const value = Number(process.env[name]);
+export function numberEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const text = String(raw).trim();
+  if (!text) return fallback;
+  const value = Number(text);
   return Number.isFinite(value) ? value : fallback;
 }
 
-function boolEnv(name, fallback) {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  return value === "true";
+export function boolEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = String(raw).trim().toLowerCase();
+  if (!value) return fallback;
+  if (["true", "1", "yes", "y", "on"].includes(value)) return true;
+  if (["false", "0", "no", "n", "off"].includes(value)) return false;
+  return fallback;
 }
 
-function listEnv(name, fallback = []) {
+export function listEnv(name, fallback = []) {
   const value = process.env[name];
-  if (value === undefined) return fallback;
-  return value
+  if (value === undefined || !String(value).trim()) return fallback;
+  return String(value)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
@@ -199,6 +207,14 @@ export const config = {
     requestLimitPerWindow: Math.max(1, Math.min(1000, numberEnv("OPEN_INTEREST_REQUEST_LIMIT_PER_5M", 900))),
     retryDelayMs: Math.max(5 * 1000, numberEnv("OPEN_INTEREST_RETRY_DELAY_MS", 30 * 1000)),
     historyLimit: Math.max(289, Math.min(500, numberEnv("OPEN_INTEREST_HISTORY_LIMIT", 289))),
+    historyBootstrapRetryMs: Math.max(
+      5 * 60 * 1000,
+      numberEnv("OPEN_INTEREST_HISTORY_BOOTSTRAP_RETRY_MS", 30 * 60 * 1000)
+    ),
+    historyUnavailableRetryMs: Math.max(
+      30 * 60 * 1000,
+      numberEnv("OPEN_INTEREST_HISTORY_UNAVAILABLE_RETRY_MS", 6 * 60 * 60 * 1000)
+    ),
     sampleRetentionDays: Math.max(2, numberEnv("OPEN_INTEREST_SAMPLE_RETENTION_DAYS", 3)),
     spike5mPct: numberEnv("OPEN_INTEREST_SPIKE_5M_PCT", 2),
     spike1hPct: numberEnv("OPEN_INTEREST_SPIKE_1H_PCT", 10),

@@ -44,7 +44,7 @@ function isoNow() {
 }
 
 export function hasReliableFundingIntervalSnapshot(fundingInfo, currentRates) {
-  return Array.isArray(fundingInfo) && Array.isArray(currentRates) && (fundingInfo.length > 0 || currentRates.length > 0);
+  return Array.isArray(fundingInfo) && fundingInfo.length > 0 && Array.isArray(currentRates);
 }
 
 function scheduleNextScan(delayMs) {
