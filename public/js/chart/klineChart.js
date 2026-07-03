@@ -127,6 +127,57 @@ export function chartKlineLength(payload) {
   return chartKlines(payload).length;
 }
 
+function averageRecent(values, size) {
+  if (values.length < size) return null;
+  const slice = values.slice(-size);
+  return slice.reduce((sum, value) => sum + value, 0) / size;
+}
+
+export function updateChartKline(symbol, interval, kline) {
+  const key = `${symbol}|${interval}`;
+  state.realtimeKlines.set(key, kline);
+  const payload = state.chartCache.get(key);
+  if (!payload?.klines?.length) return;
+  const next = {
+    openTime: Number(kline.t),
+    closeTime: Number(kline.T),
+    open: Number(kline.o),
+    high: Number(kline.h),
+    low: Number(kline.l),
+    close: Number(kline.c),
+    volume: Number(kline.v),
+    isOpen: !Boolean(kline.x)
+  };
+  if (!Number.isFinite(next.openTime) || !Number.isFinite(next.close)) return;
+  const klines = payload.klines;
+  const last = klines.at(-1);
+  if (last && last.openTime === next.openTime) {
+    Object.assign(last, next);
+  } else if (!last || next.openTime > last.openTime) {
+    next.gapBefore = last
+      ? Math.round((next.openTime - Number(last.openTime)) / intervalMsFromCode(interval)) > 1
+      : false;
+    klines.push(next);
+    if (klines.length > 6000) klines.shift();
+    payload._chartKlines = null;
+    const settings = state.chartState.get(key);
+    if (settings) {
+      const length = chartKlineLength(payload);
+      settings.start = Math.max(0, length - settings.visible);
+    }
+  } else {
+    return;
+  }
+  const closes = klines.map((item) => item.close).filter(Number.isFinite);
+  const target = klines.at(-1);
+  target.ma100 = averageRecent(closes, 100);
+  target.ma200 = averageRecent(closes, 200);
+  payload.hasCurrentKline = Boolean(target.isOpen);
+  payload.currentKlineOpenTime = target.isOpen ? target.openTime : null;
+  payload._chartKlines = null;
+  drawChartForKey(key);
+}
+
 function tokenCodexKey(symbol, intervalCode, promptTemplate = state.tokenCodexTemplate) {
   return `${String(symbol ?? "").toUpperCase()}|${intervalCode || "1h"}|${normalizeTokenCodexTemplate(promptTemplate)}`;
 }
@@ -169,7 +220,7 @@ function buildYokaiResearchPrompt(symbol, intervalCode) {
   return [
     `请帮我对 ${safeSymbol}（base asset: ${baseAsset}）做一次“妖币 / 庄控风险”排查。`,
     "",
-    "先确认币种身份：Binance 合约 symbol、是否 Binance Alpha、是否有现货、是否有合约、主要链、合约地址、DEX 池子、market cap / FDV / liquidity / volume。仅靠 symbol 可能重名，必须优先用合约地址或 Binance/DEX 页面交叉确认。",
+    "先确认币种身份：看看是否上了币安alpha和币安合约，却没有上币安现货的，检查其他主流平台有没有也上了现货",
     "",
     "核心检查维度：",
     "1. 筹码集中：Top10 holder 占比、Top holder 类型、是否需要排除 CEX 热钱包、LP、staking、bridge、项目锁仓或做市地址。",

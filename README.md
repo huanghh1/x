@@ -72,6 +72,24 @@ pm2 stop ecosystem.config.cjs
 pm2 delete ecosystem.config.cjs
 ```
 
+## 项目结构与数据库
+
+前端入口仍是 `public/index.html`、`public/app.js` 和 `public/styles.css`，但页面逻辑已经拆到 `public/js/`：
+
+- `public/js/api.js`：统一 API 请求和 mutation token 处理。
+- `public/js/state.js`：前端共享状态。
+- `public/js/constants.js`：前端常量。
+- `public/js/utils/`：DOM 与格式化工具。
+- `public/js/components/`：自定义选择器。
+- `public/js/chart/`：K 线图表与图表内 Codex 分析。
+- `public/js/pages/`：交易分析、交易总结、触发历史、运行日志页面模块。
+
+样式由 `public/styles.css` 汇总拆分后的 `public/styles/` 文件：`base.css`、`workbench.css`、`theme.css`、`monitoring.css`、`trade-journal.css`。
+
+后端数据库入口仍是 `server/db.js`，具体仓库逻辑拆在 `server/db/`：连接和迁移在 `connection.js`，其余按业务分为 signal、K 线、热度、资金费率、OI、关注池、触发历史、交易历史、交易总结和 Telegram 队列。运行时会自动创建数据库和迁移字段；`schema.sql` 与 `server/db/connection.js` 中的建表结构应保持一致。
+
+当前数据库共 19 张业务表：`token_list`、`kline_cache`、`kline_availability`、`signal_result`、`maintenance_state`、`hot_rank_seen`、`watchlist`、`hot_ma_signal_alert`、`multi_cycle_history`、`funding_interval_state`、`signal_trigger_history`、`trade_event_history`、`open_interest_monitor`、`open_interest_sample`、`telegram_alert_queue`、`hot_rank_snapshot`、`token_unlock_cache`、`trade_journal`、`trade_journal_intraday_notes`。
+
 ## 核心规则
 
 - 目标代币分两类：A 类为 Alpha + 合约 + 无现货；B 类为现货 + 合约。
@@ -316,10 +334,33 @@ MOBULA_API_KEY=你的API密钥
 - `POST /api/crawl/start`：启动抓取。
 - `POST /api/crawl/stop`：暂停抓取。
 - `POST /api/kline-audit`：立即盘点全部活跃代币并把缺失 K 线重新入队。
+- `POST /api/kline-tails`：手动触发一轮最新尾部 K 线补齐。
+- `GET /api/kline-health`：完整 K 线完整性检查。
+- `GET /api/kline-tail-health`：最新尾部 K 线追赶状态。
 - `POST /api/funding-interval/check`：手动触发一次资金费率结算周期扫描。
+- `POST /api/open-interest/check`：手动触发一次 OI 扫描。
 - `GET /api/overview`：统计、分类缓存、当前抓取进度。
-- `GET /api/signals?category=A`：A/B 分类信号列表。
+- `GET /api/signals?category=A`：旧版 A/B 分类信号列表。
+- `GET /api/signals?categories=A,B&levels=LEVEL1,LEVEL2&intervals=15m,1h,4h,1d&page=1&pageSize=20`：页面使用的分页组合信号列表。
+- `GET /api/hot-ma-signals`：Telegram/接口用的热门均线信号分页。
+- `GET /api/multi-history`：多周期触发历史。
+- `GET /api/klines`：读取某个交易对某周期的数据库 K 线，必要时会请求 crawler 补齐。
+- `GET /api/hot-rank`：综合热度排行。
 - `GET /api/funding-rate-tokens`：当前 1 小时资金费率代币及关联信号。
-- `GET /api/oi-monitoring`：按 `5m/15m/1h/4h/1d`、分页和升降序查看 OI；`/api/io-monitoring` 保留兼容。
+- `GET /api/oi-monitoring`、`GET /api/io-monitoring`：按 `5m/15m/1h/4h/1d`、分页和升降序查看 OI；后者保留兼容。
+- `GET /api/watchlist`：关注池列表。
+- `GET /api/watchlist/events`：关注池实时事件流。
+- `POST /api/watchlist`：新增或更新关注项；本机或 `API_MUTATION_TOKEN` 保护。
+- `DELETE /api/watchlist/:symbol`：删除关注项；本机或 `API_MUTATION_TOKEN` 保护。
+- `POST /api/watchlist/unlock/refresh`：刷新关注池解锁日期；本机或 `API_MUTATION_TOKEN` 保护。
+- `GET /api/trade-analysis`：交易分析快照或同步结果；本机或 `API_MUTATION_TOKEN` 保护。
+- `POST /api/trade-analysis/codex`：生成交易复盘；本机或 `API_MUTATION_TOKEN` 保护。
+- `POST /api/token-analysis/codex`：生成图表代币分析；本机或 `API_MUTATION_TOKEN` 保护。
+- `GET /api/trade-journal`、`GET /api/trade-journal/:id`：读取交易总结；本机或 `API_MUTATION_TOKEN` 保护。
+- `POST /api/trade-journal`、`PUT /api/trade-journal/:id`、`POST /api/trade-journal/:id/intraday-notes`、`DELETE /api/trade-journal/:id`：写入交易总结；本机或 `API_MUTATION_TOKEN` 保护。
 - `GET /api/trigger-history`：统一触发历史，支持类型筛选和分页。
+- `DELETE /api/trigger-history`、`DELETE /api/trigger-history/:id`：清理触发历史；本机或 `API_MUTATION_TOKEN` 保护。
+- `GET /api/runtime-logs`：读取 PM2 和服务运行日志；本机或 `API_MUTATION_TOKEN` 保护。
+- `DELETE /api/runtime-logs`：清理运行日志；本机或 `API_MUTATION_TOKEN` 保护。
 - `GET /api/watchlist/:symbol/unlock`：关注代币解锁缓存。
+- `GET /open/binance`、`GET /open/tradingview`：移动端 App 深链跳转页。

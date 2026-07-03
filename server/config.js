@@ -83,7 +83,6 @@ const connectionLimit = numberEnv(
 );
 
 export const config = {
-  port: numberEnv("PORT", 8787),
   service: {
     role: serviceRole,
     host: process.env.SERVICE_HOST?.trim() || "127.0.0.1",

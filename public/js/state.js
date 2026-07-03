@@ -1,5 +1,9 @@
 import { ALL_CATEGORIES, ALL_INTERVALS, TOKEN_CODEX_PROMPT_TEMPLATE } from "./constants.js";
 
+const previewMode = typeof window !== "undefined" && window.location
+  ? new URLSearchParams(window.location.search).get("preview") === "true"
+  : false;
+
 export const state = {
   categories: new Set(ALL_CATEGORIES),
   levels: new Set(["LEVEL1", "LEVEL2"]),
@@ -113,5 +117,5 @@ export const state = {
   watchRealtimeReconnectTimer: null,
   watchlistRenderSignature: "",
   bootstrapped: false,
-  previewMode: new URLSearchParams(window.location.search).get("preview") === "true"
+  previewMode
 };
