@@ -141,6 +141,9 @@ export function crawlerDetailText(crawler = {}) {
   const parts = [];
   if (crawler.lastError) parts.push(crawler.lastError);
   else if (crawler.lastAction) parts.push(crawler.lastAction);
+  if (!crawler.lastError && Number(crawler.tailRefresh?.errorCount ?? 0) > 0) {
+    parts.push(`快速追尾失败 ${crawler.tailRefresh.errorCount} 次`);
+  }
   if (crawler.running && Number(crawler.processedTokenCount ?? 0) > 0) {
     parts.push(`本轮已处理 ${crawler.processedTokenCount} 个`);
   }

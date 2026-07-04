@@ -81,12 +81,16 @@ pm2 delete ecosystem.config.cjs
 - `public/js/constants.js`：前端常量。
 - `public/js/utils/`：DOM 与格式化工具。
 - `public/js/components/`：自定义选择器。
+- `public/js/ui/`：跨页面复用的交易对操作按钮和复制逻辑。
 - `public/js/chart/`：K 线图表与图表内 Codex 分析。
-- `public/js/pages/`：交易分析、交易总结、触发历史、运行日志页面模块。
+- `public/js/pages/`：均线信号、热度排行、资金费率、OI 监控、关注池、交易分析、交易总结、触发历史、运行日志页面模块。
+- `public/js/realtime/`：前端实时行情订阅和价格/K 线推送分发。
 
 样式由 `public/styles.css` 汇总拆分后的 `public/styles/` 文件：`base.css`、`workbench.css`、`theme.css`、`monitoring.css`、`trade-journal.css`。
 
 后端数据库入口仍是 `server/db.js`，具体仓库逻辑拆在 `server/db/`：连接和迁移在 `connection.js`，其余按业务分为 signal、K 线、热度、资金费率、OI、关注池、触发历史、交易历史、交易总结和 Telegram 队列。运行时会自动创建数据库和迁移字段；`schema.sql` 与 `server/db/connection.js` 中的建表结构应保持一致。
+
+后端公开 API 入口仍是 `server/index.js`，但具体路由已拆到 `server/api/`：按 health、crawler、K 线、热度、信号、关注池、资金费/OI、交易分析、交易总结、触发历史和 App 深链分组，鉴权中间件在 `server/api/middleware/`。
 
 当前数据库共 19 张业务表：`token_list`、`kline_cache`、`kline_availability`、`signal_result`、`maintenance_state`、`hot_rank_seen`、`watchlist`、`hot_ma_signal_alert`、`multi_cycle_history`、`funding_interval_state`、`signal_trigger_history`、`trade_event_history`、`open_interest_monitor`、`open_interest_sample`、`telegram_alert_queue`、`hot_rank_snapshot`、`token_unlock_cache`、`trade_journal`、`trade_journal_intraday_notes`。
 
@@ -291,8 +295,8 @@ TELEGRAM_MENU_WARM_INTERVAL_MS=60000
 # 是否启用资金费率结算周期监控
 FUNDING_INTERVAL_MONITOR_ENABLED=true
 
-# 默认每小时扫描一次
-FUNDING_INTERVAL_SCAN_MS=3600000
+# 默认每 5 分钟扫描一次
+FUNDING_INTERVAL_SCAN_MS=300000
 
 # 待确认提醒轮询间隔；真正重复发送时间由上次发送后 5 分钟控制
 FUNDING_INTERVAL_ALERT_POLL_MS=60000

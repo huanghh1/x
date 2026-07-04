@@ -119,6 +119,7 @@ export const config = {
     hotRankCacheMs: numberEnv("BINANCE_HOT_RANK_CACHE_MS", 5 * 60 * 1000),
     requestTimeoutMs: numberEnv("REQUEST_TIMEOUT_MS", 15000),
     requestRetries: numberEnv("BINANCE_REQUEST_RETRIES", 4),
+    klineRequestRetries: numberEnv("BINANCE_KLINE_REQUEST_RETRIES", numberEnv("BINANCE_REQUEST_RETRIES", 4) + 4),
     retryDelayMs: numberEnv("BINANCE_RETRY_DELAY_MS", 1000),
     requestWeightBudgetPerMinute: numberEnv("BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE", 1800)
   },
@@ -191,7 +192,7 @@ export const config = {
   },
   fundingMonitor: {
     enabled: boolEnv("FUNDING_INTERVAL_MONITOR_ENABLED", true),
-    scanIntervalMs: numberEnv("FUNDING_INTERVAL_SCAN_MS", 60 * 60 * 1000),
+    scanIntervalMs: numberEnv("FUNDING_INTERVAL_SCAN_MS", 5 * 60 * 1000),
     alertPollMs: Math.max(10 * 1000, numberEnv("FUNDING_INTERVAL_ALERT_POLL_MS", 60 * 1000)),
     initialDelayMs: numberEnv("FUNDING_INTERVAL_INITIAL_DELAY_MS", 10 * 1000),
     targetIntervalHours: numberEnv("FUNDING_INTERVAL_TARGET_HOURS", 1),

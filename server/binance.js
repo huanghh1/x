@@ -67,7 +67,8 @@ function retryAfterMs(headers) {
 }
 
 function retryDelay(attempt) {
-  return config.binance.retryDelayMs * 2 ** Math.max(0, attempt);
+  const baseDelay = config.binance.retryDelayMs * 2 ** Math.max(0, attempt);
+  return Math.round(baseDelay + Math.random() * baseDelay * 0.25);
 }
 
 function describeFetchError(error) {
@@ -88,7 +89,10 @@ async function fetchJson(url, label, options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), config.binance.requestTimeoutMs);
     try {
-      const response = await fetch(url, { signal: controller.signal });
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Connection: "close", ...(options.headers ?? {}) }
+      });
       requestWeightLimiter.syncFromHeaders(response.headers);
       if (response.ok) return await response.json();
 
@@ -264,7 +268,8 @@ export async function fetchKlinesPaged({ symbol, intervalCode, startTime, endTim
     url.searchParams.set("limit", String(limit));
 
     const page = await fetchJson(url.toString(), `${symbol} ${intervalCode} klines`, {
-      weight: klineRequestWeight(limit)
+      weight: klineRequestWeight(limit),
+      retries: config.binance.klineRequestRetries
     });
     if (!Array.isArray(page) || page.length === 0) break;
     await onPage(page);
@@ -287,7 +292,8 @@ export async function fetchRecentKlines({ symbol, intervalCode, limit = 3 }) {
   url.searchParams.set("interval", intervalCode);
   url.searchParams.set("limit", String(safeLimit));
   const page = await fetchJson(url.toString(), `${symbol} ${intervalCode} recent klines`, {
-    weight: klineRequestWeight(safeLimit)
+    weight: klineRequestWeight(safeLimit),
+    retries: config.binance.klineRequestRetries
   });
   return Array.isArray(page) ? page : [];
 }

@@ -29,6 +29,15 @@ import {
 import { calculateSignal, INTERVALS } from "./ma.js";
 import { sendHotMaSignalTelegram } from "./telegram.js";
 import { resolveBestAlertLevel, resolveSignalProfile } from "./signalPriority.js";
+import {
+  hasNewListItem,
+  hasNewOrUpgradedIntervalSignal,
+  isAlertLevelEntryOrUpgrade,
+  normalizeAlertLevel,
+  parseIntervalLevelSignature,
+  parseKeyValueSignature,
+  parseSignatureList
+} from "./alertState.js";
 
 const crawlerState = {
   running: false,
@@ -47,6 +56,7 @@ const crawlerState = {
   processedTokenCount: 0,
   lastAction: "等待启动",
   lastError: null,
+  lastErrorAt: null,
   startedAt: null,
   lastTokenDelayMs: null,
   tailRefresh: {
@@ -57,7 +67,8 @@ const crawlerState = {
     tokenCount: 0,
     refreshedRows: 0,
     errorCount: 0,
-    lastError: null
+    lastError: null,
+    lastErrorAt: null
   }
 };
 
@@ -110,6 +121,24 @@ async function withRetryableDatabaseOperation(label, operation, attempts = 3) {
 const activeWorkers = new Map();
 const hotMaAlertingSymbols = new Set();
 
+function setCrawlerError(message) {
+  crawlerState.lastError = message;
+  crawlerState.lastErrorAt = new Date().toISOString();
+}
+
+function clearCrawlerError() {
+  crawlerState.lastError = null;
+  crawlerState.lastErrorAt = null;
+}
+
+function isTransientNetworkError(message) {
+  return /(ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|UND_ERR|fetch failed|aborted|timeout|socket|TLS|network)/i.test(String(message ?? ""));
+}
+
+function clearRecoveredNetworkError() {
+  if (isTransientNetworkError(crawlerState.lastError)) clearCrawlerError();
+}
+
 function intervalSortIndex(intervalCode) {
   const index = INTERVALS.indexOf(intervalCode);
   return index === -1 ? INTERVALS.length : index;
@@ -117,6 +146,33 @@ function intervalSortIndex(intervalCode) {
 
 function hasComparableHotMaAlertState(previousAlert) {
   return Boolean(previousAlert?.profileKey && previousAlert?.contextSignature && Number(previousAlert?.sourceMask) > 0);
+}
+
+function parseHotMaAlertSignature(signature, sourceMask = 0) {
+  const state = parseKeyValueSignature(signature);
+  return {
+    sourceMask: Number(sourceMask || state.get("sources") || 0) || 0,
+    level: normalizeAlertLevel(state.get("level")),
+    fundingOneHour: state.get("funding") === "1",
+    hotRank: state.get("hot") === "1",
+    oiSpike: state.get("oi") === "1",
+    oiWindows: parseSignatureList(state.get("oiWindows")),
+    intervals: parseIntervalLevelSignature(state.get("intervals"))
+  };
+}
+
+function hasNewHotMaAlertEntry(previousAlert, alertState = {}) {
+  const previousState = parseHotMaAlertSignature(previousAlert?.contextSignature, previousAlert?.sourceMask);
+  const currentState = parseHotMaAlertSignature(alertState.contextSignature, alertState.sourceMask);
+  return (
+    (currentState.sourceMask & ~previousState.sourceMask) !== 0 ||
+    (!previousState.fundingOneHour && currentState.fundingOneHour) ||
+    (!previousState.hotRank && currentState.hotRank) ||
+    (!previousState.oiSpike && currentState.oiSpike) ||
+    hasNewListItem(currentState.oiWindows, previousState.oiWindows) ||
+    hasNewOrUpgradedIntervalSignal(currentState.intervals, previousState.intervals) ||
+    isAlertLevelEntryOrUpgrade(previousState.level, currentState.level)
+  );
 }
 
 export function buildHotMaSignalAlertState(multiCycleSignals = [], context = {}) {
@@ -168,19 +224,36 @@ export function buildHotMaSignalAlertState(multiCycleSignals = [], context = {})
   };
 }
 
-export function shouldSendHotMaSignalAlert({ previousAlert, signal, signalChanged = false, alertState }) {
-  if (!["LEVEL1", "LEVEL2"].includes(signal?.alertLevel)) return false;
+export function shouldSendHotMaSignalAlert({
+  previousAlert,
+  previousSignalLevel = null,
+  signal,
+  signalChanged = false,
+  alertState
+}) {
+  const currentLevel = normalizeAlertLevel(signal?.alertLevel);
+  if (!currentLevel) return false;
   if (!previousAlert) return true;
-  if (signalChanged) return true;
-  if (previousAlert.alertLevel && previousAlert.alertLevel !== signal.alertLevel) return true;
+  if (signalChanged && isAlertLevelEntryOrUpgrade(previousSignalLevel, currentLevel)) return true;
+  if (previousAlert.alertLevel !== currentLevel && isAlertLevelEntryOrUpgrade(previousAlert.alertLevel, currentLevel)) {
+    return true;
+  }
   if (!hasComparableHotMaAlertState(previousAlert)) return false;
-  if (String(previousAlert.profileKey) !== String(alertState?.profileKey ?? "")) return true;
-  if (Number(previousAlert.sourceMask ?? 0) !== Number(alertState?.sourceMask ?? 0)) return true;
-  return String(previousAlert.contextSignature) !== String(alertState?.contextSignature ?? "");
+  return hasNewHotMaAlertEntry(previousAlert, alertState);
 }
 
 export function shouldBackfillHotMaSignalAlertState(previousAlert) {
   return Boolean(previousAlert && !hasComparableHotMaAlertState(previousAlert));
+}
+
+export function shouldRefreshHotMaSignalAlertState(previousAlert, alertState = {}) {
+  if (!previousAlert || !alertState?.contextSignature) return false;
+  if (!hasComparableHotMaAlertState(previousAlert)) return true;
+  return (
+    String(previousAlert.profileKey) !== String(alertState.profileKey ?? "") ||
+    Number(previousAlert.sourceMask ?? 0) !== Number(alertState.sourceMask ?? 0) ||
+    String(previousAlert.contextSignature) !== String(alertState.contextSignature)
+  );
 }
 
 export function shouldSuppressHotMaSignalAfterOiAlert(context = {}) {
@@ -255,6 +328,7 @@ async function fetchKlineRange({ token, intervalCode, startTime, endTime, action
       fetchedRows += page.length;
       const changeSummary = stored ? `，写入/更新 ${stored} 行` : "";
       crawlerState.lastAction = `${token.symbol} ${intervalCode} 同步 ${page.length} 根K线${changeSummary}`;
+      clearRecoveredNetworkError();
     },
     shouldContinue: shouldContinue ?? (() => crawlerState.running)
   });
@@ -276,7 +350,7 @@ async function runConcurrent(items, concurrency, worker) {
 }
 
 export function getCrawlerState() {
-  return { ...crawlerState, dailyAudit: { ...auditState } };
+  return { ...crawlerState, tailRefresh: { ...crawlerState.tailRefresh }, dailyAudit: { ...auditState } };
 }
 
 export function setDailyAuditNextRunAt(value) {
@@ -486,16 +560,17 @@ async function recomputeAndNotifyToken(token) {
       const alertState = buildHotMaSignalAlertState(multiCycleSignals, telegramContext);
       const changedIntervals = new Set(newAlertSignals.map(({ intervalCode }) => intervalCode));
       const alertStates = await Promise.all(
-        multiCycleSignals.map(async ({ intervalCode, signal }) => {
+        multiCycleSignals.map(async ({ intervalCode, previous, signal }) => {
           const previousAlert = await selectHotMaSignalAlert(token.symbol, intervalCode);
           return {
             shouldSend: shouldSendHotMaSignalAlert({
               previousAlert,
+              previousSignalLevel: previous?.alert_level,
               signal,
               signalChanged: changedIntervals.has(intervalCode),
               alertState
             }),
-            shouldBackfill: shouldBackfillHotMaSignalAlertState(previousAlert)
+            shouldRefresh: shouldRefreshHotMaSignalAlertState(previousAlert, alertState)
           };
         })
       );
@@ -518,7 +593,7 @@ async function recomputeAndNotifyToken(token) {
             );
           }
         }
-      } else if (alertStates.some(({ shouldBackfill }) => shouldBackfill)) {
+      } else if (alertStates.some(({ shouldRefresh }) => shouldRefresh)) {
         await Promise.all(
           multiCycleSignals.map(({ intervalCode, signal }) =>
             markHotMaSignalAlertSent(token.symbol, intervalCode, signal, { ...alertState, preserveSentAt: true })
@@ -549,7 +624,7 @@ async function fetchToken(token, workerId) {
   await refreshTokenFetchState(token.id);
   if (crawlerState.running) {
     await recomputeAndNotifyToken(token);
-    crawlerState.lastError = null;
+    clearCrawlerError();
     crawlerState.lastAction = `${token.symbol} 四周期缓存与信号计算完成`;
   }
 }
@@ -660,6 +735,7 @@ export async function refreshLatestKlineTails({ force = false, shouldContinue = 
   crawlerState.tailRefresh.refreshedRows = 0;
   crawlerState.tailRefresh.errorCount = 0;
   crawlerState.tailRefresh.lastError = null;
+  crawlerState.tailRefresh.lastErrorAt = null;
 
   try {
     const targets = await listKlineTailRefreshTargets({ limit: config.crawler.tailRefreshLimit });
@@ -718,8 +794,10 @@ export async function refreshLatestKlineTails({ force = false, shouldContinue = 
             const message = error instanceof Error ? error.message : String(error);
             errorCount += 1;
             errors.push(`${token.symbol} ${target.intervalCode}: ${message}`);
+            crawlerState.tailRefresh.errorCount = errorCount;
             crawlerState.tailRefresh.lastError = message;
-            crawlerState.lastError = message;
+            crawlerState.tailRefresh.lastErrorAt = new Date().toISOString();
+            setCrawlerError(message);
           }
         }
         if (tokenRows > 0) {
@@ -728,6 +806,7 @@ export async function refreshLatestKlineTails({ force = false, shouldContinue = 
             await recomputeAndNotifyToken(token);
           });
           refreshedRows += tokenRows;
+          crawlerState.tailRefresh.refreshedRows = refreshedRows;
         }
       } finally {
         setWorkerActivity(activityId, null);
@@ -737,6 +816,7 @@ export async function refreshLatestKlineTails({ force = false, shouldContinue = 
     crawlerState.tailRefresh.refreshedRows = refreshedRows;
     crawlerState.tailRefresh.errorCount = errorCount;
     crawlerState.tailRefresh.lastError = errors.at(-1) ?? null;
+    if (!crawlerState.tailRefresh.lastError) crawlerState.tailRefresh.lastErrorAt = null;
     crawlerState.lastAction = `快速追最新K线完成：${groups.length} 个交易对，写入/更新 ${refreshedRows} 行`;
     return {
       ok: true,
@@ -780,7 +860,7 @@ async function runCrawlerWorker(workerId, { incrementalCutoffAt = null } = {}) {
       await withRetryableDatabaseOperation(`${token.symbol} 抓取`, () => fetchToken(token, workerId));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      crawlerState.lastError = message;
+      setCrawlerError(message);
       crawlerState.lastAction = `${token.symbol} 抓取中断，保留断点`;
       await markTokenPartial(token.id, message);
     } finally {
@@ -813,7 +893,7 @@ export async function startCrawler({ mode = "incremental", reason = null, includ
   crawlerState.incrementalCutoffAt = incrementalCutoffAt?.toISOString() ?? null;
   crawlerState.includeIncremental = Boolean(includeIncremental);
   crawlerState.processedTokenCount = 0;
-  crawlerState.lastError = null;
+  clearCrawlerError();
   crawlerState.workerCount = config.crawler.concurrentTokens;
 
   queueMicrotask(async () => {
@@ -830,7 +910,7 @@ export async function startCrawler({ mode = "incremental", reason = null, includ
           if (activeCount === 0) throw error;
           crawlerState.initializedTokens = true;
           crawlerState.tokenUniverseCount = activeCount;
-          crawlerState.lastError = error instanceof Error ? error.message : String(error);
+          setCrawlerError(error instanceof Error ? error.message : String(error));
           crawlerState.lastAction = `同步交易对失败，使用本地 ${activeCount} 个活跃交易对继续增量抓取`;
         }
       }
@@ -858,7 +938,7 @@ export async function startCrawler({ mode = "incremental", reason = null, includ
       crawlerState.includeIncremental = false;
       crawlerState.incrementalCutoffAt = null;
     } catch (error) {
-      crawlerState.lastError = error instanceof Error ? error.message : String(error);
+      setCrawlerError(error instanceof Error ? error.message : String(error));
       crawlerState.lastAction = "抓取服务异常停止";
       await resetInterruptedFetchingTokens(0);
       crawlerState.currentSymbol = null;

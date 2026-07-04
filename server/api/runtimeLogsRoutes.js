@@ -123,8 +123,14 @@ function runtimeStateErrors(services) {
 
   const crawler = services.crawler?.crawler;
   pushStateError(items, "crawler", "crawler", crawler?.lastError, {
-    updatedAt: crawler?.startedAt ? new Date(crawler.startedAt).toISOString() : null,
+    updatedAt: crawler?.lastErrorAt ?? crawler?.runCompletedAt ?? crawler?.runStartedAt ?? null,
     details: crawler?.lastAction ?? ""
+  });
+  pushStateError(items, "crawler", "tailRefresh", crawler?.tailRefresh?.lastError, {
+    updatedAt: crawler?.tailRefresh?.lastErrorAt ?? crawler?.tailRefresh?.lastCompletedAt ?? crawler?.tailRefresh?.lastStartedAt ?? null,
+    details: crawler?.tailRefresh
+      ? `errors=${crawler.tailRefresh.errorCount ?? 0}, refreshedRows=${crawler.tailRefresh.refreshedRows ?? 0}`
+      : ""
   });
   pushStateError(items, "crawler", "dailyAudit", crawler?.dailyAudit?.lastError, {
     updatedAt: crawler?.dailyAudit?.lastStartedAt ?? null

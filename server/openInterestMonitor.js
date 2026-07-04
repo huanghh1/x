@@ -10,6 +10,13 @@ import {
   upsertOpenInterestSamples,
   upsertOpenInterestSnapshot
 } from "./db.js";
+import {
+  hasNewListItem,
+  isAlertLevelEntryOrUpgrade,
+  normalizeAlertLevel,
+  parseKeyValueSignature,
+  parseSignatureList
+} from "./alertState.js";
 import { evaluateOpenInterestSpike } from "./openInterestSpike.js";
 import { enqueueOpenInterestSpikeTelegramAlert } from "./telegramAlertQueue.js";
 
@@ -78,13 +85,46 @@ function sortedSignalIntervals(intervals) {
     .sort((a, b) => (order.get(a) ?? order.size) - (order.get(b) ?? order.size));
 }
 
-export function buildOpenInterestAlertState(spike = {}, context = {}) {
-  const windows = [
+function openInterestWindowsFromSpike(spike = {}) {
+  return [
     spike.hit5m ? "5m" : null,
     spike.hit1h ? "1h" : null,
     spike.hit4h ? "4h" : null,
     spike.hit1d ? "1d" : null
   ].filter(Boolean).sort((a, b) => OI_WINDOW_ORDER.indexOf(a) - OI_WINDOW_ORDER.indexOf(b));
+}
+
+function parseOpenInterestAlertSignature(signature) {
+  const state = parseKeyValueSignature(signature);
+  const multiCycleCount = Number(state.get("multi"));
+  return {
+    windows: parseSignatureList(state.get("windows")),
+    level: normalizeAlertLevel(state.get("level")),
+    intervals: parseSignatureList(state.get("intervals")),
+    multiCycleCount: Number.isFinite(multiCycleCount) ? multiCycleCount : 0,
+    fundingOneHour: state.get("funding") === "1",
+    hotRank: state.get("hot") === "1"
+  };
+}
+
+function hasNewOpenInterestAlertEntry({ previous, previousSpike, spike, alertState }) {
+  const previousState = parseOpenInterestAlertSignature(previous?.lastSpikeAlertSignature);
+  const currentState = parseOpenInterestAlertSignature(alertState?.signature);
+  const previousWindows = openInterestWindowsFromSpike(previousSpike);
+  const currentWindows = openInterestWindowsFromSpike(spike);
+  return (
+    hasNewListItem(currentWindows, previousWindows) ||
+    hasNewListItem(currentState.windows, previousState.windows) ||
+    hasNewListItem(currentState.intervals, previousState.intervals) ||
+    isAlertLevelEntryOrUpgrade(previousState.level, currentState.level) ||
+    currentState.multiCycleCount > previousState.multiCycleCount ||
+    (!previousState.fundingOneHour && currentState.fundingOneHour) ||
+    (!previousState.hotRank && currentState.hotRank)
+  );
+}
+
+export function buildOpenInterestAlertState(spike = {}, context = {}) {
+  const windows = openInterestWindowsFromSpike(spike);
   const intervals = sortedSignalIntervals(context.intervals);
   const signature = [
     `windows=${windows.join(",") || "none"}`,
@@ -106,11 +146,16 @@ export function shouldSendOpenInterestSpikeAlert({ previous, previousSpike, spik
   if (!previous?.lastSpikeAlertAt) return true;
   if (!previousSpike?.hit) return true;
   if (!previous.lastSpikeAlertSignature) return false;
-  return String(previous.lastSpikeAlertSignature) !== String(alertState?.signature ?? "");
+  return hasNewOpenInterestAlertEntry({ previous, previousSpike, spike, alertState });
 }
 
 export function shouldBackfillOpenInterestSpikeAlertState({ previous, previousSpike }) {
   return Boolean(previous?.lastSpikeAlertAt && previousSpike?.hit && !previous.lastSpikeAlertSignature);
+}
+
+export function shouldRefreshOpenInterestSpikeAlertState({ previous, previousSpike, alertState }) {
+  if (!previous?.lastSpikeAlertAt || !previousSpike?.hit || !alertState?.signature) return false;
+  return String(previous.lastSpikeAlertSignature ?? "") !== String(alertState.signature);
 }
 
 export function effectiveOpenInterestScanLimit({
@@ -337,7 +382,7 @@ async function scanToken(token, { markPrices = new Map(), claimHistoryBootstrap 
   });
 
   if (!shouldSendOpenInterestSpikeAlert({ previous, previousSpike, spike, alertState })) {
-    if (shouldBackfillOpenInterestSpikeAlertState({ previous, previousSpike })) {
+    if (shouldRefreshOpenInterestSpikeAlertState({ previous, previousSpike, alertState })) {
       await markOpenInterestSpikeAlertSent(snapshot.symbol, { ...alertState, preserveAlertAt: true });
     }
     return {
