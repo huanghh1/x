@@ -27,6 +27,7 @@ export {
 } from "./db/hotRankRepository.js";
 export {
   collectHotRankFundingSymbols,
+  listFundingRealtimeTokens,
   listOneHourFundingIntervals,
   listPendingFundingIntervalAlerts,
   listTopFundingRealtimeTokens,

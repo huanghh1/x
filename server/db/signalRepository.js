@@ -665,9 +665,7 @@ export async function listRealtimeKlineTokens() {
     `SELECT DISTINCT t.*
      FROM token_list t
      WHERE t.is_active=1
-       AND (
-         EXISTS(SELECT 1 FROM watchlist w WHERE w.symbol=t.symbol)
-         OR EXISTS(
+       AND EXISTS(
            SELECT 1
            FROM signal_result s
            LEFT JOIN (
@@ -697,7 +695,6 @@ export async function listRealtimeKlineTokens() {
                    AND h.last_seen_at >= DATE_SUB(NOW(3), INTERVAL :hotRankActiveSeconds SECOND)
                )
              )
-         )
        )
      ORDER BY t.symbol`,
     openInterestSpikeQueryParams({ hotRankActiveSeconds: hotRankActiveSeconds() })

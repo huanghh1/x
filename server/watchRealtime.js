@@ -1,9 +1,10 @@
 import { EventEmitter } from "node:events";
 import {
   clearWatchlistAlertSide,
+  listFundingRealtimeTokens,
   listWatchlist,
+  listWatchlistTokens,
   listRealtimeKlineTokens,
-  listTopFundingRealtimeTokens,
   listTopOpenInterestRealtimeTokens,
   markWatchlistAlertSent,
   refreshTokenFetchState,
@@ -36,8 +37,17 @@ const state = {
   rotateTimer: null,
   watchItems: new Map(),
   tokenRows: new Map(),
-  fundingTopCount: 0,
+  watchRealtimeSymbols: new Set(),
+  backgroundKlineSymbols: new Set(),
+  fundingRealtimeSymbols: new Set(),
+  fundingRealtimeCount: 0,
+  openInterestRealtimeSymbols: new Set(),
   openInterestTopCount: 0,
+  clientStreams: new Map(),
+  nextClientId: 1,
+  clientStreamCount: 0,
+  requestedStreamCount: 0,
+  truncatedStreamCount: 0,
   lastPricePersistedAt: new Map(),
   lastKlinePersistedAt: new Map(),
   alertingSymbols: new Set(),
@@ -58,6 +68,27 @@ function streamUrl(signature) {
   return `wss://fstream.binance.com/market/stream?streams=${signature}`;
 }
 
+function normalizeStreamName(value) {
+  const stream = String(value ?? "").trim().toLowerCase();
+  const match = stream.match(/^([a-z0-9_]+)@(ticker|kline_(15m|1h|4h|1d))$/);
+  if (!match) return null;
+  const symbol = sanitizeSymbol(match[1]).toLowerCase();
+  if (!symbol) return null;
+  return `${symbol}@${match[2]}`;
+}
+
+export function parseWatchRealtimeStreams(value) {
+  const values = Array.isArray(value) ? value : [value];
+  const streams = new Set();
+  for (const item of values) {
+    for (const part of String(item ?? "").split(/[,\s/]+/)) {
+      const stream = normalizeStreamName(part);
+      if (stream) streams.add(stream);
+    }
+  }
+  return streams;
+}
+
 function klineToDbRow(kline) {
   return [
     Number(kline.t),
@@ -73,35 +104,100 @@ function klineToDbRow(kline) {
 }
 
 async function syncWatchlistState() {
-  const [items, tokens, fundingTopTokens, openInterestTopTokens] = await Promise.all([
+  const [items, klineTokens, watchTokens, fundingRealtimeTokens, openInterestTopTokens] = await Promise.all([
     listWatchlist(),
     listRealtimeKlineTokens(),
-    listTopFundingRealtimeTokens(5),
+    listWatchlistTokens(),
+    listFundingRealtimeTokens(),
     listTopOpenInterestRealtimeTokens({ timeWindow: "5m", sort: "desc", limit: 5 })
   ]);
   const tokenMap = new Map();
-  for (const token of [...tokens, ...fundingTopTokens, ...openInterestTopTokens]) {
+  for (const token of [...klineTokens, ...watchTokens, ...fundingRealtimeTokens, ...openInterestTopTokens]) {
     const symbol = sanitizeSymbol(token?.symbol);
     if (symbol) tokenMap.set(symbol, token);
   }
   state.watchItems = new Map(items.map((item) => [sanitizeSymbol(item.symbol), item]));
   state.tokenRows = tokenMap;
-  state.fundingTopCount = fundingTopTokens.length;
-  state.openInterestTopCount = openInterestTopTokens.length;
-  return { items, tokens: Array.from(tokenMap.values()), fundingTopTokens, openInterestTopTokens };
+  state.watchRealtimeSymbols = new Set(watchTokens.map((token) => sanitizeSymbol(token?.symbol)).filter(Boolean));
+  state.backgroundKlineSymbols = new Set(klineTokens.map((token) => sanitizeSymbol(token?.symbol)).filter(Boolean));
+  state.fundingRealtimeSymbols = new Set(fundingRealtimeTokens.map((token) => sanitizeSymbol(token?.symbol)).filter(Boolean));
+  state.fundingRealtimeCount = state.fundingRealtimeSymbols.size;
+  state.openInterestRealtimeSymbols = new Set(openInterestTopTokens.map((token) => sanitizeSymbol(token?.symbol)).filter(Boolean));
+  state.openInterestTopCount = state.openInterestRealtimeSymbols.size;
+  return { items, tokens: Array.from(tokenMap.values()), klineTokens, watchTokens, fundingRealtimeTokens, openInterestTopTokens };
 }
 
 function buildStreams() {
-  const streams = [];
-  const symbols = Array.from(state.tokenRows.keys()).slice(0, config.realtime.tokenLimit);
-  for (const symbol of symbols) {
-    const lower = symbol.toLowerCase();
-    streams.push(`${lower}@ticker`);
-    for (const interval of INTERVALS) {
-      streams.push(`${lower}@kline_${interval}`);
+  const streams = new Set();
+  const clientStreams = new Set();
+  for (const requestedStreams of state.clientStreams.values()) {
+    for (const stream of requestedStreams) {
+      clientStreams.add(stream);
+      streams.add(stream);
     }
   }
-  return streams.slice(0, config.realtime.streamLimit);
+  state.clientStreamCount = clientStreams.size;
+
+  for (const symbol of state.watchRealtimeSymbols) {
+    streams.add(`${symbol.toLowerCase()}@ticker`);
+  }
+
+  for (const symbol of state.fundingRealtimeSymbols) {
+    streams.add(`${symbol.toLowerCase()}@ticker`);
+  }
+
+  for (const symbol of state.openInterestRealtimeSymbols) {
+    streams.add(`${symbol.toLowerCase()}@ticker`);
+  }
+
+  const symbols = Array.from(state.backgroundKlineSymbols).slice(0, config.realtime.tokenLimit);
+  for (const symbol of symbols) {
+    const lower = symbol.toLowerCase();
+    streams.add(`${lower}@ticker`);
+    for (const interval of INTERVALS) {
+      streams.add(`${lower}@kline_${interval}`);
+    }
+  }
+  const requestedStreams = Array.from(streams);
+  state.requestedStreamCount = requestedStreams.length;
+  state.truncatedStreamCount = Math.max(0, requestedStreams.length - config.realtime.streamLimit);
+  return requestedStreams.slice(0, config.realtime.streamLimit);
+}
+
+export function registerWatchRealtimeClientStreams(streams) {
+  const id = state.nextClientId;
+  state.nextClientId += 1;
+  const requestedStreams = streams instanceof Set ? streams : parseWatchRealtimeStreams(streams);
+  state.clientStreams.set(id, requestedStreams);
+  updateWatchlistRealtime().catch((error) => {
+    state.lastError = error instanceof Error ? error.message : String(error);
+  });
+  return {
+    id,
+    streams: requestedStreams,
+    close: () => {
+      if (!state.clientStreams.delete(id)) return;
+      updateWatchlistRealtime().catch((error) => {
+        state.lastError = error instanceof Error ? error.message : String(error);
+      });
+    }
+  };
+}
+
+export function shouldForwardWatchRealtimePayload(streams, payload) {
+  if (!(streams instanceof Set) || !streams.size) return true;
+  if (payload?.type === "price") {
+    const symbol = sanitizeSymbol(payload.symbol).toLowerCase();
+    if (!symbol) return false;
+    if (streams.has(`${symbol}@ticker`)) return true;
+    return INTERVALS.some((interval) => streams.has(`${symbol}@kline_${interval}`));
+  }
+  if (payload?.type === "kline") {
+    const symbol = sanitizeSymbol(payload.symbol).toLowerCase();
+    const interval = String(payload.interval ?? payload.kline?.i ?? "");
+    return Boolean(symbol && INTERVALS.includes(interval) && streams.has(`${symbol}@kline_${interval}`));
+  }
+  return true;
 }
 
 function closeSocket() {
@@ -343,8 +439,15 @@ export function getWatchlistRealtimeState() {
     streamLimit: config.realtime.streamLimit,
     tokenLimit: config.realtime.tokenLimit,
     watchCount: state.watchItems.size,
-    fundingTopCount: state.fundingTopCount,
+    watchRealtimeCount: state.watchRealtimeSymbols.size,
+    backgroundKlineTokenCount: state.backgroundKlineSymbols.size,
+    fundingRealtimeCount: state.fundingRealtimeCount,
+    fundingTopCount: state.fundingRealtimeCount,
     openInterestTopCount: state.openInterestTopCount,
+    clientCount: state.clientStreams.size,
+    clientStreamCount: state.clientStreamCount,
+    requestedStreamCount: state.requestedStreamCount,
+    truncatedStreamCount: state.truncatedStreamCount,
     connectedAt: state.connectedAt,
     lastMessageAt: state.lastMessageAt,
     lastError: state.lastError,

@@ -339,3 +339,15 @@ export async function listTopFundingRealtimeTokens(limit = 5) {
   );
   return rows;
 }
+
+export async function listFundingRealtimeTokens() {
+  const [rows] = await getPool().query(
+    `SELECT t.*
+     FROM funding_interval_state f
+     JOIN token_list t ON t.symbol=f.symbol AND t.is_active=1
+     WHERE f.funding_interval_hours=1
+       AND f.source_present=1
+     ORDER BY COALESCE(f.last_changed_at, f.last_seen_at) DESC, f.symbol`
+  );
+  return rows;
+}

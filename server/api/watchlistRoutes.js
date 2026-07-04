@@ -19,8 +19,11 @@ export function createWatchlistRoutes({ requireLocalMutation }) {
 
   router.get("/api/watchlist/events", async (request, response) => {
     let upstream;
+    const search = request.originalUrl.includes("?")
+      ? request.originalUrl.slice(request.originalUrl.indexOf("?"))
+      : "";
     try {
-      upstream = await fetch(serviceUrl("realtime", "/internal/events"), {
+      upstream = await fetch(serviceUrl("realtime", `/internal/events${search}`), {
         headers: config.service.internalToken ? { "X-Internal-Service-Token": config.service.internalToken } : {}
       });
     } catch (error) {

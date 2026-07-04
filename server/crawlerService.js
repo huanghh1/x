@@ -101,9 +101,6 @@ setInterval(() => {
     .catch((error) => console.error("incremental crawler failed", error));
 }, config.crawler.incrementalRefreshMs).unref?.();
 setInterval(runRecoveryKlineAudit, config.crawler.recoveryAuditMs).unref?.();
-setInterval(() => {
-  refreshWatchlistMarketData().catch((error) => console.error("watchlist market refresh failed", error));
-}, 15_000).unref?.();
 scheduleDailyKlineAudit();
 
 app.listen(config.service.crawlerPort, config.service.host, () => {

@@ -1,4 +1,4 @@
-import { fetchKlinesPaged, fetchRecentKlines } from "./binance.js";
+import { fetchKlinesPaged } from "./binance.js";
 import { config } from "./config.js";
 import {
   klineStats,
@@ -12,7 +12,7 @@ import {
 import { calculateSignal, INTERVALS } from "./ma.js";
 
 let refreshing = false;
-let lastFastRefreshAt = 0;
+let lastSkippedRealtimeAt = 0;
 let lastFullRefreshAt = 0;
 
 function intervalMs(intervalCode) {
@@ -32,11 +32,6 @@ function targetStart(intervalCode) {
 function latestClosedKlineOpenTime(intervalCode) {
   const ms = intervalMs(intervalCode);
   return Math.floor(Date.now() / ms) * ms - ms;
-}
-
-function closedKlinesOnly(klines, intervalCode) {
-  const latestClosedOpenTime = latestClosedKlineOpenTime(intervalCode);
-  return klines.filter((kline) => Number(kline?.[0]) <= latestClosedOpenTime);
 }
 
 async function fetchRange(token, intervalCode, startTime, endTime) {
@@ -79,28 +74,28 @@ async function repairGaps(token, intervalCode) {
 export async function refreshWatchlistMarketData({ force = false, full = false } = {}) {
   if (refreshing) return { skipped: true, reason: "already running" };
   const now = Date.now();
-  if (!force && now - lastFastRefreshAt < 15_000) return { skipped: true, reason: "fresh cache" };
+  if (!full) {
+    lastSkippedRealtimeAt = now;
+    return {
+      skipped: true,
+      reason: "latest watchlist klines are handled by realtime service",
+      realtimeManaged: true
+    };
+  }
+  if (!force && now - lastFullRefreshAt < 60_000) return { skipped: true, reason: "fresh history repair" };
   refreshing = true;
   try {
     const tokens = await listWatchlistTokens();
-    const fullRefresh = full || now - lastFullRefreshAt >= 60_000;
-    const intervals = fullRefresh ? INTERVALS : ["15m"];
     for (const token of tokens) {
-      for (const intervalCode of intervals) {
-        const klines = closedKlinesOnly(
-          await fetchRecentKlines({ symbol: token.symbol, intervalCode, limit: 2 }),
-          intervalCode
-        );
-        if (klines.length) await upsertKlinePage(token, intervalCode, klines);
-        if (fullRefresh) await repairGaps(token, intervalCode);
+      for (const intervalCode of INTERVALS) {
+        await repairGaps(token, intervalCode);
         const closes = await selectClosePrices(token.symbol, intervalCode);
         await upsertSignal(token, calculateSignal({ intervalCode, closes }));
       }
       await refreshTokenFetchState(token.id);
     }
-    lastFastRefreshAt = Date.now();
-    if (fullRefresh) lastFullRefreshAt = lastFastRefreshAt;
-    return { ok: true, tokenCount: tokens.length, intervals };
+    lastFullRefreshAt = Date.now();
+    return { ok: true, tokenCount: tokens.length, intervals: INTERVALS, realtimeManaged: true };
   } finally {
     refreshing = false;
   }
@@ -109,7 +104,7 @@ export async function refreshWatchlistMarketData({ force = false, full = false }
 export function getWatchlistMarketState() {
   return {
     refreshing,
-    lastFastRefreshAt: lastFastRefreshAt ? new Date(lastFastRefreshAt).toISOString() : null,
+    lastSkippedRealtimeAt: lastSkippedRealtimeAt ? new Date(lastSkippedRealtimeAt).toISOString() : null,
     lastFullRefreshAt: lastFullRefreshAt ? new Date(lastFullRefreshAt).toISOString() : null
   };
 }

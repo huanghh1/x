@@ -102,7 +102,7 @@ function watchRealtimeStreams() {
 }
 
 function shouldUseServerRealtimeEvents() {
-  return state.currentView === "watch";
+  return true;
 }
 
 function updateMarketPriceDom(symbol, price, eventTime = Date.now()) {
@@ -176,11 +176,12 @@ export function updateWatchRealtime() {
     return;
   }
   if ("EventSource" in window && shouldUseServerRealtimeEvents()) {
-    const signature = "sse:watch-realtime";
+    const streamSignature = streams.join("/");
+    const signature = `sse:${streamSignature}`;
     if (state.watchRealtimeSource && state.watchRealtimeSignature === signature) return;
     closeWatchRealtime();
     state.watchRealtimeSignature = signature;
-    const source = new EventSource("/api/watchlist/events");
+    const source = new EventSource(`/api/watchlist/events?streams=${encodeURIComponent(streamSignature)}`);
     state.watchRealtimeSource = source;
     source.addEventListener("ready", () => {});
     source.addEventListener("ping", () => {});

@@ -5,7 +5,10 @@ import { requireInternalService } from "./serviceClient.js";
 import { sendWatchlistTelegram } from "./telegram.js";
 import {
   getWatchlistRealtimeState,
+  parseWatchRealtimeStreams,
+  registerWatchRealtimeClientStreams,
   refreshWatchlistRealtime,
+  shouldForwardWatchRealtimePayload,
   startWatchlistRealtime,
   stopWatchlistRealtime,
   watchRealtimeEvents
@@ -25,6 +28,7 @@ app.post("/internal/refresh", async (_request, response) => {
 });
 
 app.get("/internal/events", (request, response) => {
+  const client = registerWatchRealtimeClientStreams(parseWatchRealtimeStreams(request.query.streams));
   response.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
@@ -32,7 +36,11 @@ app.get("/internal/events", (request, response) => {
     "X-Accel-Buffering": "no"
   });
   response.write(`event: ready\ndata: ${JSON.stringify(getWatchlistRealtimeState())}\n\n`);
-  const send = (payload) => response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  const send = (payload) => {
+    if (shouldForwardWatchRealtimePayload(client.streams, payload)) {
+      response.write(`data: ${JSON.stringify(payload)}\n\n`);
+    }
+  };
   const heartbeat = setInterval(() => response.write(`event: ping\ndata: ${Date.now()}\n\n`), 25_000);
   watchRealtimeEvents.on("price", send);
   watchRealtimeEvents.on("kline", send);
@@ -40,6 +48,7 @@ app.get("/internal/events", (request, response) => {
     clearInterval(heartbeat);
     watchRealtimeEvents.off("price", send);
     watchRealtimeEvents.off("kline", send);
+    client.close();
   });
 });
 

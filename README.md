@@ -34,7 +34,7 @@ npm start
 | --- | --- |
 | `8787` | 页面与公开 API |
 | `8788` | 全市场抓取、关注池历史 K 线 |
-| `8789` | 关注池实时 WebSocket |
+| `8789` | 统一实时行情 WebSocket/SSE |
 | `8790` | 资金费率、OI、热度、解锁、清理、Telegram |
 
 页面仍统一访问 `8787`，但重任务会由 API 转发到对应内部服务端口；热度排行读取集中在 `8790`，避免 API 进程和调度进程重复抓取同一份外部数据。四个服务端口必须互不相同，配置冲突会在启动时直接报错。
@@ -108,7 +108,7 @@ pm2 delete ecosystem.config.cjs
 - 程序重启后会继续处理 `pending`、`partial`、`failed`、`fetching` 状态的币种。
 - 四周期独立计算 MA100/MA200，独立写入 `signal_result`。
 - 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理；PM2 运行日志默认每 4 小时清理一次。
-- 关注池会单独开启 Binance Futures WebSocket 实时层，订阅关注代币的价格和四周期 K 线；价格会轻量落库，K 线按周期节流落库且收盘必落库，全市场均线扫描仍按原规则运行。
+- 实时行情统一由 realtime 服务维护 Binance Futures WebSocket，前端各页面通过 SSE 声明所需 `ticker/kline` streams；关注池、均线、资金费率页面 1 小时结算代币和 OI Top5 会在后端合并去重。价格会轻量落库，K 线按周期节流落库且收盘必落库；crawler 负责历史覆盖、断层修复和全市场兜底追尾。
 - 资金费率结算周期监控默认每小时扫描一次 Binance USDⓈ-M `fundingInfo`，并通过 `premiumIndex` 保存当前资金费率；切换为 1 小时结算会发送独立提醒，未确认时每 5 分钟重复提醒，存在一级或二级均线警报时同步纳入组合信号。
 - OI 达到 `5分钟 >= 2%`、`1小时 >= 10%`、`4小时 >= 20%` 或 `1天 >= 40%` 会记录暴涨信号；有其他信号时发送组合推送，否则发送 OI 独立暴涨推送。阈值可通过 `OPEN_INTEREST_SPIKE_5M_PCT`、`OPEN_INTEREST_SPIKE_1H_PCT`、`OPEN_INTEREST_SPIKE_4H_PCT`、`OPEN_INTEREST_SPIKE_1D_PCT` 调整。
 - 热度排行严格按 BSC、Base、Solana 分链，排除动态市值前 10、稳定币和 Binance 标记的代币化股票。
