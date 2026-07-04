@@ -1,0 +1,126 @@
+.watch-list {
+  display: grid;
+  gap: var(--space-2);
+  padding: 0 var(--space-6) var(--space-6);
+}
+
+.watch-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(110px, 0.7fr)) auto;
+  gap: var(--space-3);
+  align-items: center;
+  min-height: 74px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-paper-soft);
+}
+
+.watch-row.is-expanded {
+  border-color: rgba(237, 42, 117, 0.35);
+  background: #fff;
+}
+
+.watch-row strong,
+.watch-row .mono {
+  font-family: var(--font-mono);
+}
+
+.watch-row span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.watch-symbol-button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 46px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.watch-symbol-button strong {
+  font-size: 15px;
+}
+
+.watch-detail {
+  display: grid;
+  gap: var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  padding: var(--space-4);
+  background: #fff;
+}
+
+.watch-settings {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.6fr) minmax(150px, 0.8fr) minmax(150px, 0.8fr) minmax(220px, 1.4fr) auto;
+  gap: var(--space-3);
+  align-items: end;
+}
+
+.watch-settings label {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+  color: var(--color-muted);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.watch-settings input[type="text"],
+.watch-settings input[type="number"] {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-small);
+  padding: 0 var(--space-3);
+  color: var(--color-text);
+  background: var(--color-paper-soft);
+  outline: none;
+}
+
+.watch-settings input[type="checkbox"] {
+  width: 22px;
+  height: 22px;
+  accent-color: var(--color-accent);
+}
+
+.watch-settings input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.watch-chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-3);
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.watch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+@media (max-width: 1120px) {
+  .watch-settings,
+  .watch-row {
+    grid-template-columns: 1fr;
+  }
+
+  .watch-actions {
+    justify-content: flex-start;
+  }
+}

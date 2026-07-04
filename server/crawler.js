@@ -1,4 +1,4 @@
-import { discoverTargetTokens, fetchKlinesPaged } from "./binance.js";
+import { discoverTargetTokens } from "./binance.js";
 import { config } from "./config.js";
 import {
   claimNextTokenForFetch,
@@ -6,37 +6,25 @@ import {
   countActiveTokens,
   getActiveTokenBySymbol,
   getKlineAuditReport,
-  getSignalCorrelationContext,
   listKlineTailRefreshTargets,
-  listKlineGaps,
-  markHotMaSignalAlertSent,
-  klineStats,
-  markKlineAvailabilityStart,
-  markTokenFetching,
   markTokenPartial,
   queueActiveTokensForKlineAudit,
-  recordMultiCycleHistory,
   refreshTokenFetchState,
   resetInterruptedFetchingTokens,
-  selectClosePrices,
-  selectHotMaSignalAlert,
-  selectPreviousSignals,
-  upsertKlinePage,
-  upsertSignals,
   upsertTokens
 } from "./db.js";
-import { calculateSignal, INTERVALS } from "./ma.js";
-import { sendHotMaSignalTelegram } from "./telegram.js";
-import { resolveBestAlertLevel, resolveSignalProfile } from "./signalPriority.js";
-import {
-  hasNewListItem,
-  hasNewOrUpgradedIntervalSignal,
-  isAlertLevelEntryOrUpgrade,
-  normalizeAlertLevel,
-  parseIntervalLevelSignature,
-  parseKeyValueSignature,
-  parseSignatureList
-} from "./alertState.js";
+import { INTERVALS } from "./ma.js";
+import { fetchKlineRange, intervalMs, refreshTokenInterval } from "./crawler/klineRepair.js";
+import { recomputeAndNotifyToken } from "./crawler/signalRecompute.js";
+import { normalizeCrawlerToken } from "./crawler/tokenUtils.js";
+
+export {
+  buildHotMaSignalAlertState,
+  shouldBackfillHotMaSignalAlertState,
+  shouldRefreshHotMaSignalAlertState,
+  shouldSendHotMaSignalAlert,
+  shouldSuppressHotMaSignalAfterOiAlert
+} from "./crawler/hotMaAlertState.js";
 
 const crawlerState = {
   running: false,
@@ -118,7 +106,10 @@ async function withRetryableDatabaseOperation(label, operation, attempts = 3) {
 }
 
 const activeWorkers = new Map();
-const hotMaAlertingSymbols = new Set();
+
+function setCrawlerAction(message) {
+  crawlerState.lastAction = message;
+}
 
 function setCrawlerError(message) {
   crawlerState.lastError = message;
@@ -138,143 +129,6 @@ function clearRecoveredNetworkError() {
   if (isTransientNetworkError(crawlerState.lastError)) clearCrawlerError();
 }
 
-function intervalSortIndex(intervalCode) {
-  const index = INTERVALS.indexOf(intervalCode);
-  return index === -1 ? INTERVALS.length : index;
-}
-
-function hasComparableHotMaAlertState(previousAlert) {
-  return Boolean(previousAlert?.profileKey && previousAlert?.contextSignature && Number(previousAlert?.sourceMask) > 0);
-}
-
-function parseHotMaAlertSignature(signature, sourceMask = 0) {
-  const state = parseKeyValueSignature(signature);
-  return {
-    sourceMask: Number(sourceMask || state.get("sources") || 0) || 0,
-    level: normalizeAlertLevel(state.get("level")),
-    fundingOneHour: state.get("funding") === "1",
-    hotRank: state.get("hot") === "1",
-    oiSpike: state.get("oi") === "1",
-    oiWindows: parseSignatureList(state.get("oiWindows")),
-    intervals: parseIntervalLevelSignature(state.get("intervals"))
-  };
-}
-
-function hasNewHotMaAlertEntry(previousAlert, alertState = {}) {
-  const previousState = parseHotMaAlertSignature(previousAlert?.contextSignature, previousAlert?.sourceMask);
-  const currentState = parseHotMaAlertSignature(alertState.contextSignature, alertState.sourceMask);
-  return (
-    (currentState.sourceMask & ~previousState.sourceMask) !== 0 ||
-    (!previousState.fundingOneHour && currentState.fundingOneHour) ||
-    (!previousState.hotRank && currentState.hotRank) ||
-    (!previousState.oiSpike && currentState.oiSpike) ||
-    hasNewListItem(currentState.oiWindows, previousState.oiWindows) ||
-    hasNewOrUpgradedIntervalSignal(currentState.intervals, previousState.intervals) ||
-    isAlertLevelEntryOrUpgrade(previousState.level, currentState.level)
-  );
-}
-
-export function buildHotMaSignalAlertState(multiCycleSignals = [], context = {}) {
-  const intervalStates = (Array.isArray(multiCycleSignals) ? multiCycleSignals : [])
-    .map(({ intervalCode, signal }) => ({
-      intervalCode: String(intervalCode ?? signal?.intervalCode ?? ""),
-      alertLevel: signal?.alertLevel
-    }))
-    .filter(({ intervalCode, alertLevel }) => INTERVALS.includes(intervalCode) && ["LEVEL1", "LEVEL2"].includes(alertLevel))
-    .sort((a, b) => intervalSortIndex(a.intervalCode) - intervalSortIndex(b.intervalCode));
-  const alertLevel = ["LEVEL1", "LEVEL2"].includes(context.alertLevel)
-    ? context.alertLevel
-    : resolveBestAlertLevel(intervalStates.map(({ alertLevel: level }) => level));
-  const profile = context.profile ?? resolveSignalProfile({
-    fundingOneHour: context.fundingOneHour,
-    hotRank: context.hotRank,
-    multiCycleCount: intervalStates.length,
-    alertLevel,
-    oiSpike: context.oiSpike
-  });
-  const oiWindows = [
-    context.oiSpike5mHit ? "5m" : null,
-    context.oiSpike1hHit ? "1h" : null,
-    context.oiSpike4hHit ? "4h" : null,
-    context.oiSpike1dHit ? "1d" : null
-  ].filter(Boolean);
-  const intervalSignature = intervalStates
-    .map(({ intervalCode, alertLevel: level }) => `${intervalCode}:${level}`)
-    .join(",");
-  const sourceMask = Number(profile.sourceMask ?? 0);
-  const profileKey = String(profile.key ?? "");
-  const contextSignature = [
-    `profile=${profileKey}`,
-    `level=${alertLevel ?? "none"}`,
-    `sources=${sourceMask}`,
-    `funding=${context.fundingOneHour ? 1 : 0}`,
-    `hot=${context.hotRank ? 1 : 0}`,
-    `oi=${context.oiSpike ? 1 : 0}`,
-    `oiWindows=${oiWindows.join(",") || "none"}`,
-    `intervals=${intervalSignature || "none"}`
-  ].join(";");
-
-  return {
-    profileKey,
-    sourceMask,
-    contextSignature,
-    intervalSignature,
-    alertLevel
-  };
-}
-
-export function shouldSendHotMaSignalAlert({
-  previousAlert,
-  previousSignalLevel = null,
-  signal,
-  signalChanged = false,
-  alertState
-}) {
-  const currentLevel = normalizeAlertLevel(signal?.alertLevel);
-  if (!currentLevel) return false;
-  if (!previousAlert) return true;
-  if (signalChanged && isAlertLevelEntryOrUpgrade(previousSignalLevel, currentLevel)) return true;
-  if (previousAlert.alertLevel !== currentLevel && isAlertLevelEntryOrUpgrade(previousAlert.alertLevel, currentLevel)) {
-    return true;
-  }
-  if (!hasComparableHotMaAlertState(previousAlert)) return false;
-  return hasNewHotMaAlertEntry(previousAlert, alertState);
-}
-
-export function shouldBackfillHotMaSignalAlertState(previousAlert) {
-  return Boolean(previousAlert && !hasComparableHotMaAlertState(previousAlert));
-}
-
-export function shouldRefreshHotMaSignalAlertState(previousAlert, alertState = {}) {
-  if (!previousAlert || !alertState?.contextSignature) return false;
-  if (!hasComparableHotMaAlertState(previousAlert)) return true;
-  return (
-    String(previousAlert.profileKey) !== String(alertState.profileKey ?? "") ||
-    Number(previousAlert.sourceMask ?? 0) !== Number(alertState.sourceMask ?? 0) ||
-    String(previousAlert.contextSignature) !== String(alertState.contextSignature)
-  );
-}
-
-export function shouldSuppressHotMaSignalAfterOiAlert(context = {}) {
-  return Boolean(context?.oiSpike && (context.oiLastSpikeAlertAt || context.oiAlertPending));
-}
-
-function normalizeCrawlerToken(token) {
-  if (!token) return token;
-  const baseAsset = token.base_asset ?? token.baseAsset ?? "";
-  const categoryType = token.category_type ?? token.categoryType ?? null;
-  const categoryLabel = token.category_label ?? token.categoryLabel ?? "";
-  return {
-    ...token,
-    base_asset: baseAsset,
-    baseAsset,
-    category_type: categoryType,
-    categoryType,
-    category_label: categoryLabel,
-    categoryLabel
-  };
-}
-
 function setWorkerActivity(workerId, token, intervalCode = null) {
   if (token) {
     activeWorkers.set(workerId, { workerId, symbol: token.symbol, intervalCode });
@@ -285,53 +139,6 @@ function setWorkerActivity(workerId, token, intervalCode = null) {
   const latest = crawlerState.activeTokens[crawlerState.activeTokens.length - 1];
   crawlerState.currentSymbol = latest?.symbol ?? null;
   crawlerState.currentInterval = latest?.intervalCode ?? null;
-}
-
-function intervalMs(intervalCode) {
-  return {
-    "15m": 15 * 60 * 1000,
-    "1h": 60 * 60 * 1000,
-    "4h": 4 * 60 * 60 * 1000,
-    "1d": 24 * 60 * 60 * 1000
-  }[intervalCode];
-}
-
-function intervalLookbackStart(intervalCode) {
-  const fallback = config.crawler.lookbackDays;
-  const lookbackDays = config.crawler.intervalLookbackDays[intervalCode] ?? fallback;
-  const retentionCount = Number(config.crawler.retentionLimits[intervalCode]);
-  const latestClosedOpenTime = latestClosedKlineOpenTime(intervalCode);
-  if (Number.isFinite(retentionCount) && retentionCount > 1) {
-    return latestClosedOpenTime - (retentionCount - 1) * intervalMs(intervalCode);
-  }
-  return latestClosedOpenTime - lookbackDays * 24 * 60 * 60 * 1000;
-}
-
-function latestClosedKlineOpenTime(intervalCode) {
-  const ms = intervalMs(intervalCode);
-  return Math.floor(Date.now() / ms) * ms - ms;
-}
-
-async function fetchKlineRange({ token, intervalCode, startTime, endTime, action, limit, shouldContinue }) {
-  if (endTime < startTime) return 0;
-  let fetchedRows = 0;
-  crawlerState.lastAction = action;
-  await fetchKlinesPaged({
-    symbol: token.symbol,
-    intervalCode,
-    startTime,
-    endTime,
-    limit,
-    onPage: async (page) => {
-      const stored = await upsertKlinePage(token, intervalCode, page);
-      fetchedRows += page.length;
-      const changeSummary = stored ? `，写入/更新 ${stored} 行` : "";
-      crawlerState.lastAction = `${token.symbol} ${intervalCode} 同步 ${page.length} 根K线${changeSummary}`;
-      clearRecoveredNetworkError();
-    },
-    shouldContinue: shouldContinue ?? (() => crawlerState.running)
-  });
-  return fetchedRows;
 }
 
 async function runConcurrent(items, concurrency, worker) {
@@ -432,114 +239,6 @@ export async function runDailyKlineAudit({ syncUniverse = true } = {}) {
   }
 }
 
-async function recomputeAndNotifyToken(token) {
-  token = normalizeCrawlerToken(token);
-  const [previousByInterval, closeGroups] = await Promise.all([
-    selectPreviousSignals(token.symbol),
-    Promise.all(
-      INTERVALS.map(async (intervalCode) => ({
-        intervalCode,
-        closes: await selectClosePrices(token.symbol, intervalCode)
-      }))
-    )
-  ]);
-  const computedSignals = closeGroups.map(({ intervalCode, closes }) => ({
-    intervalCode,
-    previous: previousByInterval.get(intervalCode) ?? null,
-    signal: calculateSignal({ intervalCode, closes })
-  }));
-  await upsertSignals(token, computedSignals.map(({ signal }) => signal));
-
-  const multiCycleSignals = computedSignals.filter(({ signal }) => ["LEVEL1", "LEVEL2"].includes(signal.alertLevel));
-  const telegramContext = {
-    multiCycleCount: multiCycleSignals.length,
-    multiCycleIntervals: multiCycleSignals.map(({ intervalCode }) => intervalCode)
-  };
-  await recordMultiCycleHistory(token, computedSignals, 3);
-
-  const newAlertSignals = computedSignals.filter(
-    ({ previous, signal }) =>
-      ["LEVEL1", "LEVEL2"].includes(signal.alertLevel) && previous?.alert_level !== signal.alertLevel
-  );
-
-  const correlation = await getSignalCorrelationContext(token.symbol);
-  const hotRankActive = multiCycleSignals.length > 0 && correlation.hotRank;
-  const bestAlertLevel = resolveBestAlertLevel(multiCycleSignals);
-  const profile = resolveSignalProfile({
-    fundingOneHour: correlation.fundingOneHour,
-    hotRank: hotRankActive,
-    multiCycleCount: multiCycleSignals.length,
-    alertLevel: bestAlertLevel,
-    oiSpike: correlation.oiSpike
-  });
-  telegramContext.fundingOneHour = correlation.fundingOneHour;
-  telegramContext.hotRank = hotRankActive;
-  telegramContext.oiSpike = correlation.oiSpike;
-  telegramContext.oiChange5mPct = correlation.oiChange5mPct;
-  telegramContext.oiChange1hPct = correlation.oiChange1hPct;
-  telegramContext.oiChange4hPct = correlation.oiChange4hPct;
-  telegramContext.oiChange1dPct = correlation.oiChange1dPct;
-  telegramContext.oiSpike5mHit = correlation.oiSpike5mHit;
-  telegramContext.oiSpike1hHit = correlation.oiSpike1hHit;
-  telegramContext.oiSpike4hHit = correlation.oiSpike4hHit;
-  telegramContext.oiSpike1dHit = correlation.oiSpike1dHit;
-  telegramContext.oiLastSpikeAlertAt = correlation.oiLastSpikeAlertAt;
-  telegramContext.oiAlertPending = correlation.oiAlertPending;
-  telegramContext.alertLevel = bestAlertLevel;
-  telegramContext.profile = profile;
-  if (multiCycleSignals.length > 0 && profile.sourceMask > 0) {
-    if (hotMaAlertingSymbols.has(token.symbol)) return;
-    hotMaAlertingSymbols.add(token.symbol);
-    try {
-      const alertState = buildHotMaSignalAlertState(multiCycleSignals, telegramContext);
-      const changedIntervals = new Set(newAlertSignals.map(({ intervalCode }) => intervalCode));
-      const alertStates = await Promise.all(
-        multiCycleSignals.map(async ({ intervalCode, previous, signal }) => {
-          const previousAlert = await selectHotMaSignalAlert(token.symbol, intervalCode);
-          return {
-            shouldSend: shouldSendHotMaSignalAlert({
-              previousAlert,
-              previousSignalLevel: previous?.alert_level,
-              signal,
-              signalChanged: changedIntervals.has(intervalCode),
-              alertState
-            }),
-            shouldRefresh: shouldRefreshHotMaSignalAlertState(previousAlert, alertState)
-          };
-        })
-      );
-      if (alertStates.some(({ shouldSend }) => shouldSend)) {
-        if (shouldSuppressHotMaSignalAfterOiAlert(telegramContext)) {
-          await Promise.all(
-            multiCycleSignals.map(({ intervalCode, signal }) =>
-              markHotMaSignalAlertSent(token.symbol, intervalCode, signal, alertState)
-            )
-          );
-        } else {
-          const representative = multiCycleSignals.find(({ signal }) => signal.alertLevel === bestAlertLevel)
-            ?? multiCycleSignals[0];
-          const result = await sendHotMaSignalTelegram(token, representative.signal, telegramContext);
-          if (!result.skipped) {
-            await Promise.all(
-              multiCycleSignals.map(({ intervalCode, signal }) =>
-                markHotMaSignalAlertSent(token.symbol, intervalCode, signal, alertState)
-              )
-            );
-          }
-        }
-      } else if (alertStates.some(({ shouldRefresh }) => shouldRefresh)) {
-        await Promise.all(
-          multiCycleSignals.map(({ intervalCode, signal }) =>
-            markHotMaSignalAlertSent(token.symbol, intervalCode, signal, { ...alertState, preserveSentAt: true })
-          )
-        );
-      }
-    } finally {
-      hotMaAlertingSymbols.delete(token.symbol);
-    }
-  }
-}
-
 async function fetchToken(token, workerId) {
   token = normalizeCrawlerToken(token);
   setWorkerActivity(workerId, token);
@@ -550,7 +249,9 @@ async function fetchToken(token, workerId) {
     setWorkerActivity(workerId, token, intervalCode);
     await refreshTokenInterval(token, intervalCode, {
       maxGapPasses: config.crawler.maxGapRepairPasses,
-      shouldContinue: () => crawlerState.running
+      shouldContinue: () => crawlerState.running,
+      onAction: setCrawlerAction,
+      onRecoveredNetwork: clearRecoveredNetworkError
     });
     await sleep(config.crawler.intervalDelayMs);
   }
@@ -561,96 +262,6 @@ async function fetchToken(token, workerId) {
     clearCrawlerError();
     crawlerState.lastAction = `${token.symbol} 四周期缓存与信号计算完成`;
   }
-}
-
-async function refreshTokenInterval(token, intervalCode, { maxGapPasses = 25, shouldContinue = () => true } = {}) {
-  token = normalizeCrawlerToken(token);
-  await markTokenFetching(token.id, intervalCode);
-
-  const targetStartTime = intervalLookbackStart(intervalCode);
-  const targetEndTime = latestClosedKlineOpenTime(intervalCode);
-  const stats = await klineStats(token.symbol, intervalCode);
-  const hasEnoughCoverage =
-    stats.count > 0 &&
-    stats.minOpenTime !== null &&
-    stats.minOpenTime <= targetStartTime;
-  let coverageRows = 0;
-  let gapRows = 0;
-  let recentRows = 0;
-  let repairedGapCount = 0;
-  let attemptedHistoricalCoverage = false;
-
-  if (!hasEnoughCoverage && shouldContinue()) {
-    const startTime = targetStartTime;
-    const endTime = stats.minOpenTime === null
-      ? targetEndTime
-      : Math.min(targetEndTime, stats.minOpenTime - intervalMs(intervalCode));
-    attemptedHistoricalCoverage = true;
-    coverageRows = await fetchKlineRange({
-      token,
-      intervalCode,
-      startTime,
-      endTime,
-      action: `${token.symbol} ${intervalCode} 补齐目标窗口中`,
-      shouldContinue
-    });
-  }
-
-  const gaps = await listKlineGaps(token.symbol, intervalCode, intervalMs(intervalCode), targetStartTime, targetEndTime, maxGapPasses);
-  for (const gap of gaps) {
-    if (!shouldContinue()) break;
-    const fetched = await fetchKlineRange({
-      token,
-      intervalCode,
-      startTime: gap.startTime,
-      endTime: gap.endTime,
-      action: `${token.symbol} ${intervalCode} 补齐中间缺口`,
-      shouldContinue
-    });
-    gapRows += fetched;
-    repairedGapCount += 1;
-    if (fetched === 0) {
-      crawlerState.lastAction = `${token.symbol} ${intervalCode} 缺口 ${new Date(gap.startTime).toISOString()} 未返回K线，继续检查后续缺口`;
-    }
-  }
-
-  const latestStats = await klineStats(token.symbol, intervalCode);
-  if (
-    attemptedHistoricalCoverage &&
-    shouldContinue() &&
-    latestStats.minOpenTime !== null &&
-    latestStats.minOpenTime > targetStartTime
-  ) {
-    await markKlineAvailabilityStart(token.symbol, intervalCode, latestStats.minOpenTime);
-  }
-  const recentStartTime =
-    latestStats.maxOpenTime === null
-      ? targetStartTime
-      : Math.min(Number(latestStats.maxOpenTime) + intervalMs(intervalCode), targetEndTime);
-  const recentEndTime = targetEndTime;
-  if (shouldContinue()) {
-    recentRows = await fetchKlineRange({
-      token,
-      intervalCode,
-      startTime: recentStartTime,
-      endTime: recentEndTime,
-      limit: config.crawler.incrementalKlineLimit,
-      action: `${token.symbol} ${intervalCode} 补最新K线`,
-      shouldContinue
-    });
-  }
-  if (hasEnoughCoverage && recentRows === 0 && gapRows === 0) {
-    crawlerState.lastAction = `${token.symbol} ${intervalCode} 已是最新缓存`;
-  }
-  await refreshTokenFetchState(token.id);
-  return {
-    intervalCode,
-    coverageRows,
-    gapRows,
-    recentRows,
-    repairedGapCount,
-    totalRows: coverageRows + gapRows + recentRows
-  };
 }
 
 export async function refreshLatestKlineTails({ force = false, shouldContinue = () => true } = {}) {
@@ -721,7 +332,9 @@ export async function refreshLatestKlineTails({ force = false, shouldContinue = 
               endTime,
               limit: config.crawler.tailRefreshKlineLimit,
               action: `${token.symbol} ${target.intervalCode} 快速追最新K线`,
-              shouldContinue
+              shouldContinue,
+              onAction: setCrawlerAction,
+              onRecoveredNetwork: clearRecoveredNetworkError
             });
             tokenRows += rows;
           } catch (error) {
@@ -776,7 +389,9 @@ export async function refreshKlineCacheForSymbol(symbol, intervalCode) {
   try {
     const result = await refreshTokenInterval(token, intervalCode, {
       maxGapPasses: config.crawler.onDemandMaxGapRepairPasses,
-      shouldContinue: () => true
+      shouldContinue: () => true,
+      onAction: setCrawlerAction,
+      onRecoveredNetwork: clearRecoveredNetworkError
     });
     crawlerState.lastAction = `${token.symbol} ${intervalCode} 按需K线修复完成`;
     return { ok: true, symbol: token.symbol, ...result };

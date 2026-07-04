@@ -1,4 +1,8 @@
 @import url("./styles/base.css");
+@import url("./styles/hot-rank.css");
+@import url("./styles/chart.css");
+@import url("./styles/runtime-logs.css");
+@import url("./styles/watchlist.css");
 @import url("./styles/workbench.css");
 @import url("./styles/theme.css");
 @import url("./styles/monitoring.css");
