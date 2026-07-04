@@ -3,8 +3,7 @@ import { config } from "./config.js";
 import {
   ensureDatabase,
   markHotRankNotified,
-  recordHotRankSnapshot,
-  recordTriggerHistoryBatch
+  recordHotRankSnapshot
 } from "./db.js";
 import {
   getFundingIntervalMonitorState,
@@ -87,15 +86,7 @@ async function refreshHotRank() {
   const payload = await getHotRank({ chain: "all", limit: 30 });
   const fresh = await recordHotRankSnapshot(payload.tokens ?? []);
   if (!fresh.length) return;
-  const now = Date.now();
-  await recordTriggerHistoryBatch(fresh.map((token) => ({
-    eventKey: `hot:${token.symbol}:${Math.floor(now / 300000)}`,
-    symbol: token.symbol,
-    triggerType: "HOT_RANK",
-    triggerTime: now,
-    details: { chainLabel: token.chainLabel, rank: token.rank }
-  })));
-  const result = await sendHotRankTelegram(fresh);
+  await sendHotRankTelegram(fresh);
   await markHotRankNotified(fresh.map((token) => token.symbol));
 }
 

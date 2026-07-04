@@ -2,13 +2,6 @@ import { config } from "./config.js";
 import { getPool } from "./db/connection.js";
 export { ensureDatabase, getPool, pingDatabase } from "./db/connection.js";
 export {
-  clearTriggerHistory,
-  deleteTriggerHistory,
-  listTriggerHistory,
-  recordTriggerHistory,
-  recordTriggerHistoryBatch
-} from "./db/triggerHistoryRepository.js";
-export {
   claimTelegramAlerts,
   enqueueTelegramAlert,
   getTelegramAlertQueueStats,
@@ -181,23 +174,12 @@ export async function cleanupAllKlineRetention(retentionLimits) {
   return results;
 }
 
-export async function cleanupTriggerHistoryRetention(
-  retentionHours = config.maintenance.triggerHistoryRetentionHours
-) {
-  const safeHours = Math.max(1, Number(retentionHours) || 4);
-  return deleteInBatches(
-    "DELETE FROM signal_trigger_history WHERE trigger_time < DATE_SUB(NOW(3), INTERVAL :retentionHours HOUR)",
-    { retentionHours: safeHours }
-  );
-}
-
 export async function cleanupExpiredData() {
   const hotRankDays = Math.max(1, Number(config.maintenance.hotRankRetentionDays) || 7);
   const ioDays = Math.max(1, Number(config.maintenance.ioRetentionDays) || 7);
   const oiSampleDays = Math.max(2, Number(config.openInterestMonitor.sampleRetentionDays) || 3);
   // trade_event_history is the durable archive for API-limited trade analysis data; do not expire it here.
-  const [triggerHistory, hotSnapshots, staleHotRows, staleOpenInterest, staleOpenInterestSamples, staleTelegramAlerts, staleUnlocks] = await Promise.all([
-    cleanupTriggerHistoryRetention(),
+  const [hotSnapshots, staleHotRows, staleOpenInterest, staleOpenInterestSamples, staleTelegramAlerts, staleUnlocks] = await Promise.all([
     deleteInBatches(
       "DELETE FROM hot_rank_snapshot WHERE snapshot_time < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)",
       { retentionDays: hotRankDays }
@@ -228,7 +210,6 @@ export async function cleanupExpiredData() {
     )
   ]);
   return {
-    triggerHistory,
     hotSnapshots,
     staleHotRows,
     staleOpenInterest,

@@ -22,7 +22,6 @@
           <a class="nav-tab" href="#ioPage" data-nav-page="io">OI监控</a>
           <a class="nav-tab" href="#tradeAnalysisPage" data-nav-page="trade-analysis">交易分析</a>
           <a class="nav-tab" href="#tradeJournalPage" data-nav-page="trade-journal">交易总结</a>
-          <a class="nav-tab" href="#triggerHistoryPage" data-nav-page="trigger-history">触发历史</a>
           <a class="nav-tab" href="#runtimeLogsPage" data-nav-page="runtime-logs">运行日志</a>
         </nav>
         <select id="mobilePageSelect" class="mobile-page-select" aria-label="切换监控页面">
@@ -33,7 +32,6 @@
           <option value="io">OI监控</option>
           <option value="trade-analysis">交易分析</option>
           <option value="trade-journal">交易总结</option>
-          <option value="trigger-history">触发历史</option>
           <option value="runtime-logs">运行日志</option>
         </select>
         <span id="dbState" class="dot-label nav-status">数据库检查中</span>
@@ -261,66 +259,6 @@
               <button id="prevIoPageBtn" class="ghost-button" type="button">上一页</button>
               <strong id="ioPageIndicator">1 / 1</strong>
               <button id="nextIoPageBtn" class="ghost-button" type="button">下一页</button>
-            </div>
-          </div>
-        </section>
-
-        <section id="triggerHistoryPage" class="section page-section" aria-labelledby="triggerHistoryTitle" data-page-section="trigger-history">
-          <div class="section-head">
-            <div>
-              <h2 id="triggerHistoryTitle">触发历史记录</h2>
-              <p>除普通二级预警外，统一记录均线一级、多周期、热度、资金费率、OI 和复合信号。</p>
-            </div>
-            <div class="table-actions">
-              <span id="selectedTriggerCount" class="selection-count">已选 0 条</span>
-              <button id="deleteSelectedTriggerBtn" class="ghost-button" type="button" disabled>删除所选</button>
-              <button id="clearTriggerHistoryBtn" class="ghost-button danger" type="button">一键清空</button>
-              <button id="refreshTriggerHistoryBtn" class="ghost-button" type="button">刷新数据</button>
-            </div>
-          </div>
-
-          <div class="filter-panel" aria-label="trigger history filters">
-            <details class="filter-menu">
-              <summary>触发类型</summary>
-              <label><input type="checkbox" data-trigger-filter="type" data-value="MA_SIGNAL" checked /> 均线信号</label>
-              <label><input type="checkbox" data-trigger-filter="type" data-value="HOT_RANK" checked /> 热度排行</label>
-              <label><input type="checkbox" data-trigger-filter="type" data-value="FUNDING_RATE" checked /> 资金费率</label>
-              <label><input type="checkbox" data-trigger-filter="type" data-value="OI_SPIKE" checked /> OI暴涨</label>
-              <label><input type="checkbox" data-trigger-filter="type" data-value="COMPOSITE" checked /> 复合信号</label>
-            </details>
-          </div>
-
-          <div class="table-card">
-            <table>
-              <thead>
-                <tr>
-                  <th><input type="checkbox" id="selectAllTrigger" /></th>
-                  <th>代币</th>
-                  <th>触发类型</th>
-                  <th>周期</th>
-                  <th>等级</th>
-                  <th>触发时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody id="triggerHistoryRows">
-                <tr><td colspan="7" class="empty">等待数据</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="pagination-bar" aria-label="trigger history pagination">
-            <span id="triggerHistoryPaginationSummary">--</span>
-            <div class="page-size">
-              <span>每页</span>
-              <button class="page-size-btn active" type="button" data-trigger-pagesize="20">20</button>
-              <button class="page-size-btn" type="button" data-trigger-pagesize="50">50</button>
-              <button class="page-size-btn" type="button" data-trigger-pagesize="100">100</button>
-            </div>
-            <div class="page-buttons">
-              <button id="prevTriggerPageBtn" class="ghost-button" type="button">上一页</button>
-              <strong id="triggerPageIndicator">1 / 1</strong>
-              <button id="nextTriggerPageBtn" class="ghost-button" type="button">下一页</button>
             </div>
           </div>
         </section>

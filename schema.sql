@@ -193,26 +193,6 @@ CREATE TABLE IF NOT EXISTS funding_interval_state (
   KEY idx_funding_pending_alerts (funding_interval_hours, source_present, one_hour_confirmed_at, next_one_hour_alert_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 触发历史记录表
-CREATE TABLE IF NOT EXISTS signal_trigger_history (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  event_key VARCHAR(191) NOT NULL,
-  symbol VARCHAR(32) NOT NULL,
-  trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','OI_SPIKE','COMPOSITE') NOT NULL,
-  intervals_triggered VARCHAR(100) NULL,
-  signal_level VARCHAR(32) NULL,
-  trigger_time DATETIME(3) NOT NULL,
-  details JSON NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (id),
-  UNIQUE KEY uk_trigger_event (event_key),
-  KEY idx_trigger_time (trigger_time),
-  KEY idx_trigger_time_id (trigger_time, id),
-  KEY idx_trigger_symbol_time (symbol, trigger_time),
-  KEY idx_trigger_type_time (trigger_type, trigger_time),
-  KEY idx_trigger_type_time_id (trigger_type, trigger_time, id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 -- 交易历史事件表：保存交易所可抓取窗口内拉到的标准化成交/账单/资金费事件，后续从库里分页复盘
 CREATE TABLE IF NOT EXISTS trade_event_history (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

@@ -3,14 +3,12 @@ import { config } from "./config.js";
 import {
   getMaintenanceState,
   getSignalCorrelationContext,
-  listOneHourFundingIntervals,
   markFundingIntervalAlertConfirmed,
   listPendingFundingIntervalAlerts,
   markFundingIntervalAlertSent,
   markFundingIntervalsMissingFromSnapshot,
   markMaintenanceState,
-  recordFundingIntervalSnapshot,
-  recordTriggerHistory
+  recordFundingIntervalSnapshot
 } from "./db.js";
 import { sendFundingIntervalTelegram } from "./telegram.js";
 
@@ -259,26 +257,6 @@ export async function runFundingIntervalCheck({ force = false } = {}) {
       snapshot.symbols,
       config.fundingMonitor.defaultIntervalHours
     );
-    const currentOneHourTokens = await listOneHourFundingIntervals();
-    for (const item of currentOneHourTokens) {
-      const stateTime = new Date(item.lastChangedAt ?? item.firstSeenAt ?? item.lastSeenAt ?? Date.now());
-      const triggerTime = Number.isNaN(stateTime.getTime()) ? Date.now() : stateTime.getTime();
-      await recordTriggerHistory({
-        eventKey: `funding:${item.symbol}:${triggerTime}`,
-        symbol: item.symbol,
-        triggerType: "FUNDING_RATE",
-        triggerTime,
-        details: {
-          fundingIntervalHours: item.fundingIntervalHours,
-          previousFundingIntervalHours: item.previousFundingIntervalHours,
-          adjustedFundingRateCap: item.adjustedFundingRateCap,
-          adjustedFundingRateFloor: item.adjustedFundingRateFloor,
-          currentFundingRate: item.currentFundingRate,
-          nextFundingTime: item.nextFundingTime
-        }
-      });
-    }
-
     if (baselineOnly) {
       const baselineTargetSymbols = items
         .filter((item) => Number(item.fundingIntervalHours) === Number(config.fundingMonitor.targetIntervalHours))

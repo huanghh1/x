@@ -1,6 +1,6 @@
 # 币安二级信号监控台
 
-纯观察向的 Binance 信号监控台，包含四周期 MA100/MA200、综合热度排行、1 小时资金费率、OI、关注池、触发历史和组合信号。首次运行会同步目标币种，然后按并发 worker、全局权重限速和断点续抓规则缓存 K 线到 MySQL。
+纯观察向的 Binance 信号监控台，包含四周期 MA100/MA200、综合热度排行、1 小时资金费率、OI、关注池和组合信号。首次运行会同步目标币种，然后按并发 worker、全局权重限速和断点续抓规则缓存 K 线到 MySQL。
 
 ## 启动顺序
 
@@ -83,16 +83,18 @@ pm2 delete ecosystem.config.cjs
 - `public/js/components/`：自定义选择器。
 - `public/js/ui/`：跨页面复用的交易对操作按钮和复制逻辑。
 - `public/js/chart/`：K 线图表与图表内 Codex 分析。
-- `public/js/pages/`：均线信号、热度排行、资金费率、OI 监控、关注池、交易分析、交易总结、触发历史、运行日志页面模块。
+- `public/js/pages/`：均线信号、热度排行、资金费率、OI 监控、关注池、交易分析、交易总结、运行日志页面模块。
 - `public/js/realtime/`：前端实时行情订阅和价格/K 线推送分发。
 
 样式由 `public/styles.css` 汇总拆分后的 `public/styles/` 文件：`base.css`、`workbench.css`、`theme.css`、`monitoring.css`、`trade-journal.css`。
 
-后端数据库入口仍是 `server/db.js`，具体仓库逻辑拆在 `server/db/`：连接和迁移在 `connection.js`，其余按业务分为 signal、K 线、热度、资金费率、OI、关注池、触发历史、交易历史、交易总结和 Telegram 队列。运行时会自动创建数据库和迁移字段；`schema.sql` 与 `server/db/connection.js` 中的建表结构应保持一致。
+后端数据库入口仍是 `server/db.js`，具体仓库逻辑拆在 `server/db/`：连接和迁移在 `connection.js`，其余按业务分为 signal、K 线、热度、资金费率、OI、关注池、交易历史、交易总结和 Telegram 队列。运行时会自动创建数据库和迁移字段；`schema.sql` 与 `server/db/connection.js` 中的建表结构应保持一致。
 
-后端公开 API 入口仍是 `server/index.js`，但具体路由已拆到 `server/api/`：按 health、crawler、K 线、热度、信号、关注池、资金费/OI、交易分析、交易总结、触发历史和 App 深链分组，鉴权中间件在 `server/api/middleware/`。
+后端公开 API 入口仍是 `server/index.js`，但具体路由已拆到 `server/api/`：按 health、crawler、K 线、热度、信号、关注池、资金费/OI、交易分析、交易总结和 App 深链分组，鉴权中间件在 `server/api/middleware/`。
 
-当前数据库共 19 张业务表：`token_list`、`kline_cache`、`kline_availability`、`signal_result`、`maintenance_state`、`hot_rank_seen`、`watchlist`、`hot_ma_signal_alert`、`multi_cycle_history`、`funding_interval_state`、`signal_trigger_history`、`trade_event_history`、`open_interest_monitor`、`open_interest_sample`、`telegram_alert_queue`、`hot_rank_snapshot`、`token_unlock_cache`、`trade_journal`、`trade_journal_intraday_notes`。
+交易分析入口是 `server/tradeAnalysis.js`，交易所读取和归一化逻辑拆到 `server/tradeAnalysis/`：`binanceProvider.js`、`hyperliquidProvider.js` 和共享工具 `shared.js`。
+
+当前数据库共 18 张业务表：`token_list`、`kline_cache`、`kline_availability`、`signal_result`、`maintenance_state`、`hot_rank_seen`、`watchlist`、`hot_ma_signal_alert`、`multi_cycle_history`、`funding_interval_state`、`trade_event_history`、`open_interest_monitor`、`open_interest_sample`、`telegram_alert_queue`、`hot_rank_snapshot`、`token_unlock_cache`、`trade_journal`、`trade_journal_intraday_notes`。
 
 ## 核心规则
 
@@ -105,14 +107,13 @@ pm2 delete ecosystem.config.cjs
 - 每个周期先检查本地缓存；已覆盖目标窗口则直接跳过，未覆盖则只补齐缺失历史段，入库使用唯一键去重。
 - 程序重启后会继续处理 `pending`、`partial`、`failed`、`fetching` 状态的币种。
 - 四周期独立计算 MA100/MA200，独立写入 `signal_result`。
-- 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理；触发历史和 PM2 运行日志默认每 4 小时清理一次。
+- 数据库维护任务每 7 天自动清理一次超出保留窗口的旧 K 线，不在每次抓取时清理；PM2 运行日志默认每 4 小时清理一次。
 - 关注池会单独开启 Binance Futures WebSocket 实时层，订阅关注代币的价格和四周期 K 线；价格会轻量落库，K 线按周期节流落库且收盘必落库，全市场均线扫描仍按原规则运行。
 - 资金费率结算周期监控默认每小时扫描一次 Binance USDⓈ-M `fundingInfo`，并通过 `premiumIndex` 保存当前资金费率；切换为 1 小时结算会发送独立提醒，未确认时每 5 分钟重复提醒，存在一级或二级均线警报时同步纳入组合信号。
 - OI 达到 `5分钟 >= 2%`、`1小时 >= 10%`、`4小时 >= 20%` 或 `1天 >= 40%` 会记录暴涨信号；有其他信号时发送组合推送，否则发送 OI 独立暴涨推送。阈值可通过 `OPEN_INTEREST_SPIKE_5M_PCT`、`OPEN_INTEREST_SPIKE_1H_PCT`、`OPEN_INTEREST_SPIKE_4H_PCT`、`OPEN_INTEREST_SPIKE_1D_PCT` 调整。
 - 热度排行严格按 BSC、Base、Solana 分链，排除动态市值前 10、稳定币和 Binance 标记的代币化股票。
 - 热度排行仅使用币安 Web3 热度源，不再调用推特热度接口。
 - 同一代币的多个均线周期在页面合并为一行，达到 3 个周期时统一标记为“多周期信号”。
-- 触发历史记录一级均线、热度、资金费率、OI 和复合信号，不记录普通二级预警。
 - K 线接口返回数据库实际根数、目标根数和 MA200 可用状态；新上市代币不会伪造缺失历史。
 - 每天本机时间 0 点自动审计全部活跃代币的四周期 K 线，缺少历史、存在中间断层或最新数据落后时重新入队补齐。
 - 新上线代币会从 Binance 实际可提供的最早 K 线开始抓取；下架代币保留 7 天，期间恢复上线会继续使用原缓存，超过 7 天才删除 K 线。
@@ -171,13 +172,12 @@ K 线清理频率默认每 7 天一次，可通过 `KLINE_CLEANUP_INTERVAL_DAYS`
 
 热榜快照/出现记录、已完成 Telegram 队列、OI 当前快照、非关注池解锁缓存默认保留 7 天，可通过 `HOT_RANK_RETENTION_DAYS` 和 `IO_RETENTION_DAYS` 调整。
 
-触发历史默认保留最近 4 小时并每 4 小时清理一次；PM2 的 `monitor-*-error.log` 和 `monitor-*-out.log` 默认每 4 小时截断一次。可通过 `RECORD_CLEANUP_INTERVAL_HOURS` 统一调整清理频率，也可以用 `TRIGGER_HISTORY_RETENTION_HOURS` 和 `RUNTIME_LOG_CLEANUP_INTERVAL_HOURS` 分别调整触发历史保留窗口和运行日志清理间隔。
+PM2 的 `monitor-*-error.log` 和 `monitor-*-out.log` 默认每 4 小时截断一次。可通过 `RUNTIME_LOG_CLEANUP_INTERVAL_HOURS` 调整清理间隔，`RECORD_CLEANUP_INTERVAL_HOURS` 仍作为兼容回退。
 
 全量 K 线完整性审计默认每天 0 点执行：
 
 ```bash
 RECORD_CLEANUP_INTERVAL_HOURS=4
-TRIGGER_HISTORY_RETENTION_HOURS=4
 RUNTIME_LOG_CLEANUP_INTERVAL_HOURS=4
 KLINE_DAILY_AUDIT_HOUR=0
 INACTIVE_TOKEN_KLINE_RETENTION_DAYS=7
@@ -278,7 +278,7 @@ TELEGRAM_BOT_TOKEN=你的bot token
 TELEGRAM_CHAT_ID=你的chat id
 ```
 
-一级、二级均线警报都不单独发送。Telegram 推送带一级或二级均线警报的资金费率、OI 暴涨、热度、多周期组合；OI 暴涨没有组合信号时发送独立暴涨推送；资金费率 1 小时结算另有独立确认提醒。推特搜索和币安广场以正文链接紧跟代币名，键盘提供“复制代币”和主要菜单导航。Bot 导航包含均线排行、多周期、热度排行、资金费率、OI 和关注池，不包含触发记录。
+一级、二级均线警报都不单独发送。Telegram 推送带一级或二级均线警报的资金费率、OI 暴涨、热度、多周期组合；OI 暴涨没有组合信号时发送独立暴涨推送；资金费率 1 小时结算另有独立确认提醒。推特搜索和币安广场以正文链接紧跟代币名，键盘提供“复制代币”和主要菜单导航。Bot 导航包含均线排行、多周期、热度排行、资金费率、OI 和关注池。
 
 Telegram 请求默认重试 4 次，并对超时、TLS 断连、`429` 和 `5xx` 做指数退避。Bot 回调会先立即确认按钮，再执行查询。
 菜单查询默认缓存 30 秒，并在后台定时预热；缓存过期时会先返回最近一次结果再刷新，避免均线和 OI 按钮反复触发全量聚合。
@@ -347,7 +347,7 @@ MOBULA_API_KEY=你的API密钥
 - `GET /api/signals?category=A`：旧版 A/B 分类信号列表。
 - `GET /api/signals?categories=A,B&levels=LEVEL1,LEVEL2&intervals=15m,1h,4h,1d&page=1&pageSize=20`：页面使用的分页组合信号列表。
 - `GET /api/hot-ma-signals`：Telegram/接口用的热门均线信号分页。
-- `GET /api/multi-history`：多周期触发历史。
+- `GET /api/multi-history`：多周期历史记录。
 - `GET /api/klines`：读取某个交易对某周期的数据库 K 线，必要时会请求 crawler 补齐。
 - `GET /api/hot-rank`：综合热度排行。
 - `GET /api/funding-rate-tokens`：当前 1 小时资金费率代币及关联信号。
@@ -362,8 +362,6 @@ MOBULA_API_KEY=你的API密钥
 - `POST /api/token-analysis/codex`：生成图表代币分析；本机或 `API_MUTATION_TOKEN` 保护。
 - `GET /api/trade-journal`、`GET /api/trade-journal/:id`：读取交易总结；本机或 `API_MUTATION_TOKEN` 保护。
 - `POST /api/trade-journal`、`PUT /api/trade-journal/:id`、`POST /api/trade-journal/:id/intraday-notes`、`DELETE /api/trade-journal/:id`：写入交易总结；本机或 `API_MUTATION_TOKEN` 保护。
-- `GET /api/trigger-history`：统一触发历史，支持类型筛选和分页。
-- `DELETE /api/trigger-history`、`DELETE /api/trigger-history/:id`：清理触发历史；本机或 `API_MUTATION_TOKEN` 保护。
 - `GET /api/runtime-logs`：读取 PM2 和服务运行日志；本机或 `API_MUTATION_TOKEN` 保护。
 - `DELETE /api/runtime-logs`：清理运行日志；本机或 `API_MUTATION_TOKEN` 保护。
 - `GET /api/watchlist/:symbol/unlock`：关注代币解锁缓存。

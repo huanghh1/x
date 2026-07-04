@@ -141,7 +141,6 @@ body[data-page="heat"] [data-page-section="heat"],
 body[data-page="watch"] [data-page-section="watch"],
 body[data-page="funding"] [data-page-section="funding"],
 body[data-page="io"] [data-page-section="io"],
-body[data-page="trigger-history"] [data-page-section="trigger-history"],
 body[data-page="runtime-logs"] [data-page-section="runtime-logs"],
 body[data-page="trade-analysis"] [data-page-section="trade-analysis"],
 body[data-page="trade-journal"] [data-page-section="trade-journal"] { display: block !important; }

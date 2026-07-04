@@ -72,9 +72,8 @@ import {
   resetTradeJournalForm,
   saveTradeJournal
 } from "./js/pages/tradeJournal.js";
-import { configureTriggerHistory, loadTriggerHistory, renderTriggerHistory } from "./js/pages/triggerHistory.js";
 import { updateWatchRealtime } from "./js/realtime/watchRealtime.js";
-import { bindCopyButtons, copyButton, copyText } from "./js/ui/symbolActions.js";
+import { copyText } from "./js/ui/symbolActions.js";
 
 async function bootstrap() {
   if (state.previewMode || state.bootstrapped) return;
@@ -191,14 +190,11 @@ configureTradeJournal({
 
 configureKlineChart({ copyText, signalProfile });
 
-configureTriggerHistory({ copyButton, bindCopyButtons });
-
 function pageFromHash() {
   if (window.location.hash === "#heatPage") return "heat";
   if (window.location.hash === "#watchPage") return "watch";
   if (window.location.hash === "#fundingPage") return "funding";
   if (window.location.hash === "#ioPage") return "io";
-  if (window.location.hash === "#triggerHistoryPage") return "trigger-history";
   if (window.location.hash === "#runtimeLogsPage") return "runtime-logs";
   if (window.location.hash === "#tradeAnalysisPage") return "trade-analysis";
   if (window.location.hash === "#tradeJournalPage") return "trade-journal";
@@ -252,7 +248,6 @@ function setPage(page) {
   else updateWatchRealtime();
   if (page === "funding") loadFundingRateTokens();
   if (page === "io") loadIOMonitoring();
-  if (page === "trigger-history") loadTriggerHistory();
   if (page === "runtime-logs") loadRuntimeLogs();
   if (page === "trade-analysis") {
     alignTradeAnalysisAnchor();
@@ -287,38 +282,6 @@ async function refreshAll({ keepPage = true } = {}) {
   }
 }
 
-document.querySelectorAll("[data-trigger-filter]").forEach((input) => {
-  input.addEventListener("change", () => {
-    if (input.checked) state.triggerTypes.add(input.dataset.value);
-    else state.triggerTypes.delete(input.dataset.value);
-    state.triggerHistoryPage = 1;
-    state.selectedTriggerIds.clear();
-    loadTriggerHistory();
-  });
-});
-
-$("#selectAllTrigger")?.addEventListener("change", (event) => {
-  const checked = event.currentTarget.checked;
-  state.triggerHistory.forEach((item) => {
-    if (checked) state.selectedTriggerIds.add(item.id);
-    else state.selectedTriggerIds.delete(item.id);
-  });
-  renderTriggerHistory();
-});
-
-$("#deleteSelectedTriggerBtn")?.addEventListener("click", async () => {
-  const ids = Array.from(state.selectedTriggerIds);
-  if (!ids.length) return;
-  await api("/api/trigger-history", {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ids })
-  });
-  state.selectedTriggerIds.clear();
-  await loadTriggerHistory();
-});
-
-$("#refreshTriggerHistoryBtn")?.addEventListener("click", () => loadTriggerHistory());
 $("#refreshRuntimeLogsBtn")?.addEventListener("click", () => loadRuntimeLogs());
 $("#refreshTradeAnalysisBtn")?.addEventListener("click", () => loadTradeAnalysis());
 $("#applyTradeFilterBtn")?.addEventListener("click", () => {
@@ -453,58 +416,6 @@ $("#clearRuntimeLogsBtn")?.addEventListener("click", async () => {
   if (!confirm("确定要清空全部 PM2 运行日志吗？")) return;
   await deleteRuntimeLogs();
 });
-$("#clearTriggerHistoryBtn")?.addEventListener("click", async () => {
-  if (!confirm("确定要清空所有历史记录吗？")) return;
-  try {
-    await api("/api/trigger-history", { method: "DELETE" });
-    state.triggerHistory = [];
-    state.triggerHistoryTotal = 0;
-    state.triggerHistoryPage = 1;
-    state.selectedTriggerIds.clear();
-    renderTriggerHistory();
-  } catch (error) {
-    console.error("clear trigger history failed", error);
-  }
-});
-
-document.addEventListener("click", async (e) => {
-  const deleteBtn = e.target.closest("[data-delete-trigger]");
-  if (deleteBtn) {
-    const id = deleteBtn.dataset.deleteTrigger;
-    try {
-      await api(`/api/trigger-history/${id}`, { method: "DELETE" });
-      state.selectedTriggerIds.delete(Number(id));
-      await loadTriggerHistory();
-    } catch (error) {
-      console.error("delete trigger history failed", error);
-    }
-  }
-});
-
-document.querySelectorAll("[data-trigger-pagesize]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    state.triggerHistoryPageSize = Number(btn.dataset.triggerPagesize);
-    state.triggerHistoryPage = 1;
-    document.querySelectorAll("[data-trigger-pagesize]").forEach((item) => item.classList.toggle("active", item === btn));
-    loadTriggerHistory();
-  });
-});
-
-$("#prevTriggerPageBtn")?.addEventListener("click", () => {
-  if (state.triggerHistoryPage > 1) {
-    state.triggerHistoryPage -= 1;
-    loadTriggerHistory();
-  }
-});
-
-$("#nextTriggerPageBtn")?.addEventListener("click", () => {
-  const totalPages = Math.ceil(state.triggerHistoryTotal / state.triggerHistoryPageSize) || 1;
-  if (state.triggerHistoryPage < totalPages) {
-    state.triggerHistoryPage += 1;
-    loadTriggerHistory();
-  }
-});
-
 $("#refreshBtn")?.addEventListener("click", () => refreshAll({ keepPage: false }));
 
 for (const anchor of document.querySelectorAll('a[href^="#"]')) {
@@ -529,7 +440,6 @@ $("#mobilePageSelect")?.addEventListener("change", (event) => {
     watch: "#watchPage",
     funding: "#fundingPage",
     io: "#ioPage",
-    "trigger-history": "#triggerHistoryPage",
     "runtime-logs": "#runtimeLogsPage",
     "trade-analysis": "#tradeAnalysisPage",
     "trade-journal": "#tradeJournalPage"

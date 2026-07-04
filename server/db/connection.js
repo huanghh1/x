@@ -230,24 +230,6 @@ const TABLE_SQL = [
     KEY idx_funding_interval_changed (funding_interval_hours, last_changed_at, symbol),
     KEY idx_funding_pending_alerts (funding_interval_hours, source_present, one_hour_confirmed_at, next_one_hour_alert_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-  `CREATE TABLE IF NOT EXISTS signal_trigger_history (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    event_key VARCHAR(191) NOT NULL,
-    symbol VARCHAR(32) NOT NULL,
-    trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','OI_SPIKE','COMPOSITE') NOT NULL,
-    intervals_triggered VARCHAR(100) NULL,
-    signal_level VARCHAR(32) NULL,
-    trigger_time DATETIME(3) NOT NULL,
-    details JSON NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_trigger_event (event_key),
-    KEY idx_trigger_time (trigger_time),
-    KEY idx_trigger_time_id (trigger_time, id),
-    KEY idx_trigger_symbol_time (symbol, trigger_time),
-    KEY idx_trigger_type_time (trigger_type, trigger_time),
-    KEY idx_trigger_type_time_id (trigger_type, trigger_time, id)
-  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS trade_event_history (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     event_key VARCHAR(191) NOT NULL,
@@ -465,6 +447,7 @@ async function initializeDatabase() {
       for (const sql of TABLE_SQL) {
         await migrationConnection.query(sql);
       }
+      await migrationConnection.query("DROP TABLE IF EXISTS signal_trigger_history");
       await ensureTokenListPolicyColumn();
       await ensureTokenListActiveColumn();
       await ensureTokenListInactiveSinceColumn();
@@ -474,7 +457,6 @@ async function initializeDatabase() {
       await ensureTokenUnlockStatusSchema();
       await ensureHotMaSignalAlertSchema();
       await ensureOpenInterestAlertSchema();
-      await ensureTriggerHistorySchema();
       await ensureTradeEventHistorySchema();
       await ensurePerformanceIndexes();
       await deactivateExcludedTokens();
@@ -587,33 +569,6 @@ async function ensureOpenInterestAlertSchema() {
   }
 }
 
-async function ensureTriggerHistorySchema() {
-  if (!(await tableExists("signal_trigger_history"))) return;
-  if (!(await columnExists("signal_trigger_history", "event_key"))) {
-    await pool.query("ALTER TABLE signal_trigger_history ADD COLUMN event_key VARCHAR(191) NULL AFTER id");
-    await pool.query("UPDATE signal_trigger_history SET event_key=CONCAT('legacy:', id) WHERE event_key IS NULL");
-    await pool.query("ALTER TABLE signal_trigger_history MODIFY event_key VARCHAR(191) NOT NULL");
-  }
-  const triggerType = String((await getColumn("signal_trigger_history", "trigger_type"))?.columnType ?? "");
-  if (triggerType.includes("IO_SPIKE")) {
-    if (!triggerType.includes("OI_SPIKE")) {
-      await pool.query(
-        "ALTER TABLE signal_trigger_history MODIFY trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','IO_SPIKE','OI_SPIKE','COMPOSITE') NOT NULL"
-      );
-    }
-    await pool.query("UPDATE signal_trigger_history SET trigger_type='OI_SPIKE' WHERE trigger_type='IO_SPIKE'");
-  }
-  const currentTriggerType = String((await getColumn("signal_trigger_history", "trigger_type"))?.columnType ?? "");
-  if (currentTriggerType && (!currentTriggerType.includes("OI_SPIKE") || currentTriggerType.includes("IO_SPIKE"))) {
-    await pool.query(
-      "ALTER TABLE signal_trigger_history MODIFY trigger_type ENUM('MA_SIGNAL','HOT_RANK','FUNDING_RATE','OI_SPIKE','COMPOSITE') NOT NULL"
-    );
-  }
-  if (!(await indexExists("signal_trigger_history", "uk_trigger_event"))) {
-    await pool.query("ALTER TABLE signal_trigger_history ADD UNIQUE KEY uk_trigger_event (event_key)");
-  }
-}
-
 async function ensureTradeEventHistorySchema() {
   if (!(await tableExists("trade_event_history"))) return;
   const columns = [
@@ -667,8 +622,6 @@ async function ensurePerformanceIndexes() {
   await ensureIndex("open_interest_monitor", "idx_oi_1h", "(change_1h_pct, observed_at)");
   await ensureIndex("open_interest_monitor", "idx_oi_4h", "(change_4h_pct, observed_at)");
   await ensureIndex("open_interest_monitor", "idx_oi_1d", "(change_1d_pct, observed_at)");
-  await ensureIndex("signal_trigger_history", "idx_trigger_time_id", "(trigger_time, id)");
-  await ensureIndex("signal_trigger_history", "idx_trigger_type_time_id", "(trigger_type, trigger_time, id)");
   await ensureIndex("trade_event_history", "idx_trade_time_id", "(event_time_ms, id)");
   await ensureIndex("trade_event_history", "idx_trade_source_time", "(source, event_time_ms, id)");
   await ensureIndex("trade_event_history", "idx_trade_symbol_time", "(symbol, event_time_ms, id)");

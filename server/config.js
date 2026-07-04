@@ -178,11 +178,6 @@ export const config = {
     cleanupIntervalDays: numberEnv("KLINE_CLEANUP_INTERVAL_DAYS", 7),
     checkIntervalMs: numberEnv("MAINTENANCE_CHECK_INTERVAL_MS", 60 * 60 * 1000),
     deleteBatchSize: numberEnv("MAINTENANCE_DELETE_BATCH_SIZE", 5000),
-    recordCleanupIntervalHours: Math.max(1, numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4)),
-    triggerHistoryRetentionHours: Math.max(
-      1,
-      numberEnv("TRIGGER_HISTORY_RETENTION_HOURS", numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4))
-    ),
     hotRankRetentionDays: numberEnv("HOT_RANK_RETENTION_DAYS", 7),
     ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 7),
     runtimeLogCleanupIntervalHours: Math.max(

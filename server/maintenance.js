@@ -2,14 +2,12 @@ import { config } from "./config.js";
 import {
   cleanupAllKlineRetention,
   cleanupExpiredData,
-  cleanupTriggerHistoryRetention,
   getMaintenanceState,
   markMaintenanceState
 } from "./db.js";
 import { cleanupRuntimeLogFiles } from "./runtimeLogs.js";
 
 const KLINE_CLEANUP_TASK = "kline_retention_cleanup";
-const TRIGGER_HISTORY_CLEANUP_TASK = "trigger_history_cleanup";
 const RUNTIME_LOG_CLEANUP_TASK = "runtime_log_cleanup";
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -23,15 +21,6 @@ const maintenanceState = {
 };
 
 const runtimeLogCleanupState = {
-  running: false,
-  lastRunAt: null,
-  lastResult: null,
-  nextRunAt: null,
-  lastError: null,
-  timer: null
-};
-
-const triggerHistoryCleanupState = {
   running: false,
   lastRunAt: null,
   lastResult: null,
@@ -65,13 +54,6 @@ export function getMaintenanceRuntimeState() {
     lastResult: maintenanceState.lastResult,
     nextCheckAt: maintenanceState.nextCheckAt,
     lastError: maintenanceState.lastError,
-    triggerHistoryCleanup: {
-      running: triggerHistoryCleanupState.running,
-      lastRunAt: triggerHistoryCleanupState.lastRunAt,
-      lastResult: triggerHistoryCleanupState.lastResult,
-      nextRunAt: triggerHistoryCleanupState.nextRunAt,
-      lastError: triggerHistoryCleanupState.lastError
-    },
     runtimeLogCleanup: {
       running: runtimeLogCleanupState.running,
       lastRunAt: runtimeLogCleanupState.lastRunAt,
@@ -127,29 +109,6 @@ async function loadCleanupState(taskName, state) {
   return state;
 }
 
-export async function runTriggerHistoryCleanup() {
-  if (triggerHistoryCleanupState.running) return triggerHistoryCleanupState;
-  triggerHistoryCleanupState.running = true;
-  try {
-    const deletedRows = await cleanupTriggerHistoryRetention();
-    const summary = JSON.stringify({
-      retentionHours: config.maintenance.triggerHistoryRetentionHours,
-      deletedRows
-    });
-    await markMaintenanceState(TRIGGER_HISTORY_CLEANUP_TASK, summary);
-    const updated = await getMaintenanceState(TRIGGER_HISTORY_CLEANUP_TASK);
-    triggerHistoryCleanupState.lastRunAt = updated?.lastRunAt ?? null;
-    triggerHistoryCleanupState.lastResult = updated?.lastResult ?? summary;
-    triggerHistoryCleanupState.lastError = null;
-    return triggerHistoryCleanupState;
-  } catch (error) {
-    triggerHistoryCleanupState.lastError = error instanceof Error ? error.message : String(error);
-    throw error;
-  } finally {
-    triggerHistoryCleanupState.running = false;
-  }
-}
-
 export async function runRuntimeLogCleanup() {
   if (runtimeLogCleanupState.running) return runtimeLogCleanupState;
   runtimeLogCleanupState.running = true;
@@ -194,14 +153,6 @@ function scheduleIntervalCleanup(state, runner, intervalMs, { afterFailure = fal
   state.timer.unref?.();
 }
 
-function scheduleNextTriggerHistoryCleanup() {
-  scheduleIntervalCleanup(
-    triggerHistoryCleanupState,
-    runTriggerHistoryCleanup,
-    hoursToMs(config.maintenance.recordCleanupIntervalHours)
-  );
-}
-
 function scheduleNextRuntimeLogCleanup() {
   scheduleIntervalCleanup(
     runtimeLogCleanupState,
@@ -212,9 +163,7 @@ function scheduleNextRuntimeLogCleanup() {
 
 export async function startMaintenanceScheduler() {
   await runWeeklyKlineCleanupIfDue({ initializeOnly: true });
-  await loadCleanupState(TRIGGER_HISTORY_CLEANUP_TASK, triggerHistoryCleanupState);
   await loadCleanupState(RUNTIME_LOG_CLEANUP_TASK, runtimeLogCleanupState);
-  scheduleNextTriggerHistoryCleanup();
   scheduleNextRuntimeLogCleanup();
   const tick = async () => {
     maintenanceState.nextCheckAt = new Date(Date.now() + config.maintenance.checkIntervalMs).toISOString();

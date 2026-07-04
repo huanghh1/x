@@ -6,7 +6,6 @@ import {
   getSignalCorrelationContext,
   listOpenInterestScanTokens,
   markOpenInterestSpikeAlertSent,
-  recordTriggerHistory,
   upsertOpenInterestSamples,
   upsertOpenInterestSnapshot
 } from "./db.js";
@@ -358,28 +357,6 @@ async function scanToken(token, { markPrices = new Map(), claimHistoryBootstrap 
 
   const context = await getSignalCorrelationContext(token.symbol);
   const alertState = buildOpenInterestAlertState(spike, context);
-  await recordTriggerHistory({
-    eventKey: `oi:${token.symbol}:${snapshot.observedAt}`,
-    symbol: token.symbol,
-    triggerType: "OI_SPIKE",
-    intervals: context.intervals.join(","),
-    signalLevel: context.multiCycleCount >= 3 ? "MULTI_CYCLE" : null,
-    triggerTime: snapshot.observedAt,
-    details: {
-      ...snapshot,
-      spike5mHit: spike.hit5m,
-      spike1hHit: spike.hit1h,
-      spike4hHit: spike.hit4h,
-      spike1dHit: spike.hit1d,
-      ...context,
-      sources: [
-        "OI_SPIKE",
-        context.hotRank ? "HOT_RANK" : null,
-        context.fundingOneHour ? "FUNDING_RATE" : null,
-        context.multiCycleCount >= 3 ? "MULTI_CYCLE" : null
-      ].filter(Boolean)
-    }
-  });
 
   if (!shouldSendOpenInterestSpikeAlert({ previous, previousSpike, spike, alertState })) {
     if (shouldRefreshOpenInterestSpikeAlertState({ previous, previousSpike, alertState })) {

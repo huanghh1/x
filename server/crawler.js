@@ -16,7 +16,6 @@ import {
   markTokenPartial,
   queueActiveTokensForKlineAudit,
   recordMultiCycleHistory,
-  recordTriggerHistoryBatch,
   refreshTokenFetchState,
   resetInterruptedFetchingTokens,
   selectClosePrices,
@@ -452,54 +451,16 @@ async function recomputeAndNotifyToken(token) {
   await upsertSignals(token, computedSignals.map(({ signal }) => signal));
 
   const multiCycleSignals = computedSignals.filter(({ signal }) => ["LEVEL1", "LEVEL2"].includes(signal.alertLevel));
-  const previousMultiCycleCount = computedSignals.filter(({ previous }) =>
-    ["LEVEL1", "LEVEL2"].includes(previous?.alert_level)
-  ).length;
   const telegramContext = {
     multiCycleCount: multiCycleSignals.length,
     multiCycleIntervals: multiCycleSignals.map(({ intervalCode }) => intervalCode)
   };
   await recordMultiCycleHistory(token, computedSignals, 3);
 
-  const latestSignalTime =
-    Math.max(...computedSignals.map(({ signal }) => Number(signal.signalTime) || 0)) || Date.now();
-  const newLevel1Signals = computedSignals.filter(
-    ({ previous, signal }) => signal.alertLevel === "LEVEL1" && previous?.alert_level !== "LEVEL1"
-  );
   const newAlertSignals = computedSignals.filter(
     ({ previous, signal }) =>
       ["LEVEL1", "LEVEL2"].includes(signal.alertLevel) && previous?.alert_level !== signal.alertLevel
   );
-  const triggerEvents = [];
-  if (newLevel1Signals.length) {
-    triggerEvents.push({
-      eventKey: `ma:${token.symbol}:${newLevel1Signals.map(({ intervalCode }) => intervalCode).join("-")}:${latestSignalTime}`,
-      symbol: token.symbol,
-      triggerType: "MA_SIGNAL",
-      intervals: computedSignals
-        .filter(({ signal }) => signal.alertLevel === "LEVEL1")
-        .map(({ intervalCode }) => intervalCode)
-        .join(","),
-      signalLevel: "LEVEL1",
-      triggerTime: latestSignalTime,
-      details: {
-        newlyTriggeredIntervals: newLevel1Signals.map(({ intervalCode }) => intervalCode),
-        multiCycleCount: multiCycleSignals.length
-      }
-    });
-  }
-
-  if (multiCycleSignals.length >= 3 && previousMultiCycleCount < 3) {
-    triggerEvents.push({
-      eventKey: `multi:${token.symbol}:${multiCycleSignals.map(({ intervalCode }) => intervalCode).join("-")}:${latestSignalTime}`,
-      symbol: token.symbol,
-      triggerType: "COMPOSITE",
-      intervals: telegramContext.multiCycleIntervals.join(","),
-      signalLevel: multiCycleSignals.some(({ signal }) => signal.alertLevel === "LEVEL1") ? "LEVEL1" : null,
-      triggerTime: latestSignalTime,
-      details: { sources: ["MA", "MULTI_CYCLE"], multiCycleCount: multiCycleSignals.length }
-    });
-  }
 
   const correlation = await getSignalCorrelationContext(token.symbol);
   const hotRankActive = multiCycleSignals.length > 0 && correlation.hotRank;
@@ -526,33 +487,6 @@ async function recomputeAndNotifyToken(token) {
   telegramContext.oiAlertPending = correlation.oiAlertPending;
   telegramContext.alertLevel = bestAlertLevel;
   telegramContext.profile = profile;
-  const compositeChanged = newAlertSignals.length > 0 || (multiCycleSignals.length >= 3 && previousMultiCycleCount < 3);
-  if (profile.sourceMask > 1 && compositeChanged) {
-    triggerEvents.push({
-      eventKey: `combo:${token.symbol}:${profile.key}:${telegramContext.multiCycleIntervals.join("-")}:${latestSignalTime}`,
-      symbol: token.symbol,
-      triggerType: "COMPOSITE",
-      intervals: telegramContext.multiCycleIntervals.join(","),
-      signalLevel: bestAlertLevel,
-      triggerTime: latestSignalTime,
-      details: {
-        sources: [
-          "MA",
-          correlation.fundingOneHour ? "FUNDING_RATE" : null,
-          correlation.oiSpike ? "OI_SPIKE" : null,
-          hotRankActive ? "HOT_RANK" : null,
-          profile.multi ? "MULTI_CYCLE" : null
-        ].filter(Boolean),
-        newlyTriggeredIntervals: newAlertSignals.map(({ intervalCode }) => intervalCode),
-        multiCycleCount: multiCycleSignals.length,
-        sourceMask: profile.sourceMask,
-        priority: profile.priority,
-        profile: profile.label
-      }
-    });
-  }
-  await recordTriggerHistoryBatch(triggerEvents);
-
   if (multiCycleSignals.length > 0 && profile.sourceMask > 0) {
     if (hotMaAlertingSymbols.has(token.symbol)) return;
     hotMaAlertingSymbols.add(token.symbol);

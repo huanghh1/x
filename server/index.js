@@ -15,7 +15,6 @@ import { createRuntimeLogsRouter } from "./api/runtimeLogsRoutes.js";
 import { createSignalRoutes } from "./api/signalRoutes.js";
 import { createTradeAnalysisRoutes } from "./api/tradeAnalysisRoutes.js";
 import { createTradeJournalRoutes } from "./api/tradeJournalRoutes.js";
-import { createTriggerHistoryRoutes } from "./api/triggerHistoryRoutes.js";
 import { createWatchlistRoutes } from "./api/watchlistRoutes.js";
 import { startTradePositionPrefetch } from "./tradeAnalysis.js";
 
@@ -38,7 +37,6 @@ app.use(createHotRankRoutes());
 app.use(createMarketMonitorRoutes({ requireLocalMutation }));
 app.use(createWatchlistRoutes({ requireLocalMutation }));
 app.use(createOpenAppRoutes());
-app.use(createTriggerHistoryRoutes({ requireLocalMutation }));
 
 app.use((_request, response) => {
   response.sendFile(path.resolve(__dirname, "../public/index.html"));
