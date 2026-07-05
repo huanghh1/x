@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { mapLimit } from "./concurrency.js";
 import {
   getTokenUnlockCache,
   listWatchlistUnlockTargets,
@@ -9,11 +10,13 @@ import { resolveOfficialUnlock } from "./officialUnlocks.js";
 let timer = null;
 let alphaTokenCache = null;
 let alphaTokenCacheAt = 0;
+let alphaTokenInflight = null;
 const state = {
   running: false,
   lastRunAt: null,
   nextRunAt: null,
   updatedCount: 0,
+  concurrency: config.unlock.concurrency,
   errors: []
 };
 
@@ -231,11 +234,19 @@ async function searchUnlockSources(symbol, baseAsset) {
 
 async function fetchBinanceAlphaTokens() {
   if (alphaTokenCache && Date.now() - alphaTokenCacheAt < 5 * 60 * 1000) return alphaTokenCache;
-  const payload = await fetchJson(config.binance.alphaTokenListUrl);
-  const rows = Array.isArray(payload?.data) ? payload.data : [];
-  alphaTokenCache = rows;
-  alphaTokenCacheAt = Date.now();
-  return rows;
+  if (!alphaTokenInflight) {
+    alphaTokenInflight = fetchJson(config.binance.alphaTokenListUrl)
+      .then((payload) => {
+        const rows = Array.isArray(payload?.data) ? payload.data : [];
+        alphaTokenCache = rows;
+        alphaTokenCacheAt = Date.now();
+        return rows;
+      })
+      .finally(() => {
+        alphaTokenInflight = null;
+      });
+  }
+  return alphaTokenInflight;
 }
 
 async function fetchOfficial(baseAsset) {
@@ -331,17 +342,34 @@ export async function runTokenUnlockRefresh({ force = false } = {}) {
   if (state.running) return { skipped: true, reason: "Token unlock refresh already running" };
   state.running = true;
   state.errors = [];
+  state.concurrency = config.unlock.concurrency;
   try {
     const targets = await listWatchlistUnlockTargets({ expiredOnly: !force });
     let updatedCount = 0;
-    for (const target of targets) {
-      const item = await refreshTokenUnlock(target.symbol, target.baseAsset, { force });
+    const results = await mapLimit(targets, config.unlock.concurrency, (target) =>
+      refreshTokenUnlock(target.symbol, target.baseAsset, { force })
+    );
+    for (const [index, result] of results.entries()) {
+      const target = targets[index];
+      if (result.status === "rejected") {
+        const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        state.errors.push(`${target?.symbol ?? "UNKNOWN"}: ${message}`);
+        continue;
+      }
+      const item = result.value;
       if (item) updatedCount += 1;
       if (item?.status === "error") state.errors.push(`${target.symbol}: ${item.error}`);
     }
     state.lastRunAt = new Date().toISOString();
     state.updatedCount = updatedCount;
-    return { ok: true, updatedCount, errors: state.errors.slice(0, 20) };
+    return {
+      ok: true,
+      partial: state.errors.length > 0,
+      targetCount: targets.length,
+      updatedCount,
+      concurrency: config.unlock.concurrency,
+      errors: state.errors.slice(0, 20)
+    };
   } finally {
     state.running = false;
   }
@@ -365,6 +393,7 @@ export function getTokenUnlockState() {
   return {
     enabled: config.unlock.enabled,
     provider: config.unlock.provider,
+    concurrency: config.unlock.concurrency,
     ...state
   };
 }

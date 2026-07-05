@@ -1,4 +1,5 @@
 import { fetchCurrentFundingRates, fetchFundingInfo } from "./binance.js";
+import { mapLimit } from "./concurrency.js";
 import { config } from "./config.js";
 import {
   getMaintenanceState,
@@ -33,6 +34,7 @@ const fundingMonitorState = {
   lastSeenCount: 0,
   lastMissingCount: 0,
   lastPendingCount: 0,
+  alertConcurrency: config.fundingMonitor.alertConcurrency,
   lastAlertedSymbols: [],
   lastSkippedAlerts: []
 };
@@ -99,6 +101,7 @@ export function getFundingIntervalMonitorState() {
     enabled: config.fundingMonitor.enabled,
     scanIntervalMs: config.fundingMonitor.scanIntervalMs,
     alertPollMs: config.fundingMonitor.alertPollMs,
+    alertConcurrency: config.fundingMonitor.alertConcurrency,
     targetIntervalHours: config.fundingMonitor.targetIntervalHours,
     defaultIntervalHours: config.fundingMonitor.defaultIntervalHours,
     ...fundingMonitorState
@@ -131,20 +134,25 @@ async function sendPendingFundingIntervalAlerts({ recordState = true } = {}) {
     const pendingAlerts = await listPendingFundingIntervalAlerts(config.fundingMonitor.targetIntervalHours);
     const sentSymbols = [];
     const skippedAlerts = [];
+    fundingMonitorState.alertConcurrency = config.fundingMonitor.alertConcurrency;
 
-    for (const alert of pendingAlerts) {
-      try {
-        const context = await getSignalCorrelationContext(alert.symbol);
-        const result = await sendFundingIntervalTelegram(alert, context);
-        if (result.skipped) {
-          skippedAlerts.push(`${alert.symbol}: ${result.reason}`);
-        } else {
-          sentSymbols.push(alert.symbol);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+    const results = await mapLimit(pendingAlerts, config.fundingMonitor.alertConcurrency, async (alert) => {
+      const context = await getSignalCorrelationContext(alert.symbol);
+      const result = await sendFundingIntervalTelegram(alert, context);
+      return { alert, result };
+    });
+    for (const [index, settled] of results.entries()) {
+      const alert = pendingAlerts[index];
+      if (settled.status === "rejected") {
+        const message = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
         skippedAlerts.push(`${alert.symbol}: ${message}`);
-        console.error("funding interval telegram alert failed", alert.symbol, error);
+        console.error("funding interval telegram alert failed", alert.symbol, settled.reason);
+        continue;
+      }
+      if (settled.value.result.skipped) {
+        skippedAlerts.push(`${alert.symbol}: ${settled.value.result.reason}`);
+      } else {
+        sentSymbols.push(alert.symbol);
       }
     }
 
@@ -159,6 +167,7 @@ async function sendPendingFundingIntervalAlerts({ recordState = true } = {}) {
       ok: true,
       pendingCount: pendingAlerts.length,
       sentSymbols,
+      concurrency: config.fundingMonitor.alertConcurrency,
       skippedAlerts: fundingMonitorState.lastSkippedAlerts
     };
     if (recordState) await markMaintenanceState(ALERT_TASK, JSON.stringify(result));

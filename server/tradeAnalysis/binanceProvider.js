@@ -187,16 +187,20 @@ async function fetchBinanceTradesForSymbol(config, symbol, window, activityTimes
 async function fetchBinanceFundingRates(config, symbols, window) {
   const result = new Map();
   const source = config.tradeAnalysis.binance;
-  for (const symbol of symbols) {
+  const settled = await mapLimit(symbols, source.fundingRateConcurrency, async (symbol) => {
+    const payload = await fetchJson(`${normalizeBaseUrl(source.futuresBaseUrl)}/fapi/v1/fundingRate?${new URLSearchParams({
+      symbol,
+      startTime: String(Math.max(window.startMs, window.endMs - BINANCE_MAX_LOOKBACK_MS)),
+      endTime: String(window.endMs),
+      limit: "1000"
+    })}`, {}, config.tradeAnalysis.requestTimeoutMs);
+    return { symbol, rows: Array.isArray(payload) ? payload : [] };
+  });
+  for (const item of settled) {
+    if (item.status !== "fulfilled") continue;
     try {
-      const payload = await fetchJson(`${normalizeBaseUrl(source.futuresBaseUrl)}/fapi/v1/fundingRate?${new URLSearchParams({
-        symbol,
-        startTime: String(Math.max(window.startMs, window.endMs - BINANCE_MAX_LOOKBACK_MS)),
-        endTime: String(window.endMs),
-        limit: "1000"
-      })}`, {}, config.tradeAnalysis.requestTimeoutMs);
-      for (const row of Array.isArray(payload) ? payload : []) {
-        result.set(`${symbol}:${Number(row.fundingTime) || 0}`, row.fundingRate);
+      for (const row of item.value.rows) {
+        result.set(`${item.value.symbol}:${Number(row.fundingTime) || 0}`, row.fundingRate);
       }
     } catch {
       // Funding rates are enrichment only; income rows still carry the actual funding fee.

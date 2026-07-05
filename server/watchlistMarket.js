@@ -1,4 +1,5 @@
 import { fetchKlinesPaged } from "./binance.js";
+import { mapLimit } from "./concurrency.js";
 import { config } from "./config.js";
 import {
   klineStats,
@@ -14,6 +15,7 @@ import { calculateSignal, INTERVALS } from "./ma.js";
 let refreshing = false;
 let lastSkippedRealtimeAt = 0;
 let lastFullRefreshAt = 0;
+let lastFullRefreshError = null;
 
 function intervalMs(intervalCode) {
   return {
@@ -56,8 +58,9 @@ async function repairGaps(token, intervalCode) {
   const startTime = targetStart(intervalCode);
   const endTime = latestClosedKlineOpenTime(intervalCode);
   const stats = await klineStats(token.symbol, intervalCode);
+  let fetchedRows = 0;
   if (stats.minOpenTime === null || stats.minOpenTime > startTime) {
-    await fetchRange(
+    fetchedRows += await fetchRange(
       token,
       intervalCode,
       startTime,
@@ -68,7 +71,20 @@ async function repairGaps(token, intervalCode) {
   for (const gap of gaps) {
     const fetched = await fetchRange(token, intervalCode, gap.startTime, gap.endTime);
     if (!fetched) continue;
+    fetchedRows += fetched;
   }
+  return fetchedRows;
+}
+
+async function refreshWatchlistToken(token) {
+  let refreshedRows = 0;
+  for (const intervalCode of INTERVALS) {
+    refreshedRows += await repairGaps(token, intervalCode);
+    const closes = await selectClosePrices(token.symbol, intervalCode);
+    await upsertSignal(token, calculateSignal({ intervalCode, closes }));
+  }
+  await refreshTokenFetchState(token.id);
+  return refreshedRows;
 }
 
 export async function refreshWatchlistMarketData({ force = false, full = false } = {}) {
@@ -86,16 +102,40 @@ export async function refreshWatchlistMarketData({ force = false, full = false }
   refreshing = true;
   try {
     const tokens = await listWatchlistTokens();
-    for (const token of tokens) {
-      for (const intervalCode of INTERVALS) {
-        await repairGaps(token, intervalCode);
-        const closes = await selectClosePrices(token.symbol, intervalCode);
-        await upsertSignal(token, calculateSignal({ intervalCode, closes }));
+    const results = await mapLimit(tokens, config.crawler.watchlistMarketConcurrency, refreshWatchlistToken);
+    const errors = [];
+    let refreshedRows = 0;
+    let refreshedTokenCount = 0;
+    for (const [index, result] of results.entries()) {
+      const token = tokens[index];
+      if (result.status === "fulfilled") {
+        refreshedTokenCount += 1;
+        refreshedRows += Number(result.value) || 0;
+        continue;
       }
-      await refreshTokenFetchState(token.id);
+      const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      errors.push(`${token?.symbol ?? "UNKNOWN"}: ${message}`);
+    }
+    if (errors.length && refreshedTokenCount === 0) {
+      throw new Error(`watchlist market refresh failed for all tokens: ${errors[0]}`);
     }
     lastFullRefreshAt = Date.now();
-    return { ok: true, tokenCount: tokens.length, intervals: INTERVALS, realtimeManaged: true };
+    lastFullRefreshError = errors.at(-1) ?? null;
+    return {
+      ok: true,
+      partial: errors.length > 0,
+      tokenCount: tokens.length,
+      refreshedTokenCount,
+      refreshedRows,
+      errorCount: errors.length,
+      errors: errors.slice(0, 20),
+      intervals: INTERVALS,
+      realtimeManaged: true,
+      concurrency: config.crawler.watchlistMarketConcurrency
+    };
+  } catch (error) {
+    lastFullRefreshError = error instanceof Error ? error.message : String(error);
+    throw error;
   } finally {
     refreshing = false;
   }
@@ -105,6 +145,8 @@ export function getWatchlistMarketState() {
   return {
     refreshing,
     lastSkippedRealtimeAt: lastSkippedRealtimeAt ? new Date(lastSkippedRealtimeAt).toISOString() : null,
-    lastFullRefreshAt: lastFullRefreshAt ? new Date(lastFullRefreshAt).toISOString() : null
+    lastFullRefreshAt: lastFullRefreshAt ? new Date(lastFullRefreshAt).toISOString() : null,
+    lastFullRefreshError,
+    concurrency: config.crawler.watchlistMarketConcurrency
   };
 }

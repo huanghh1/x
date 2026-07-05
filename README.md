@@ -100,7 +100,7 @@ pm2 delete ecosystem.config.cjs
 
 - 目标代币分两类：A 类为 Alpha + 合约 + 无现货；B 类为现货 + 合约。
 - K 线周期固定为 `15m -> 1h -> 4h -> 1d`。
-- 默认 1 个币种并发抓取，可通过环境变量调整；所有 Binance 请求共享全局 `REQUEST_WEIGHT` 预算。
+- 默认按 `CRAWLER_CONCURRENT_TOKENS` 并发抓取；所有 Binance 请求共享全局 `REQUEST_WEIGHT` 预算。
 - K 线默认每页 `limit=499`，在 USD-M Futures `/fapi/v1/klines` 当前计权规则下属于 2 weight 档，单位权重可拿到更多 K 线。
 - 遇到 `429` 会等到权重窗口恢复后重试；遇到 `418` 会按封禁退避等待，避免连续冲撞限制。
 - 周期抓取和单币种完成后的暂停默认很短，主要依赖权重桶控速。
@@ -239,6 +239,9 @@ curl -s http://127.0.0.1:8787/api/kline-health | jq '{deficientTokenCount, defic
 # 同时处理多少个交易对；本机和 MySQL 正常时 4-8 都可以试
 CRAWLER_CONCURRENT_TOKENS=4
 
+# 关注池全量历史修复并发；默认跟随 CRAWLER_CONCURRENT_TOKENS，并受 MySQL 连接数和 8 的上限保护
+WATCHLIST_MARKET_CONCURRENCY=4
+
 # 每分钟最多使用多少 Binance REQUEST_WEIGHT；默认 1800，低于 USD-M Futures 常见 2400/min 上限
 BINANCE_REQUEST_WEIGHT_BUDGET_PER_MINUTE=1800
 
@@ -256,6 +259,15 @@ KLINE_TAIL_REFRESH_REQUEST_LIMIT=20
 # OI 当前值会全量采样；历史补齐接口官方限制为 1000 requests/5min/IP，按该预算分轮补齐基线
 OPEN_INTEREST_SCAN_MS=180000
 OPEN_INTEREST_REQUEST_LIMIT_PER_5M=900
+
+# 资金费率待提醒发送并发；默认 2，并受 Telegram 风险、scheduler MySQL 连接数和 3 的上限保护
+FUNDING_ALERT_CONCURRENCY=2
+
+# 关注池解锁日期刷新并发；默认 2，并受 scheduler MySQL 连接数和 5 的上限保护
+TOKEN_UNLOCK_CONCURRENCY=2
+
+# 交易分析里 Binance fundingRate 补充查询并发；仅用于资金费率展示增强，默认 3，上限 5
+TRADE_ANALYSIS_FUNDING_RATE_CONCURRENCY=3
 
 # 单个 USD-M Futures WebSocket 连接最多 1024 streams；每个实时币约 5 个 streams
 REALTIME_STREAM_LIMIT=900

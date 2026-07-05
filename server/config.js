@@ -31,6 +31,13 @@ export function listEnv(name, fallback = []) {
     .filter(Boolean);
 }
 
+function integerEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const safeMin = Math.max(1, Math.floor(Number(min) || 1));
+  const safeMax = Math.max(safeMin, Math.floor(Number(max) || safeMin));
+  const value = Math.floor(numberEnv(name, fallback));
+  return Math.max(safeMin, Math.min(safeMax, Number.isFinite(value) ? value : fallback));
+}
+
 function validateUniqueServicePorts(service) {
   const entries = [
     ["API_PORT", service.apiPort],
@@ -67,13 +74,14 @@ const retentionLimits = {
 
 const openInterestScanIntervalMs = numberEnv("OPEN_INTEREST_SCAN_MS", 3 * 60 * 1000);
 const realtimeStreamLimit = Math.max(5, Math.min(1024, numberEnv("REALTIME_STREAM_LIMIT", 900)));
+const crawlerConcurrentTokens = integerEnv("CRAWLER_CONCURRENT_TOKENS", 4);
 
 const SERVICE_ROLES = new Set(["api", "crawler", "realtime", "scheduler"]);
 const requestedServiceRole = process.env.SERVICE_ROLE?.trim() || "api";
 const serviceRole = SERVICE_ROLES.has(requestedServiceRole) ? requestedServiceRole : "api";
 const defaultConnectionLimits = {
   api: 5,
-  crawler: Math.max(4, numberEnv("CRAWLER_CONCURRENT_TOKENS", 1) + 3),
+  crawler: Math.max(4, crawlerConcurrentTokens + 3),
   realtime: 4,
   scheduler: 3
 };
@@ -141,7 +149,8 @@ export const config = {
       apiKey: process.env.BINANCE_API_KEY?.trim() ?? "",
       apiSecret: process.env.BINANCE_API_SECRET?.trim() ?? "",
       futuresBaseUrl: process.env.BINANCE_FUTURES_BASE_URL ?? "https://fapi.binance.com",
-      recvWindowMs: numberEnv("BINANCE_RECV_WINDOW_MS", 5000)
+      recvWindowMs: numberEnv("BINANCE_RECV_WINDOW_MS", 5000),
+      fundingRateConcurrency: integerEnv("TRADE_ANALYSIS_FUNDING_RATE_CONCURRENCY", 3, { max: 5 })
     },
     hyperliquid: {
       walletAddress: process.env.HYPERLIQUID_WALLET_ADDRESS?.trim() ?? "",
@@ -151,7 +160,10 @@ export const config = {
   },
   crawler: {
     autoStart: boolEnv("AUTO_START_CRAWLER", true),
-    concurrentTokens: numberEnv("CRAWLER_CONCURRENT_TOKENS", 4),
+    concurrentTokens: crawlerConcurrentTokens,
+    watchlistMarketConcurrency: integerEnv("WATCHLIST_MARKET_CONCURRENCY", crawlerConcurrentTokens, {
+      max: Math.min(8, Math.max(1, connectionLimit - 2))
+    }),
     lookbackDays: numberEnv("KLINE_LOOKBACK_DAYS", 90),
     intervalLookbackDays,
     retentionLimits,
@@ -190,6 +202,9 @@ export const config = {
     scanIntervalMs: numberEnv("FUNDING_INTERVAL_SCAN_MS", 5 * 60 * 1000),
     alertPollMs: Math.max(10 * 1000, numberEnv("FUNDING_INTERVAL_ALERT_POLL_MS", 60 * 1000)),
     initialDelayMs: numberEnv("FUNDING_INTERVAL_INITIAL_DELAY_MS", 10 * 1000),
+    alertConcurrency: integerEnv("FUNDING_ALERT_CONCURRENCY", 2, {
+      max: Math.min(3, Math.max(1, connectionLimit - 1))
+    }),
     targetIntervalHours: numberEnv("FUNDING_INTERVAL_TARGET_HOURS", 1),
     defaultIntervalHours: numberEnv("FUNDING_INTERVAL_DEFAULT_HOURS", 4)
   },
@@ -256,7 +271,10 @@ export const config = {
     cacheMs: numberEnv("TOKEN_UNLOCK_CACHE_MS", 24 * 60 * 60 * 1000),
     retryCacheMs: numberEnv("TOKEN_UNLOCK_RETRY_CACHE_MS", 60 * 60 * 1000),
     scanIntervalMs: numberEnv("TOKEN_UNLOCK_SCAN_MS", 60 * 60 * 1000),
-    requestTimeoutMs: numberEnv("TOKEN_UNLOCK_REQUEST_TIMEOUT_MS", 15_000)
+    requestTimeoutMs: numberEnv("TOKEN_UNLOCK_REQUEST_TIMEOUT_MS", 15_000),
+    concurrency: integerEnv("TOKEN_UNLOCK_CONCURRENCY", 2, {
+      max: Math.min(5, Math.max(1, connectionLimit - 1))
+    })
   },
   telegram: {
     enabled: boolEnv("TELEGRAM_ALERTS_ENABLED", false),

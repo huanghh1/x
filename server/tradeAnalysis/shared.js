@@ -1,3 +1,5 @@
+export { mapLimit } from "../concurrency.js";
+
 export const SOURCE_LABELS = {
   binance: "Binance USD-M",
   hyperliquid: "Hyperliquid"
@@ -106,24 +108,6 @@ export function uniqueById(items) {
     result.push(item);
   }
   return result;
-}
-
-export async function mapLimit(items, limit, fn) {
-  const results = Array(items.length);
-  let cursor = 0;
-  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      try {
-        results[index] = { status: "fulfilled", value: await fn(items[index], index) };
-      } catch (reason) {
-        results[index] = { status: "rejected", reason };
-      }
-    }
-  });
-  await Promise.all(workers);
-  return results;
 }
 
 function compactErrorPart(value) {
