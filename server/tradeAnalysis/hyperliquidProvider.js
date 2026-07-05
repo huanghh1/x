@@ -8,6 +8,7 @@ import {
   normalizeTradeAction,
   okSource,
   positionSide,
+  retryTransient,
   SOURCE_LABELS,
   symbolMatchesValue,
   toNumber
@@ -138,7 +139,7 @@ async function fetchHyperliquidPositions(config, symbol) {
   const dexs = hyperliquidPerpDexs(source);
   const results = await Promise.allSettled(dexs.map(async (dex) => ({
     dex,
-    payload: await fetchHyperliquidInfo(config, hyperliquidClearinghouseRequest(source, dex))
+    payload: await retryTransient(() => fetchHyperliquidInfo(config, hyperliquidClearinghouseRequest(source, dex)))
   })));
   const fulfilled = results.filter((result) => result.status === "fulfilled");
   if (!fulfilled.length) throw results[0]?.reason ?? new Error("Hyperliquid 持仓读取失败");
@@ -202,7 +203,7 @@ export async function fetchHyperliquidEvents(config, window, symbol) {
   }
   const [fillsResult, positionsResult] = await Promise.allSettled([
     fetchFillsPaged(),
-    fetchHyperliquidPositions(config, symbol)
+    retryTransient(() => fetchHyperliquidPositions(config, symbol))
   ]);
   if (fillsResult.status === "rejected") throw fillsResult.reason;
   const fillsPayload = fillsResult.value;
@@ -223,7 +224,7 @@ export async function fetchHyperliquidEvents(config, window, symbol) {
   sourceResult.rawEventCount = fills.length + funding.length;
   sourceResult.rangeNote = "Hyperliquid fills/funding 按时间向后分页抓取；fills 官方单次最多 2000 条，最近最多 10000 条。";
   if (positionsPayload.error) sourceResult.positionError = positionsPayload.error;
-  if (positionsResult.status === "rejected") sourceResult.positionError = positionsResult.reason instanceof Error ? positionsResult.reason.message : String(positionsResult.reason);
+  if (positionsResult.status === "rejected") sourceResult.positionError = describeError(positionsResult.reason);
   return sourceResult;
 }
 

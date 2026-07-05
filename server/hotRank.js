@@ -39,9 +39,26 @@ let topMarketCapCache = {
   symbols: new Set(FALLBACK_TOP_MARKET_CAP_SYMBOLS)
 };
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function numberValue(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function describeFetchError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = error?.cause;
+  const code = cause?.code ?? error?.code;
+  const causeMessage = cause?.message && cause.message !== message ? `: ${cause.message}` : "";
+  return `${message}${code ? ` (${code})` : ""}${causeMessage}`;
+}
+
+function hotRankRetryDelayMs(attempt) {
+  const baseDelay = Math.max(250, Math.min(500, Number(config.binance.retryDelayMs) || 250));
+  return Math.round(baseDelay * (attempt + 1));
 }
 
 function logoUrl(value) {
@@ -90,31 +107,47 @@ async function requestHotRankChain(chainId, { targetLanguage, socialLanguage, ti
   url.searchParams.set("targetLanguage", targetLanguage);
   url.searchParams.set("timeRange", String(timeRange));
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.binance.requestTimeoutMs);
-  try {
-    const response = await fetch(url, {
-      headers: { "Accept-Encoding": "identity" },
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`Binance social hype ${chainId} HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`);
+  const retries = Math.max(0, Math.min(1, Number(config.binance.requestRetries) || 0));
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.binance.requestTimeoutMs);
+    try {
+      const response = await fetch(url, {
+        headers: { "Accept-Encoding": "identity" },
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        const error = new Error(`Binance social hype ${chainId} HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`);
+        error.retryable = false;
+        throw error;
+      }
+      const json = await response.json();
+      if (json?.success === false || json?.ok === false) {
+        const message = String(json?.message ?? json?.error ?? json?.description ?? "upstream rejected request");
+        const error = new Error(`Binance social hype ${chainId}: ${message}`);
+        error.retryable = false;
+        throw error;
+      }
+      const list = json?.data?.leaderBoardList ?? json?.data?.list ?? json?.data ?? [];
+      if (!Array.isArray(list)) {
+        const message = String(json?.message ?? json?.error ?? json?.description ?? "invalid leaderboard payload");
+        const error = new Error(`Binance social hype ${chainId}: ${message}`);
+        error.retryable = false;
+        throw error;
+      }
+      return list.map((item) => normalizeHotToken(item, chainId)).filter(Boolean);
+    } catch (error) {
+      if (error?.retryable === false) throw error;
+      if (attempt >= retries) {
+        throw new Error(`Binance social hype ${chainId}: ${describeFetchError(error)}`, { cause: error });
+      }
+      await sleep(hotRankRetryDelayMs(attempt));
+    } finally {
+      clearTimeout(timer);
     }
-    const json = await response.json();
-    if (json?.success === false || json?.ok === false) {
-      const message = String(json?.message ?? json?.error ?? json?.description ?? "upstream rejected request");
-      throw new Error(`Binance social hype ${chainId}: ${message}`);
-    }
-    const list = json?.data?.leaderBoardList ?? json?.data?.list ?? json?.data ?? [];
-    if (!Array.isArray(list)) {
-      const message = String(json?.message ?? json?.error ?? json?.description ?? "invalid leaderboard payload");
-      throw new Error(`Binance social hype ${chainId}: ${message}`);
-    }
-    return list.map((item) => normalizeHotToken(item, chainId)).filter(Boolean);
-  } finally {
-    clearTimeout(timer);
   }
+  return [];
 }
 
 async function fetchHotRankChain(chainId, options) {

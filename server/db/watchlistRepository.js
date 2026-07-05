@@ -222,6 +222,30 @@ export async function addWatchlistItemsIfMissing(items = [], { note = "" } = {})
   return Number(result.affectedRows ?? 0);
 }
 
+export async function deleteAutoWatchlistItemsMissingFrom(items = [], { note = "" } = {}) {
+  const safeNote = String(note ?? "").slice(0, 255);
+  if (!safeNote) return 0;
+  const symbols = [
+    ...new Set(
+      (Array.isArray(items) ? items : [items])
+        .map((item) => sanitizeDbSymbol(typeof item === "string" ? item : item?.symbol))
+        .filter(Boolean)
+    )
+  ];
+  const params = { note: safeNote };
+  if (symbols.length) params.symbols = symbols;
+  const [result] = await getPool().query(
+    `DELETE FROM watchlist
+     WHERE note=:note
+       AND alert_enabled=1
+       AND alert_above IS NULL
+       AND alert_below IS NULL
+       ${symbols.length ? "AND symbol NOT IN (:symbols)" : ""}`,
+    params
+  );
+  return Number(result.affectedRows ?? 0);
+}
+
 export async function deleteWatchlistItem(symbol) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return 0;

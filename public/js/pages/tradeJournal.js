@@ -11,8 +11,43 @@ const tradeJournalDeps = {
   tradeSymbolRowKey: () => ""
 };
 
+const TRADE_JOURNAL_STANDALONE_SOURCE_KEY = "__standalone_trade_summary__";
+
 export function configureTradeJournal(deps = {}) {
   Object.assign(tradeJournalDeps, deps);
+}
+
+function tradeJournalStandaloneSummaryOption() {
+  return {
+    kind: "summary",
+    key: TRADE_JOURNAL_STANDALONE_SOURCE_KEY,
+    label: "不添加交易 · 只写交易总结",
+    symbol: "",
+    side: "",
+    status: "REVIEWED",
+    openedAt: null,
+    closedAt: null,
+    detail: "不会绑定交易来源，直接记录自己的交易总结。"
+  };
+}
+
+function isTradeJournalStandaloneSourceKey(key = state.selectedTradeJournalSourceKey) {
+  return key === TRADE_JOURNAL_STANDALONE_SOURCE_KEY;
+}
+
+function isTradeJournalStandaloneMode() {
+  return isTradeJournalStandaloneSourceKey();
+}
+
+function isTradeJournalStandaloneEntry(item = {}) {
+  return Boolean(String(item.reviewSummary ?? "").trim()) &&
+    !String(item.symbol ?? "").trim() &&
+    !String(item.side ?? "").trim() &&
+    !String(item.openedAt ?? "").trim() &&
+    !String(item.closedAt ?? "").trim() &&
+    !String(item.openReason ?? "").trim() &&
+    !String(item.closeReason ?? "").trim() &&
+    !tradeJournalIntradayNotes(item).length;
 }
 
 function tradeJournalComparableSymbol(value) {
@@ -94,6 +129,7 @@ function tradeJournalOpenPositionForRow(row) {
 }
 
 function tradeJournalSourceOptions() {
+  const standaloneOption = tradeJournalStandaloneSummaryOption();
   const positions = Array.isArray(state.tradeAnalysis?.positions) ? state.tradeAnalysis.positions : [];
   const positionOptions = positions.map((position) => {
     const side = tradeJournalSourceSide(position.side);
@@ -133,9 +169,10 @@ function tradeJournalSourceOptions() {
   });
 
   return {
+    standalone: standaloneOption,
     positions: positionOptions,
     trades: rowOptions,
-    all: [...positionOptions, ...rowOptions]
+    all: [standaloneOption, ...positionOptions, ...rowOptions]
   };
 }
 
@@ -144,26 +181,60 @@ function selectedTradeJournalSourceOption() {
   return tradeJournalSourceOptions().all.find((option) => option.key === state.selectedTradeJournalSourceKey) ?? null;
 }
 
+function updateTradeJournalFormMode() {
+  const standalone = isTradeJournalStandaloneMode();
+  const form = $("#tradeJournalForm");
+  if (form) form.classList.toggle("is-standalone-summary", standalone);
+
+  const id = $("#tradeJournalIdInput")?.value;
+  setText("#tradeJournalFormTitle", id
+    ? `编辑${standalone ? "交易总结" : "交易日记"} #${id}`
+    : `新建${standalone ? "交易总结" : "交易日记"}`);
+
+  const titleInput = $("#tradeJournalTitleInput");
+  if (titleInput) {
+    titleInput.placeholder = standalone ? "例如：今天的交易复盘" : "例如：BTC 右侧突破追多";
+  }
+
+  const openReasonInput = $("#tradeJournalOpenReasonInput");
+  if (openReasonInput) openReasonInput.required = !standalone;
+
+  const reviewLabel = $("#tradeJournalReviewLabel");
+  if (reviewLabel) reviewLabel.textContent = standalone ? "交易总结" : "后续追加复盘总结";
+
+  const reviewInput = $("#tradeJournalReviewInput");
+  if (reviewInput) {
+    reviewInput.placeholder = standalone
+      ? "直接写你的交易总结、情绪变化、纪律执行、下次改进。"
+      : "后面回看时继续补充：做对了什么、错过了什么、下次怎么改。";
+  }
+
+  const saveButton = $("#saveTradeJournalBtn");
+  if (saveButton) saveButton.textContent = id ? "保存修改" : standalone ? "保存总结" : "保存日记";
+}
+
 export function renderTradeJournalSourcePicker() {
+  updateTradeJournalFormMode();
   const select = $("#tradeJournalSourceSelect");
   if (!select) return;
   const options = tradeJournalSourceOptions();
   if (state.selectedTradeJournalSourceKey && !options.all.some((option) => option.key === state.selectedTradeJournalSourceKey)) {
     state.selectedTradeJournalSourceKey = "";
+    updateTradeJournalFormMode();
   }
   const placeholder = state.tradeJournalSourceLoading
     ? "正在同步交易来源"
-    : options.all.length ? "选择一笔交易来源" : "暂无可选交易来源";
+    : "选择记录方式";
+  const standaloneHtml = `<optgroup label="手动记录"><option value="${escapeHtml(options.standalone.key)}">${escapeHtml(options.standalone.label)}</option></optgroup>`;
   const positionHtml = options.positions.length
     ? `<optgroup label="当前持仓">${options.positions.map((option) => `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</optgroup>`
     : "";
   const tradeHtml = options.trades.length
     ? `<optgroup label="交易组">${options.trades.map((option) => `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`).join("")}</optgroup>`
     : "";
-  const placeholderDisabled = options.all.length ? " disabled" : "";
-  select.innerHTML = `<option value=""${placeholderDisabled}>${escapeHtml(placeholder)}</option>${positionHtml}${tradeHtml}`;
+  select.innerHTML = `<option value="" disabled>${escapeHtml(placeholder)}</option>${standaloneHtml}${positionHtml}${tradeHtml}`;
   select.value = state.selectedTradeJournalSourceKey;
-  select.disabled = state.tradeJournalSourceLoading || !options.all.length;
+  select.disabled = state.tradeJournalSourceLoading;
   syncCustomSelect(select);
 
   const refreshButton = $("#refreshTradeJournalSourcesBtn");
@@ -179,12 +250,14 @@ export function renderTradeJournalSourcePicker() {
   const selected = selectedTradeJournalSourceOption();
   if (state.tradeJournalSourceError) {
     hint.textContent = `交易来源同步失败：${state.tradeJournalSourceError}`;
+  } else if (selected?.kind === "summary") {
+    hint.textContent = "当前为独立总结，不会绑定交易来源；只填写标题和交易总结即可保存。";
   } else if (selected) {
     hint.textContent = `已选择 ${selected.label}；${selected.detail}`;
   } else if (state.tradeAnalysis?.generatedAt) {
-    hint.textContent = `来源来自交易分析 ${formatTime(state.tradeAnalysis.generatedAt)}；可选择当前持仓或交易组自动回填。`;
+    hint.textContent = `来源来自交易分析 ${formatTime(state.tradeAnalysis.generatedAt)}；可选择当前持仓、交易组，或不添加交易只写总结。`;
   } else {
-    hint.textContent = "可选择当前持仓或交易分析里的交易组，自动回填交易对、方向、开仓与结束时间。";
+    hint.textContent = "可同步交易分析自动回填，也可以选择不添加交易、只写自己的交易总结。";
   }
 }
 
@@ -195,16 +268,17 @@ export function applyTradeJournalSourceOption(key) {
   if (!option) return;
 
   const symbolInput = $("#tradeJournalSymbolInput");
-  if (symbolInput) symbolInput.value = String(option.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  if (symbolInput) symbolInput.value = option.kind === "summary" ? "" : String(option.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const sideInput = $("#tradeJournalSideInput");
-  if (sideInput) sideInput.value = option.side || "";
+  if (sideInput) sideInput.value = option.kind === "summary" ? "" : option.side || "";
   const statusInput = $("#tradeJournalStatusInput");
   if (statusInput) statusInput.value = option.status || "OPEN";
   const openedInput = $("#tradeJournalOpenedAtInput");
-  if (openedInput) openedInput.value = option.openedAt ? toDatetimeLocal(option.openedAt) : "";
+  if (openedInput) openedInput.value = option.kind === "summary" || !option.openedAt ? "" : toDatetimeLocal(option.openedAt);
   const closedInput = $("#tradeJournalClosedAtInput");
-  if (closedInput) closedInput.value = option.closedAt ? toDatetimeLocal(option.closedAt) : "";
+  if (closedInput) closedInput.value = option.kind === "summary" || !option.closedAt ? "" : toDatetimeLocal(option.closedAt);
   syncAllCustomSelects();
+  if (option.kind === "summary") $("#tradeJournalReviewInput")?.focus();
 }
 
 export async function loadTradeJournalSources({ refresh = false } = {}) {
@@ -334,71 +408,93 @@ export function renderTradeJournal() {
     return;
   }
   if (!state.tradeJournal.length) {
-    target.innerHTML = '<div class="heat-empty">暂无交易日记。左侧写下第一条开仓理由吧。</div>';
+    target.innerHTML = '<div class="heat-empty">暂无交易日记。左侧可以选择一笔交易，也可以只写自己的交易总结。</div>';
     updateTradeJournalPagination();
     return;
   }
-  target.innerHTML = state.tradeJournal.map((item) => `
-    <article class="trade-journal-card" data-trade-journal-id="${Number(item.id)}">
-      <div class="trade-journal-card-head">
-        <div>
-          <h3>${escapeHtml(item.title || "交易日记")}</h3>
-          <div class="trade-journal-meta">
-            <span>${escapeHtml(item.symbol || "未填交易对")}</span>
-            <span>${escapeHtml(tradeJournalSideLabel(item.side))}</span>
-            <span>开仓 ${escapeHtml(formatTime(item.openedAt))}</span>
-            ${item.closedAt ? `<span>结束 ${escapeHtml(formatTime(item.closedAt))}</span>` : ""}
+  target.innerHTML = state.tradeJournal.map((item) => {
+    const standalone = isTradeJournalStandaloneEntry(item);
+    return `
+      <article class="trade-journal-card" data-trade-journal-id="${Number(item.id)}">
+        <div class="trade-journal-card-head">
+          <div>
+            <h3>${escapeHtml(item.title || (standalone ? "交易总结" : "交易日记"))}</h3>
+            <div class="trade-journal-meta">
+              ${standalone ? `
+                <span>独立总结</span>
+                <span>记录 ${escapeHtml(formatTime(item.createdAt || item.updatedAt))}</span>
+              ` : `
+                <span>${escapeHtml(item.symbol || "未填交易对")}</span>
+                <span>${escapeHtml(tradeJournalSideLabel(item.side))}</span>
+                <span>开仓 ${escapeHtml(formatTime(item.openedAt))}</span>
+                ${item.closedAt ? `<span>结束 ${escapeHtml(formatTime(item.closedAt))}</span>` : ""}
+              `}
+            </div>
           </div>
+          <span class="trade-journal-badge is-${escapeHtml(String(item.status || "OPEN").toLowerCase())}">${escapeHtml(tradeJournalStatusLabel(item.status))}</span>
         </div>
-        <span class="trade-journal-badge is-${escapeHtml(String(item.status || "OPEN").toLowerCase())}">${escapeHtml(tradeJournalStatusLabel(item.status))}</span>
-      </div>
-      <div class="trade-journal-card-body">
-        <section>
-          <strong>开仓理由</strong>
-          <p>${escapeHtml(tradeJournalExcerpt(item.openReason))}</p>
-        </section>
-        <section>
-          <strong>盘中确定</strong>
-          <p>${escapeHtml(tradeJournalIntradayExcerpt(item))}</p>
-        </section>
-        <section>
-          <strong>结束理由</strong>
-          <p>${escapeHtml(tradeJournalExcerpt(item.closeReason))}</p>
-        </section>
-        <section>
-          <strong>复盘总结</strong>
-          <p>${escapeHtml(tradeJournalExcerpt(item.reviewSummary))}</p>
-        </section>
-      </div>
-      <details class="trade-journal-detail">
-        <summary>展开全文</summary>
-        <div>
-          <section>
-            <strong>开仓理由</strong>
-            ${tradeJournalTextHtml(item.openReason)}
-          </section>
-          <section>
-            <strong>盘中确定</strong>
-            ${tradeJournalIntradayNotesHtml(tradeJournalIntradayNotes(item))}
-          </section>
-          <section>
-            <strong>结束理由</strong>
-            ${tradeJournalTextHtml(item.closeReason)}
-          </section>
-          <section>
-            <strong>后续追加复盘总结</strong>
-            ${tradeJournalTextHtml(item.reviewSummary)}
-          </section>
+        <div class="trade-journal-card-body${standalone ? " is-standalone-summary" : ""}">
+          ${standalone ? `
+            <section class="trade-journal-summary-section">
+              <strong>交易总结</strong>
+              <p>${escapeHtml(tradeJournalExcerpt(item.reviewSummary, 180))}</p>
+            </section>
+          ` : `
+            <section>
+              <strong>开仓理由</strong>
+              <p>${escapeHtml(tradeJournalExcerpt(item.openReason))}</p>
+            </section>
+            <section>
+              <strong>盘中确定</strong>
+              <p>${escapeHtml(tradeJournalIntradayExcerpt(item))}</p>
+            </section>
+            <section>
+              <strong>结束理由</strong>
+              <p>${escapeHtml(tradeJournalExcerpt(item.closeReason))}</p>
+            </section>
+            <section>
+              <strong>复盘总结</strong>
+              <p>${escapeHtml(tradeJournalExcerpt(item.reviewSummary))}</p>
+            </section>
+          `}
         </div>
-      </details>
-      <div class="trade-journal-card-actions">
-        <button class="mini-link" type="button" data-trade-journal-action="edit" data-id="${Number(item.id)}">编辑</button>
-        <button class="mini-link" type="button" data-trade-journal-action="intraday" data-id="${Number(item.id)}">添加盘中确定</button>
-        <button class="mini-link" type="button" data-trade-journal-action="append" data-id="${Number(item.id)}">追加复盘</button>
-        <button class="mini-link danger" type="button" data-trade-journal-action="delete" data-id="${Number(item.id)}">删除</button>
-      </div>
-    </article>
-  `).join("");
+        <details class="trade-journal-detail">
+          <summary>展开全文</summary>
+          <div>
+            ${standalone ? `
+              <section>
+                <strong>交易总结</strong>
+                ${tradeJournalTextHtml(item.reviewSummary)}
+              </section>
+            ` : `
+              <section>
+                <strong>开仓理由</strong>
+                ${tradeJournalTextHtml(item.openReason)}
+              </section>
+              <section>
+                <strong>盘中确定</strong>
+                ${tradeJournalIntradayNotesHtml(tradeJournalIntradayNotes(item))}
+              </section>
+              <section>
+                <strong>结束理由</strong>
+                ${tradeJournalTextHtml(item.closeReason)}
+              </section>
+              <section>
+                <strong>后续追加复盘总结</strong>
+                ${tradeJournalTextHtml(item.reviewSummary)}
+              </section>
+            `}
+          </div>
+        </details>
+        <div class="trade-journal-card-actions">
+          <button class="mini-link" type="button" data-trade-journal-action="edit" data-id="${Number(item.id)}">编辑</button>
+          ${standalone ? "" : `<button class="mini-link" type="button" data-trade-journal-action="intraday" data-id="${Number(item.id)}">添加盘中确定</button>`}
+          <button class="mini-link" type="button" data-trade-journal-action="append" data-id="${Number(item.id)}">${standalone ? "追加总结" : "追加复盘"}</button>
+          <button class="mini-link danger" type="button" data-trade-journal-action="delete" data-id="${Number(item.id)}">删除</button>
+        </div>
+      </article>
+    `;
+  }).join("");
   bindTradeJournalActions(target);
   updateTradeJournalPagination();
 }
@@ -440,15 +536,16 @@ function updateTradeJournalPagination() {
 }
 
 function tradeJournalFormPayload() {
+  const standalone = isTradeJournalStandaloneMode();
   return {
     title: $("#tradeJournalTitleInput")?.value ?? "",
-    symbol: String($("#tradeJournalSymbolInput")?.value ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""),
-    side: $("#tradeJournalSideInput")?.value ?? "",
-    status: $("#tradeJournalStatusInput")?.value ?? "OPEN",
-    openedAt: datetimeLocalToIso($("#tradeJournalOpenedAtInput")?.value),
-    closedAt: datetimeLocalToIso($("#tradeJournalClosedAtInput")?.value),
-    openReason: $("#tradeJournalOpenReasonInput")?.value ?? "",
-    closeReason: $("#tradeJournalCloseReasonInput")?.value ?? "",
+    symbol: standalone ? "" : String($("#tradeJournalSymbolInput")?.value ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""),
+    side: standalone ? "" : $("#tradeJournalSideInput")?.value ?? "",
+    status: standalone ? "REVIEWED" : $("#tradeJournalStatusInput")?.value ?? "OPEN",
+    openedAt: standalone ? null : datetimeLocalToIso($("#tradeJournalOpenedAtInput")?.value),
+    closedAt: standalone ? null : datetimeLocalToIso($("#tradeJournalClosedAtInput")?.value),
+    openReason: standalone ? "" : $("#tradeJournalOpenReasonInput")?.value ?? "",
+    closeReason: standalone ? "" : $("#tradeJournalCloseReasonInput")?.value ?? "",
     reviewSummary: $("#tradeJournalReviewInput")?.value ?? ""
   };
 }
@@ -468,7 +565,7 @@ function renderTradeJournalIntradayEditor(entry = {}) {
 
 function setTradeJournalForm(item = null, { focusReview = false, focusIntraday = false } = {}) {
   const entry = item ?? {};
-  state.selectedTradeJournalSourceKey = "";
+  state.selectedTradeJournalSourceKey = isTradeJournalStandaloneEntry(entry) ? TRADE_JOURNAL_STANDALONE_SOURCE_KEY : "";
   const idInput = $("#tradeJournalIdInput");
   if (idInput) idInput.value = entry.id ? String(entry.id) : "";
   const titleInput = $("#tradeJournalTitleInput");
@@ -494,9 +591,12 @@ function setTradeJournalForm(item = null, { focusReview = false, focusIntraday =
   renderTradeJournalIntradayEditor(entry);
   renderTradeJournalSourcePicker();
   syncAllCustomSelects();
-  setText("#tradeJournalFormTitle", entry.id ? `编辑交易日记 #${entry.id}` : "新建交易日记");
+  const standalone = isTradeJournalStandaloneMode();
+  setText("#tradeJournalFormTitle", entry.id
+    ? `编辑${standalone ? "交易总结" : "交易日记"} #${entry.id}`
+    : `新建${standalone ? "交易总结" : "交易日记"}`);
   const saveButton = $("#saveTradeJournalBtn");
-  if (saveButton) saveButton.textContent = entry.id ? "保存修改" : "保存日记";
+  if (saveButton) saveButton.textContent = entry.id ? "保存修改" : standalone ? "保存总结" : "保存日记";
   if (focusReview && reviewInput) {
     requestAnimationFrame(() => {
       reviewInput.focus();
@@ -519,6 +619,19 @@ export async function saveTradeJournal(event) {
   event?.preventDefault();
   const id = $("#tradeJournalIdInput")?.value;
   const payload = tradeJournalFormPayload();
+  const standalone = isTradeJournalStandaloneMode();
+  if (standalone && !String(payload.reviewSummary ?? "").trim()) {
+    state.tradeJournalError = "交易总结不能为空";
+    updateTradeJournalStatus();
+    $("#tradeJournalReviewInput")?.focus();
+    return;
+  }
+  if (!standalone && !String(payload.openReason ?? "").trim()) {
+    state.tradeJournalError = "开仓理由不能为空";
+    updateTradeJournalStatus();
+    $("#tradeJournalOpenReasonInput")?.focus();
+    return;
+  }
   state.tradeJournalSaving = true;
   state.tradeJournalError = "";
   updateTradeJournalStatus();

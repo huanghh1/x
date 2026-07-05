@@ -205,7 +205,7 @@
           <div class="section-head">
             <div>
               <h2 id="fundingTitle">资金费率监控</h2>
-              <p>展示 Binance USDⓈ-M 资金费率监控代币。</p>
+              <p>展示 Binance USDⓈ-M 1小时结算资金费率监控代币。</p>
             </div>
             <div class="table-actions">
               <button id="refreshFundingBtn" class="ghost-button" type="button">刷新资金费率</button>
@@ -510,13 +510,13 @@
 
               <div class="trade-journal-source-panel">
                 <div class="trade-journal-source-field">
-                  <span id="tradeJournalSourceLabel">从交易分析带入</span>
-                  <select id="tradeJournalSourceSelect" class="trade-journal-source-native" aria-label="从交易分析带入">
+                  <span id="tradeJournalSourceLabel">记录方式</span>
+                  <select id="tradeJournalSourceSelect" class="trade-journal-source-native" aria-label="记录方式">
                     <option value="">暂无可选交易来源</option>
                   </select>
                 </div>
                 <button id="refreshTradeJournalSourcesBtn" class="ghost-button" type="button">同步来源</button>
-                <p id="tradeJournalSourceHint">可选择当前持仓或交易分析里的交易组，自动回填交易对、方向、开仓与结束时间。</p>
+                <p id="tradeJournalSourceHint">可选择当前持仓或交易分析里的交易组自动回填，也可以不添加交易、只写自己的交易总结。</p>
               </div>
 
               <div class="trade-journal-fields">
@@ -556,9 +556,9 @@
                 </label>
               </div>
 
-              <label class="trade-journal-note">
-                <span>开仓理由</span>
-                <textarea id="tradeJournalOpenReasonInput" required placeholder="当时为什么开这笔单？信号、结构、情绪、仓位依据都可以写。"></textarea>
+              <label class="trade-journal-note trade-journal-open-reason-field">
+                <span id="tradeJournalOpenReasonLabel">开仓理由</span>
+                <textarea id="tradeJournalOpenReasonInput" placeholder="当时为什么开这笔单？信号、结构、情绪、仓位依据都可以写。"></textarea>
               </label>
               <div id="tradeJournalIntradayPanel" class="trade-journal-intraday-panel" hidden>
                 <label class="trade-journal-note">
@@ -570,12 +570,12 @@
                 </div>
                 <div id="tradeJournalIntradayNotes" class="trade-journal-intraday-notes"></div>
               </div>
-              <label class="trade-journal-note">
+              <label class="trade-journal-note trade-journal-close-reason-field">
                 <span>结束理由</span>
                 <textarea id="tradeJournalCloseReasonInput" placeholder="为什么平仓、止损、止盈或放弃？"></textarea>
               </label>
               <label class="trade-journal-note">
-                <span>后续追加复盘总结</span>
+                <span id="tradeJournalReviewLabel">后续追加复盘总结</span>
                 <textarea id="tradeJournalReviewInput" placeholder="后面回看时继续补充：做对了什么、错过了什么、下次怎么改。"></textarea>
               </label>
 

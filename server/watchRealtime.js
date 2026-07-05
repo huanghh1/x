@@ -25,12 +25,14 @@ const KLINE_PERSIST_MS = {
   "4h": 30_000,
   "1d": 60_000
 };
+const OPEN_INTEREST_REALTIME_WINDOWS = ["5m", "15m", "1h", "4h", "1d"];
 
 export const watchRealtimeEvents = new EventEmitter();
 watchRealtimeEvents.setMaxListeners(100);
 
 const state = {
   socket: null,
+  sockets: [],
   signature: "",
   reconnectTimer: null,
   syncTimer: null,
@@ -43,11 +45,14 @@ const state = {
   fundingRealtimeCount: 0,
   openInterestRealtimeSymbols: new Set(),
   openInterestTopCount: 0,
+  openInterestTopWindowCounts: {},
   clientStreams: new Map(),
   nextClientId: 1,
   clientStreamCount: 0,
   requestedStreamCount: 0,
   truncatedStreamCount: 0,
+  socketCount: 0,
+  connectedSocketCount: 0,
   lastPricePersistedAt: new Map(),
   lastKlinePersistedAt: new Map(),
   alertingSymbols: new Set(),
@@ -68,6 +73,15 @@ function streamUrl(signature) {
   return `wss://fstream.binance.com/market/stream?streams=${signature}`;
 }
 
+function chunkStreams(streams) {
+  const chunkSize = Math.max(1, Number(config.realtime.streamLimit) || 1);
+  const chunks = [];
+  for (let index = 0; index < streams.length; index += chunkSize) {
+    chunks.push(streams.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
 function normalizeStreamName(value) {
   const stream = String(value ?? "").trim().toLowerCase();
   const match = stream.match(/^([a-z0-9_]+)@(ticker|kline_(15m|1h|4h|1d))$/);
@@ -75,6 +89,15 @@ function normalizeStreamName(value) {
   const symbol = sanitizeSymbol(match[1]).toLowerCase();
   if (!symbol) return null;
   return `${symbol}@${match[2]}`;
+}
+
+function addRealtimeStreams(streams, symbol, intervals = INTERVALS) {
+  const safeSymbol = sanitizeSymbol(symbol).toLowerCase();
+  if (!safeSymbol) return;
+  streams.add(`${safeSymbol}@ticker`);
+  for (const interval of intervals) {
+    if (INTERVALS.includes(interval)) streams.add(`${safeSymbol}@kline_${interval}`);
+  }
 }
 
 export function parseWatchRealtimeStreams(value) {
@@ -104,13 +127,19 @@ function klineToDbRow(kline) {
 }
 
 async function syncWatchlistState() {
-  const [items, klineTokens, watchTokens, fundingRealtimeTokens, openInterestTopTokens] = await Promise.all([
+  const [items, klineTokens, watchTokens, fundingRealtimeTokens, openInterestTopResults] = await Promise.all([
     listWatchlist(),
     listRealtimeKlineTokens(),
     listWatchlistTokens(),
     listFundingRealtimeTokens(),
-    listTopOpenInterestRealtimeTokens({ timeWindow: "5m", sort: "desc", limit: 5 })
+    Promise.all(
+      OPEN_INTEREST_REALTIME_WINDOWS.map(async (timeWindow) => ({
+        timeWindow,
+        tokens: await listTopOpenInterestRealtimeTokens({ timeWindow, sort: "desc", limit: 5 })
+      }))
+    )
   ]);
+  const openInterestTopTokens = openInterestTopResults.flatMap((result) => result.tokens ?? []);
   const tokenMap = new Map();
   for (const token of [...klineTokens, ...watchTokens, ...fundingRealtimeTokens, ...openInterestTopTokens]) {
     const symbol = sanitizeSymbol(token?.symbol);
@@ -124,6 +153,12 @@ async function syncWatchlistState() {
   state.fundingRealtimeCount = state.fundingRealtimeSymbols.size;
   state.openInterestRealtimeSymbols = new Set(openInterestTopTokens.map((token) => sanitizeSymbol(token?.symbol)).filter(Boolean));
   state.openInterestTopCount = state.openInterestRealtimeSymbols.size;
+  state.openInterestTopWindowCounts = Object.fromEntries(
+    openInterestTopResults.map((result) => [
+      result.timeWindow,
+      new Set((result.tokens ?? []).map((token) => sanitizeSymbol(token?.symbol)).filter(Boolean)).size
+    ])
+  );
   return { items, tokens: Array.from(tokenMap.values()), klineTokens, watchTokens, fundingRealtimeTokens, openInterestTopTokens };
 }
 
@@ -138,30 +173,18 @@ function buildStreams() {
   }
   state.clientStreamCount = clientStreams.size;
 
-  for (const symbol of state.watchRealtimeSymbols) {
-    streams.add(`${symbol.toLowerCase()}@ticker`);
-  }
-
-  for (const symbol of state.fundingRealtimeSymbols) {
-    streams.add(`${symbol.toLowerCase()}@ticker`);
-  }
-
-  for (const symbol of state.openInterestRealtimeSymbols) {
-    streams.add(`${symbol.toLowerCase()}@ticker`);
-  }
+  for (const symbol of state.watchRealtimeSymbols) addRealtimeStreams(streams, symbol);
+  for (const symbol of state.fundingRealtimeSymbols) addRealtimeStreams(streams, symbol);
+  for (const symbol of state.openInterestRealtimeSymbols) addRealtimeStreams(streams, symbol);
 
   const symbols = Array.from(state.backgroundKlineSymbols).slice(0, config.realtime.tokenLimit);
   for (const symbol of symbols) {
-    const lower = symbol.toLowerCase();
-    streams.add(`${lower}@ticker`);
-    for (const interval of INTERVALS) {
-      streams.add(`${lower}@kline_${interval}`);
-    }
+    addRealtimeStreams(streams, symbol);
   }
   const requestedStreams = Array.from(streams);
   state.requestedStreamCount = requestedStreams.length;
-  state.truncatedStreamCount = Math.max(0, requestedStreams.length - config.realtime.streamLimit);
-  return requestedStreams.slice(0, config.realtime.streamLimit);
+  state.truncatedStreamCount = 0;
+  return requestedStreams;
 }
 
 export function registerWatchRealtimeClientStreams(streams) {
@@ -209,14 +232,18 @@ function closeSocket() {
     clearTimeout(state.rotateTimer);
     state.rotateTimer = null;
   }
-  if (state.socket) {
-    state.socket.onclose = null;
-    state.socket.onerror = null;
-    state.socket.onmessage = null;
-    state.socket.close();
+  for (const record of state.sockets) {
+    if (record.rotateTimer) clearTimeout(record.rotateTimer);
+    record.socket.onclose = null;
+    record.socket.onerror = null;
+    record.socket.onmessage = null;
+    record.socket.close();
   }
+  state.sockets = [];
   state.socket = null;
   state.connectedAt = null;
+  state.socketCount = 0;
+  state.connectedSocketCount = 0;
 }
 
 function scheduleReconnect() {
@@ -352,30 +379,37 @@ async function handleMessage(payload) {
   }
 }
 
-async function updateWatchlistRealtime() {
-  if (!state.running) return;
-  await syncWatchlistState();
-  const streams = buildStreams();
-  const signature = streams.join("/");
-  state.streamCount = streams.length;
+function refreshSocketCounters() {
+  state.socketCount = state.sockets.length;
+  state.connectedSocketCount = state.sockets.filter((record) => record.connectedAt).length;
+  state.socket = state.sockets[0]?.socket ?? null;
+  state.connectedAt = state.connectedSocketCount
+    ? state.sockets.find((record) => record.connectedAt)?.connectedAt ?? null
+    : null;
+}
 
-  if (!streams.length) {
-    state.signature = "";
-    closeSocket();
-    return;
-  }
-  if (state.socket && state.signature === signature) return;
+function removeSocketRecord(record) {
+  const index = state.sockets.indexOf(record);
+  if (index >= 0) state.sockets.splice(index, 1);
+  if (record.rotateTimer) clearTimeout(record.rotateTimer);
+  refreshSocketCounters();
+}
 
-  closeSocket();
-  state.signature = signature;
+function activeSocketSignature() {
+  return state.sockets.map((record) => record.signature).join("\n");
+}
+
+function openRealtimeSocket(signature) {
   const socket = new WebSocket(streamUrl(signature));
-  state.socket = socket;
-  state.reconnects += 1;
+  const record = { socket, signature, connectedAt: null, rotateTimer: null };
+  state.sockets.push(record);
+  refreshSocketCounters();
 
   socket.onopen = () => {
-    state.connectedAt = new Date().toISOString();
+    record.connectedAt = new Date().toISOString();
     state.lastError = null;
-    state.rotateTimer = setTimeout(() => socket.close(), 23 * 60 * 60 * 1000);
+    record.rotateTimer = setTimeout(() => socket.close(), 23 * 60 * 60 * 1000);
+    refreshSocketCounters();
   };
   socket.onmessage = (event) => {
     let payload;
@@ -395,12 +429,33 @@ async function updateWatchlistRealtime() {
     socket.close();
   };
   socket.onclose = () => {
-    if (state.socket === socket) {
-      state.socket = null;
-      state.connectedAt = null;
-      scheduleReconnect();
-    }
+    if (!state.sockets.includes(record)) return;
+    removeSocketRecord(record);
+    scheduleReconnect();
   };
+}
+
+async function updateWatchlistRealtime() {
+  if (!state.running) return;
+  await syncWatchlistState();
+  const streams = buildStreams();
+  const streamChunks = chunkStreams(streams);
+  const signature = streamChunks.map((chunk) => chunk.join("/")).join("\n");
+  state.streamCount = streams.length;
+
+  if (!streams.length) {
+    state.signature = "";
+    closeSocket();
+    return;
+  }
+  if (state.sockets.length && state.signature === signature && activeSocketSignature() === signature) return;
+
+  closeSocket();
+  state.signature = signature;
+  state.reconnects += streamChunks.length;
+  for (const chunk of streamChunks) {
+    openRealtimeSocket(chunk.join("/"));
+  }
 }
 
 export async function refreshWatchlistRealtime() {
@@ -434,9 +489,11 @@ export function stopWatchlistRealtime() {
 export function getWatchlistRealtimeState() {
   return {
     running: state.running,
-    connected: Boolean(state.socket && state.connectedAt),
+    connected: state.connectedSocketCount > 0,
     streamCount: state.streamCount,
     streamLimit: config.realtime.streamLimit,
+    socketCount: state.socketCount,
+    connectedSocketCount: state.connectedSocketCount,
     tokenLimit: config.realtime.tokenLimit,
     watchCount: state.watchItems.size,
     watchRealtimeCount: state.watchRealtimeSymbols.size,
@@ -444,6 +501,7 @@ export function getWatchlistRealtimeState() {
     fundingRealtimeCount: state.fundingRealtimeCount,
     fundingTopCount: state.fundingRealtimeCount,
     openInterestTopCount: state.openInterestTopCount,
+    openInterestTopWindowCounts: state.openInterestTopWindowCounts,
     clientCount: state.clientStreams.size,
     clientStreamCount: state.clientStreamCount,
     requestedStreamCount: state.requestedStreamCount,

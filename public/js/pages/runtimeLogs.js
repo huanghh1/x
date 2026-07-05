@@ -150,7 +150,10 @@ export function renderRuntimeLogs() {
   if (categoryCounts.length) {
     statusParts.push(categoryCounts.map(({ label, count }) => `${label} ${count}`).join(" / "));
   }
-  if (state.runtimeStateErrors.length) statusParts.push(`当前错误 ${state.runtimeStateErrors.length} 条`);
+  const currentErrorCount = state.runtimeStateErrors.filter((item) => item.severity === "ERROR").length;
+  const currentWarnCount = state.runtimeStateErrors.filter((item) => item.severity !== "ERROR").length;
+  if (currentErrorCount) statusParts.push(`当前错误 ${currentErrorCount} 条`);
+  if (currentWarnCount) statusParts.push(`当前警告 ${currentWarnCount} 条`);
   if (state.runtimeLogsError) statusParts.push(`读取失败：${state.runtimeLogsError}`);
   setText("#runtimeLogsStatus", statusParts.join(" · "));
 

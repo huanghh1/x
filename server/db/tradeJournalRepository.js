@@ -21,19 +21,21 @@ function tradeJournalNullableDate(value, fieldName) {
 function normalizeTradeJournalPayload(payload = {}) {
   const symbol = sanitizeDbSymbol(payload.symbol);
   const side = String(payload.side ?? "").toUpperCase();
-  const status = String(payload.status ?? "OPEN").toUpperCase();
+  const status = String(payload.status ?? "").toUpperCase();
   const openReason = tradeJournalText(payload.openReason, 8000);
-  if (!openReason) throw new Error("开仓理由不能为空");
+  const reviewSummary = tradeJournalText(payload.reviewSummary, 12000);
+  if (!openReason && !reviewSummary) throw new Error("开仓理由或交易总结不能为空");
+  const fallbackStatus = !openReason && reviewSummary ? "REVIEWED" : "OPEN";
   return {
-    title: tradeJournalText(payload.title, 160, symbol ? `${symbol} 交易日记` : "交易日记"),
+    title: tradeJournalText(payload.title, 160, symbol ? `${symbol} 交易日记` : fallbackStatus === "REVIEWED" ? "交易总结" : "交易日记"),
     symbol: symbol || null,
     side: TRADE_JOURNAL_SIDES.has(side) ? side : null,
-    status: TRADE_JOURNAL_STATUSES.has(status) ? status : "OPEN",
+    status: TRADE_JOURNAL_STATUSES.has(status) ? status : fallbackStatus,
     openedAt: tradeJournalNullableDate(payload.openedAt, "openedAt"),
     closedAt: tradeJournalNullableDate(payload.closedAt, "closedAt"),
     openReason,
     closeReason: tradeJournalText(payload.closeReason, 8000) || null,
-    reviewSummary: tradeJournalText(payload.reviewSummary, 12000) || null
+    reviewSummary: reviewSummary || null
   };
 }
 

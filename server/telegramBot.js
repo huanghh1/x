@@ -49,6 +49,8 @@ const botStatus = {
   lastPollAt: null,
   lastUpdateAt: null,
   lastError: null,
+  lastWarning: null,
+  lastWarningAt: null,
   lockPath,
   conflictCount: 0,
   pollingErrorCount: 0,
@@ -72,12 +74,16 @@ export function getTelegramBotState() {
 
 function pollingErrorKey(message) {
   const text = String(message ?? "");
-  if (/(connect timeout|und_err|etimedout|econnreset|enotfound|eai_again|fetch failed)/i.test(text)) {
+  if (isTransientPollingError(text)) {
     return "network";
   }
   if (/too many requests|429|rate limit/i.test(text)) return "rate_limit";
   if (/conflict/i.test(text)) return "conflict";
   return text.slice(0, 160);
+}
+
+function isTransientPollingError(message) {
+  return /(aborted|connect timeout|und_err|etimedout|econnreset|enotfound|eai_again|fetch failed|socket|tls|network)/i.test(String(message ?? ""));
 }
 
 function logPollingError(message) {
@@ -95,7 +101,9 @@ function logPollingError(message) {
   const suffix = pollingErrorLog.suppressed > 0
     ? ` (suppressed ${pollingErrorLog.suppressed} similar polling errors)`
     : "";
-  console.error("telegram bot polling failed:", `${message}${suffix}`);
+  const transient = isTransientPollingError(message);
+  const logger = transient ? console.log : console.error;
+  logger(transient ? "telegram bot polling transient:" : "telegram bot polling failed:", `${message}${suffix}`);
   pollingErrorLog.key = key;
   pollingErrorLog.lastLoggedAt = now;
   pollingErrorLog.suppressed = 0;
@@ -605,12 +613,16 @@ export function startTelegramBot() {
     botStatus.running = false;
     botStatus.state = "disabled";
     botStatus.lastError = null;
+    botStatus.lastWarning = null;
+    botStatus.lastWarningAt = null;
     return { running: false, reason: "Telegram disabled" };
   }
   if (!config.telegram.botToken || !config.telegram.chatId) {
     botStatus.running = false;
     botStatus.state = "not_configured";
     botStatus.lastError = "Telegram missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID";
+    botStatus.lastWarning = null;
+    botStatus.lastWarningAt = null;
     return { running: false, reason: botStatus.lastError };
   }
   const lock = acquirePollingLock();
@@ -618,6 +630,8 @@ export function startTelegramBot() {
     botStatus.running = false;
     botStatus.state = "lock_held";
     botStatus.lastError = lock.reason;
+    botStatus.lastWarning = null;
+    botStatus.lastWarningAt = null;
     console.error(`telegram bot polling skipped: ${lock.reason}`);
     return { running: false, reason: lock.reason };
   }
@@ -634,18 +648,25 @@ export function startTelegramBot() {
         await pollOnce();
         consecutiveErrors = 0;
         botStatus.lastError = null;
+        botStatus.lastWarning = null;
+        botStatus.lastWarningAt = null;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("Conflict: terminated by other getUpdates request")) {
           botStatus.state = "conflict";
           botStatus.conflictCount += 1;
           botStatus.lastError = message;
+          botStatus.lastWarning = null;
+          botStatus.lastWarningAt = null;
           console.error("telegram bot polling conflict: another getUpdates consumer is already running; retrying");
           await new Promise((resolve) => setTimeout(resolve, 10000));
           continue;
         }
-        botStatus.state = "error";
-        botStatus.lastError = message;
+        const transient = isTransientPollingError(message);
+        botStatus.state = transient ? "polling_retry" : "error";
+        botStatus.lastError = transient ? null : message;
+        botStatus.lastWarning = transient ? message : null;
+        botStatus.lastWarningAt = transient ? new Date().toISOString() : null;
         botStatus.pollingErrorCount += 1;
         logPollingError(message);
         consecutiveErrors += 1;

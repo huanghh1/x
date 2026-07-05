@@ -364,7 +364,15 @@ export async function refreshLatestKlineTails({ force = false, shouldContinue = 
     crawlerState.tailRefresh.errorCount = errorCount;
     crawlerState.tailRefresh.lastError = errors.at(-1) ?? null;
     if (!crawlerState.tailRefresh.lastError) crawlerState.tailRefresh.lastErrorAt = null;
-    crawlerState.lastAction = `快速追最新K线完成：${groups.length} 个交易对，写入/更新 ${refreshedRows} 行`;
+    const onlyTransientNetworkErrors = errors.length > 0 && errors.every((message) => isTransientNetworkError(message));
+    if (onlyTransientNetworkErrors && refreshedRows > 0) {
+      clearCrawlerError();
+    } else if (crawlerState.tailRefresh.lastError) {
+      setCrawlerError(crawlerState.tailRefresh.lastError);
+    }
+    crawlerState.lastAction = errorCount > 0
+      ? `快速追最新K线完成：${groups.length} 个交易对，写入/更新 ${refreshedRows} 行，临时失败 ${errorCount} 次`
+      : `快速追最新K线完成：${groups.length} 个交易对，写入/更新 ${refreshedRows} 行`;
     return {
       ok: true,
       targetCount: targets.length,

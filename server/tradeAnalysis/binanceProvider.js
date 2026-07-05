@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import {
   absNegative,
   chunksForActivity,
+  describeError,
   fetchJson,
   finiteOrNull,
   mapLimit,
@@ -12,6 +13,7 @@ import {
   normalizeTradeAction,
   okSource,
   positionSide,
+  retryTransient,
   SOURCE_LABELS,
   splitTimeRange,
   symbolMatchesValue,
@@ -232,7 +234,7 @@ export async function fetchBinanceEvents(config, window, symbol) {
   if (!source.apiKey || !source.apiSecret) return missingSource("binance", ["BINANCE_API_KEY", "BINANCE_API_SECRET"]);
   const [income, positionsResult] = await Promise.allSettled([
     fetchBinanceIncomePaged(config, window),
-    fetchBinancePositions(config, symbol)
+    retryTransient(() => fetchBinancePositions(config, symbol))
   ]);
   if (income.status === "rejected") throw income.reason;
   const incomeRows = (Array.isArray(income.value) ? income.value : [])
@@ -251,7 +253,7 @@ export async function fetchBinanceEvents(config, window, symbol) {
     ...positionSymbols
   ])).filter((item) => symbolMatchesValue(item, symbol));
   const tradeResults = await mapLimit(tradeSymbols, 3, (tradeSymbol) =>
-    fetchBinanceTradesForSymbol(config, tradeSymbol, window, tradeTimesBySymbol.get(tradeSymbol) ?? [])
+    retryTransient(() => fetchBinanceTradesForSymbol(config, tradeSymbol, window, tradeTimesBySymbol.get(tradeSymbol) ?? []))
   );
   const tradeResultEntries = tradeResults.map((result, index) => ({ symbol: tradeSymbols[index], result }));
   const tradeRows = tradeResultEntries.flatMap(({ result }) => result.status === "fulfilled" ? result.value : []);
@@ -269,10 +271,9 @@ export async function fetchBinanceEvents(config, window, symbol) {
   const rejectedTradeResults = tradeResultEntries.filter(({ result }) => result.status === "rejected");
   if (rejectedTradeResults.length) {
     const firstReason = rejectedTradeResults[0].result.reason;
-    const firstError = firstReason instanceof Error ? firstReason.message : String(firstReason);
-    sourceResult.tradeError = `成交明细 ${rejectedTradeResults.length} 个币种读取失败：${firstError}`;
+    sourceResult.tradeError = `成交明细 ${rejectedTradeResults.length} 个币种读取失败：${describeError(firstReason)}`;
   }
-  if (positionsResult.status === "rejected") sourceResult.positionError = positionsResult.reason instanceof Error ? positionsResult.reason.message : String(positionsResult.reason);
+  if (positionsResult.status === "rejected") sourceResult.positionError = describeError(positionsResult.reason);
   return sourceResult;
 }
 

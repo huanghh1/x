@@ -25,10 +25,9 @@ function compactLogEntry(service, rawLines, index) {
   const firstLine = lines[0] ?? "";
   const causeLine = lines.find((line) => /\b(cause|code|errno|syscall|hostname|host):/i.test(line));
   const message = [firstLine, causeLine && causeLine !== firstLine ? causeLine : null].filter(Boolean).join(" | ");
-  const severity = /\b(error|failed|timeout|ECONNRESET|ENOTFOUND|UND_ERR|HTTP 4|HTTP 5)\b/i.test(message)
-    ? "ERROR"
-    : "WARN";
-  const category = classifyRuntimeError({ service, message, details: lines.join("\n") });
+  const details = lines.join("\n");
+  const severity = runtimeLogSeverity(message, details);
+  const category = classifyRuntimeError({ service, message, details });
   return {
     id: `${service}-${index}`,
     service,
@@ -36,15 +35,26 @@ function compactLogEntry(service, rawLines, index) {
     category: category.key,
     categoryLabel: category.label,
     message: message.slice(0, 1000),
-    details: lines.slice(0, 16).join("\n").slice(0, 3000)
+    details: details.slice(0, 3000)
   };
 }
 
-function classifyRuntimeError({ service = "", component = "", message = "", details = "" } = {}) {
+function isTransientRuntimeNetworkMessage(value) {
+  const text = String(value ?? "");
+  if (/(http 4(?!08|29)\d|http 5(?!03|04)\d)/i.test(text)) return false;
+  return /(aborted|enotfound|eai_again|und_err|und_err_socket|etimedout|econnreset|fetch failed|connect timeout|network socket|socket disconnected|tls|dns|getaddrinfo|network)/i.test(text);
+}
+
+function runtimeLogSeverity(message = "", details = "") {
+  const text = `${message}\n${details}`;
+  if (isTransientRuntimeNetworkMessage(text)) return "WARN";
+  return /\b(error|failed|timeout|ECONNRESET|ENOTFOUND|UND_ERR|HTTP 4|HTTP 5)\b/i.test(text)
+    ? "ERROR"
+    : "WARN";
+}
+
+export function classifyRuntimeError({ service = "", component = "", message = "", details = "" } = {}) {
   const text = `${service} ${component} ${message} ${details}`.toLowerCase();
-  if (/(enotfound|eai_again|und_err_connect_timeout|etimedout|econnreset|fetch failed|connect timeout|socket disconnected|tls|dns|getaddrinfo|network)/i.test(text)) {
-    return { key: "NETWORK", label: "网络连接" };
-  }
   if (/(http 418|http 429|too many requests|rate limit|used-weight)/i.test(text)) {
     return { key: "BINANCE_LIMIT", label: "Binance限频" };
   }
@@ -53,6 +63,9 @@ function classifyRuntimeError({ service = "", component = "", message = "", deta
   }
   if (/(telegram|bot|getupdates|sendmessage)/i.test(text)) {
     return { key: "TELEGRAM", label: "Telegram" };
+  }
+  if (/(aborted|enotfound|eai_again|und_err_connect_timeout|und_err|und_err_socket|etimedout|econnreset|fetch failed|connect timeout|network socket|socket disconnected|tls|dns|getaddrinfo|network)/i.test(text)) {
+    return { key: "NETWORK", label: "网络连接" };
   }
   if (/(mysql|database|sql|deadlock|er_|pool|connection.*refused|lock wait)/i.test(text)) {
     return { key: "DATABASE", label: "数据库" };
@@ -72,7 +85,7 @@ function classifyRuntimeError({ service = "", component = "", message = "", deta
   return { key: "OTHER", label: "其他" };
 }
 
-function parsePm2ErrorLog(service, text, limit = 80) {
+export function parsePm2ErrorLog(service, text, limit = 80) {
   const lines = String(text ?? "").split(/\r?\n/).filter(Boolean);
   const entries = [];
   let current = [];
@@ -106,7 +119,7 @@ function pushStateError(items, service, component, message, meta = {}) {
     id: `state-${service}-${component}`,
     service,
     component,
-    severity: "ERROR",
+    severity: meta.severity ?? "ERROR",
     category: category.key,
     categoryLabel: category.label,
     message: String(message).slice(0, 1000),
@@ -115,7 +128,7 @@ function pushStateError(items, service, component, message, meta = {}) {
   });
 }
 
-function runtimeStateErrors(services) {
+export function runtimeStateErrors(services) {
   const items = [];
   if (services.crawler?.ok === false) pushStateError(items, "crawler", "service", services.crawler.error);
   if (services.realtime?.ok === false) pushStateError(items, "realtime", "service", services.realtime.error);
@@ -124,13 +137,18 @@ function runtimeStateErrors(services) {
   const crawler = services.crawler?.crawler;
   pushStateError(items, "crawler", "crawler", crawler?.lastError, {
     updatedAt: crawler?.lastErrorAt ?? crawler?.runCompletedAt ?? crawler?.runStartedAt ?? null,
-    details: crawler?.lastAction ?? ""
+    details: crawler?.lastAction ?? "",
+    severity: isTransientRuntimeNetworkMessage(crawler?.lastError) ? "WARN" : "ERROR"
   });
+  const tailRefreshWarning =
+    isTransientRuntimeNetworkMessage(crawler?.tailRefresh?.lastError) &&
+    Number(crawler?.tailRefresh?.refreshedRows ?? 0) > 0;
   pushStateError(items, "crawler", "tailRefresh", crawler?.tailRefresh?.lastError, {
     updatedAt: crawler?.tailRefresh?.lastErrorAt ?? crawler?.tailRefresh?.lastCompletedAt ?? crawler?.tailRefresh?.lastStartedAt ?? null,
     details: crawler?.tailRefresh
       ? `errors=${crawler.tailRefresh.errorCount ?? 0}, refreshedRows=${crawler.tailRefresh.refreshedRows ?? 0}`
-      : ""
+      : "",
+    severity: tailRefreshWarning ? "WARN" : "ERROR"
   });
   pushStateError(items, "crawler", "dailyAudit", crawler?.dailyAudit?.lastError, {
     updatedAt: crawler?.dailyAudit?.lastStartedAt ?? null
@@ -167,7 +185,12 @@ function runtimeStateErrors(services) {
     });
   }
   pushStateError(items, "scheduler", "telegramBot", scheduler.telegramBot?.lastError, {
-    updatedAt: scheduler.telegramBot?.lastPollAt ?? null
+    updatedAt: scheduler.telegramBot?.lastPollAt ?? null,
+    severity: isTransientRuntimeNetworkMessage(scheduler.telegramBot?.lastError) ? "WARN" : "ERROR"
+  });
+  pushStateError(items, "scheduler", "telegramBot", scheduler.telegramBot?.lastWarning, {
+    updatedAt: scheduler.telegramBot?.lastWarningAt ?? scheduler.telegramBot?.lastPollAt ?? null,
+    severity: "WARN"
   });
   return items;
 }

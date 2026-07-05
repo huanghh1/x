@@ -39,7 +39,7 @@ function fundingStatusText() {
   const positiveCount = state.fundingTokens.filter((token) => Number(token.currentFundingRate) > 0).length;
   const negativeCount = state.fundingTokens.filter((token) => Number(token.currentFundingRate) < 0).length;
   const neutralCount = state.fundingTokens.length - positiveCount - negativeCount;
-  const parts = [`当前共 ${state.fundingTokens.length} 个资金费率代币`];
+  const parts = [`当前共 ${state.fundingTokens.length} 个 1小时结算资金费率代币`];
   if (positiveCount || negativeCount || neutralCount) {
     parts.push(`正费率 ${positiveCount} / 负费率 ${negativeCount} / 持平或未知 ${neutralCount}`);
   }
@@ -58,7 +58,7 @@ export async function loadFundingRateTokens({ silent = false } = {}) {
     const payload = await api("/api/funding-rate-tokens");
     if (requestId !== state.fundingRequestId) return false;
     state.fundingTokens = payload.tokens || [];
-    if (Number(payload.watchlistAdded ?? 0) > 0) {
+    if (Number(payload.watchlistAdded ?? 0) > 0 || Number(payload.watchlistRemoved ?? 0) > 0) {
       void deps.loadWatchlist({ silent: true });
     }
     return true;

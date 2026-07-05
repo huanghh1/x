@@ -55,6 +55,7 @@ export {
 export {
   addWatchlistItemsIfMissing,
   clearWatchlistAlertSide,
+  deleteAutoWatchlistItemsMissingFrom,
   deleteWatchlistItem,
   getTokenUnlockCache,
   listWatchlist,

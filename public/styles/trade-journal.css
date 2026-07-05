@@ -225,6 +225,12 @@ body.has-custom-selects select[data-custom-select-enhanced="true"] {
   gap: 12px;
 }
 
+.trade-journal-form.is-standalone-summary .trade-journal-fields,
+.trade-journal-form.is-standalone-summary .trade-journal-open-reason-field,
+.trade-journal-form.is-standalone-summary .trade-journal-close-reason-field {
+  display: none;
+}
+
 .trade-journal-note {
   gap: 8px;
 }
@@ -372,6 +378,10 @@ body.has-custom-selects select[data-custom-select-enhanced="true"] {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.trade-journal-card-body.is-standalone-summary {
+  grid-template-columns: 1fr;
 }
 
 .trade-journal-card-body section,
