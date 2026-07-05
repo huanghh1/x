@@ -4,6 +4,7 @@ import { $, escapeHtml, setText } from "../utils/dom.js";
 import {
   formatFundingPercent,
   formatNumber,
+  formatPercent,
   formatTime,
   fundingRateTone,
   oiChangeSummary
@@ -45,6 +46,12 @@ function fundingStatusText() {
   }
   parts.push("按最近变化时间排序");
   return parts.join("，");
+}
+
+function changeClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return number > 0 ? "up" : "down";
 }
 
 export async function loadFundingRateTokens({ silent = false } = {}) {
@@ -118,6 +125,7 @@ export function renderFundingRateTokens() {
             <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
           </div>
           <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(token.symbol)}">${formatNumber(token.currentPrice)}</b></div>
+          <div><span>24h涨跌</span><b class="mono ${changeClass(token.priceChange24hPct)}" data-market-24h="${escapeHtml(token.symbol)}">${formatPercent(token.priceChange24hPct)}</b></div>
           <div><span>关联信号</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>
           <div><span>均线周期</span><b>${escapeHtml((token.intervals ?? []).join(" / ") || "--")}</b></div>
           <div><span>当前资金费率</span><b class="mono funding-rate ${rateTone}">${formatFundingPercent(token.currentFundingRate)}</b></div>

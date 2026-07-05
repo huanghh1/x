@@ -41,7 +41,7 @@ test("Telegram token action button is copy-only", () => {
 
 test("multi-cycle Telegram alert is rendered as one aggregated message", () => {
   const text = formatHotMaSignalTelegram(
-    { symbol: "EVAAUSDT", category_label: "Alpha 合约无现货" },
+    { symbol: "EVAAUSDT", category_label: "Alpha 合约无现货", priceChange24hPct: 12.34 },
     {
       intervalCode: "15m",
       alertLevel: "LEVEL1",
@@ -59,6 +59,8 @@ test("multi-cycle Telegram alert is rendered as one aggregated message", () => {
   );
 
   assert.match(text, /触发周期：<b>15m \/ 1h \/ 4h<\/b>（共 3 个）/);
+  assert.match(text, /分类：<b>Alpha 合约无现货<\/b>/);
+  assert.match(text, /24h涨跌幅：<b>\+12\.34%<\/b>/);
   assert.doesNotMatch(text, /^周期：/m);
   assert.doesNotMatch(text, /^周期状态：/m);
   assert.doesNotMatch(text, /^MA100：/m);
@@ -96,6 +98,8 @@ test("Telegram alerts name the OI spike hit periods", () => {
 test("OI spike Telegram text names threshold-hit periods", () => {
   const item = {
     symbol: "PERPUSDT",
+    categoryLabel: "现货+合约",
+    priceChange24hPct: -7.89,
     change5mPct: 1.5,
     change15mPct: 3.2,
     change1hPct: 12.5,
@@ -112,7 +116,11 @@ test("OI spike Telegram text names threshold-hit periods", () => {
   const standaloneText = formatStandaloneOpenInterestSpikeTelegram(item);
 
   assert.match(comboText, /<b>OI命中周期：<\/b>\n  • <b>1小时 12\.50%<\/b>\n  • <b>1天 41\.00%<\/b>/);
+  assert.match(comboText, /分类：<b>现货\+合约<\/b>/);
+  assert.match(comboText, /24h涨跌幅：<b>-7\.89%<\/b>/);
   assert.match(standaloneText, /<b>OI命中周期：<\/b>\n  • <b>1小时 12\.50%<\/b>\n  • <b>1天 41\.00%<\/b>/);
+  assert.match(standaloneText, /分类：<b>现货\+合约<\/b>/);
+  assert.match(standaloneText, /24h涨跌幅：<b>-7\.89%<\/b>/);
   assert.doesNotMatch(standaloneText, /触发区间/);
 });
 
@@ -121,6 +129,7 @@ test("Telegram signal menu shows OI spike changes as a matched combination", () 
     {
       symbol: "COLLECTUSDT",
       categoryLabel: "Alpha合约无现货",
+      priceChange24hPct: -1.23,
       intervals: ["15m", "1h", "4h"],
       intervalCode: "15m",
       multiMatchCount: 3,
@@ -145,6 +154,7 @@ test("Telegram signal menu shows OI spike changes as a matched combination", () 
   );
 
   assert.match(text, /组合等级：OI \+ 热度 \+ 多周期 · 一级警报/);
+  assert.match(text, /分类：Alpha合约无现货｜24h：-1\.23%｜周期：15m \/ 1h \/ 4h/);
   assert.match(text, /OI暴涨：5m 5.25%｜1h 11.50%｜4h 23.20%/);
 });
 

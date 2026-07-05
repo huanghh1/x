@@ -5,6 +5,7 @@ import {
   listOneHourFundingIntervals,
   listOpenInterestMonitorPage
 } from "../db.js";
+import { enrichRowsWithMarketMetadata } from "../marketMetadata.js";
 import { requestService } from "../serviceClient.js";
 import { mergeOpenInterestMonitorQueueState } from "./routeUtils.js";
 
@@ -60,7 +61,13 @@ export function createMarketMonitorRoutes({ requireLocalMutation }) {
       if (watchlistAdded > 0 || watchlistRemoved > 0) {
         refreshFundingWatchlistDependents({ refreshUnlocks: watchlistAdded > 0 });
       }
-      response.json({ ok: true, tokens, total: tokens.length, watchlistAdded, watchlistRemoved });
+      response.json({
+        ok: true,
+        tokens: await enrichRowsWithMarketMetadata(tokens),
+        total: tokens.length,
+        watchlistAdded,
+        watchlistRemoved
+      });
     } catch (error) {
       console.error("get funding rate tokens failed", error);
       response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -74,15 +81,17 @@ export function createMarketMonitorRoutes({ requireLocalMutation }) {
         : "5m";
       const sort = request.query.sort === "asc" ? "asc" : "desc";
       const scheduler = await requestService("scheduler", "/internal/health").catch(() => null);
+      const page = await listOpenInterestMonitorPage({
+        timeWindow,
+        sort,
+        page: request.query.page,
+        pageSize: request.query.pageSize
+      });
       response.json({
         ok: true,
         generatedAt: new Date().toISOString(),
-        ...(await listOpenInterestMonitorPage({
-          timeWindow,
-          sort,
-          page: request.query.page,
-          pageSize: request.query.pageSize
-        })),
+        ...page,
+        data: await enrichRowsWithMarketMetadata(page.data),
         timeWindow,
         sort,
         monitor: mergeOpenInterestMonitorQueueState(scheduler?.openInterestMonitor, scheduler?.telegramAlertQueue)

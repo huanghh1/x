@@ -1,9 +1,22 @@
 import { ALL_INTERVALS } from "../constants.js";
 import { state } from "../state.js";
 import { updateChartKline } from "../chart/klineChart.js";
-import { rowKey, updateSignalPriceDom } from "../pages/signals.js";
+import { rowKey, updateSignalPriceChangeDom, updateSignalPriceDom } from "../pages/signals.js";
 import { updateWatchPriceDom } from "../pages/watchlist.js";
-import { cssEscape, formatNumber, formatTime } from "../utils/format.js";
+import { cssEscape, formatNumber, formatPercent, formatTime } from "../utils/format.js";
+
+const PRICE_DOM_UPDATE_INTERVAL_MS = 30_000;
+const queuedRealtimePriceUpdates = new Map();
+const lastRealtimePriceDomUpdatedAt = new Map();
+let realtimePriceDomFlushTimer = null;
+let realtimePriceDomFlushDueAt = 0;
+
+function clearRealtimePriceDomFlushTimer() {
+  if (!realtimePriceDomFlushTimer) return;
+  clearTimeout(realtimePriceDomFlushTimer);
+  realtimePriceDomFlushTimer = null;
+  realtimePriceDomFlushDueAt = 0;
+}
 
 function closeWatchRealtime() {
   if (state.watchRealtimeReconnectTimer) {
@@ -20,6 +33,8 @@ function closeWatchRealtime() {
   state.watchRealtimeSocket = null;
   state.watchRealtimeSource = null;
   state.watchRealtimeSignature = "";
+  clearRealtimePriceDomFlushTimer();
+  queuedRealtimePriceUpdates.clear();
 }
 
 function signalRealtimeIntervals(row) {
@@ -121,10 +136,95 @@ function updateMarketPriceDom(symbol, price, eventTime = Date.now()) {
   }
 }
 
-function updateRealtimePrice(symbol, price, eventTime) {
+function updatePriceChangeDom(selector, value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return;
+  for (const element of document.querySelectorAll(selector)) {
+    element.textContent = formatPercent(number);
+    element.classList.toggle("up", number > 0);
+    element.classList.toggle("down", number < 0);
+  }
+}
+
+function updateMarketPriceChangeDom(symbol, priceChange24hPct) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const number = Number(priceChange24hPct);
+  if (!safeSymbol || !Number.isFinite(number)) return;
+  for (const item of [...state.fundingTokens, ...state.ioData, ...state.ioRealtimeRows]) {
+    if (String(item.symbol ?? "").toUpperCase() === safeSymbol) item.priceChange24hPct = number;
+  }
+  const selectorSymbol = cssEscape(safeSymbol);
+  updatePriceChangeDom(`[data-market-24h="${selectorSymbol}"]`, number);
+}
+
+function updateWatchPriceChangeDom(symbol, priceChange24hPct) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const number = Number(priceChange24hPct);
+  if (!safeSymbol || !Number.isFinite(number)) return;
+  for (const item of state.watchlist) {
+    if (String(item.symbol ?? "").toUpperCase() === safeSymbol) item.priceChange24hPct = number;
+  }
+  const selectorSymbol = cssEscape(safeSymbol);
+  updatePriceChangeDom(`[data-watch-24h="${selectorSymbol}"]`, number);
+}
+
+function updateRealtimePriceDom({ symbol, price, eventTime, priceChange24hPct = null }) {
   updateWatchPriceDom(symbol, price, eventTime);
   updateSignalPriceDom(symbol, price, eventTime);
   updateMarketPriceDom(symbol, price, eventTime);
+  updateWatchPriceChangeDom(symbol, priceChange24hPct);
+  updateSignalPriceChangeDom(symbol, priceChange24hPct);
+  updateMarketPriceChangeDom(symbol, priceChange24hPct);
+}
+
+function scheduleRealtimePriceDomFlush(delayMs) {
+  const safeDelayMs = Math.max(0, delayMs);
+  const dueAt = Date.now() + safeDelayMs;
+  if (realtimePriceDomFlushTimer && realtimePriceDomFlushDueAt <= dueAt) return;
+  clearRealtimePriceDomFlushTimer();
+  realtimePriceDomFlushDueAt = dueAt;
+  realtimePriceDomFlushTimer = setTimeout(flushRealtimePriceDomUpdates, safeDelayMs);
+}
+
+function flushRealtimePriceDomUpdates() {
+  clearRealtimePriceDomFlushTimer();
+  const now = Date.now();
+  let nextDelayMs = null;
+  for (const [symbol, update] of queuedRealtimePriceUpdates) {
+    const lastUpdatedAt = lastRealtimePriceDomUpdatedAt.get(symbol) ?? 0;
+    const remainingMs = lastUpdatedAt ? PRICE_DOM_UPDATE_INTERVAL_MS - (now - lastUpdatedAt) : 0;
+    if (remainingMs > 0) {
+      nextDelayMs = nextDelayMs === null ? remainingMs : Math.min(nextDelayMs, remainingMs);
+      continue;
+    }
+    queuedRealtimePriceUpdates.delete(symbol);
+    lastRealtimePriceDomUpdatedAt.set(symbol, now);
+    updateRealtimePriceDom(update);
+  }
+  if (queuedRealtimePriceUpdates.size) {
+    scheduleRealtimePriceDomFlush(nextDelayMs ?? PRICE_DOM_UPDATE_INTERVAL_MS);
+  }
+}
+
+function updateRealtimePrice(symbol, price, eventTime, priceChange24hPct = null) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const numericPrice = Number(price);
+  if (!safeSymbol || !Number.isFinite(numericPrice)) return;
+  const existing = queuedRealtimePriceUpdates.get(safeSymbol);
+  const numericChange = Number(priceChange24hPct);
+  queuedRealtimePriceUpdates.set(safeSymbol, {
+    symbol: safeSymbol,
+    price: numericPrice,
+    eventTime,
+    priceChange24hPct: Number.isFinite(numericChange) ? numericChange : existing?.priceChange24hPct ?? null
+  });
+  const lastUpdatedAt = lastRealtimePriceDomUpdatedAt.get(safeSymbol) ?? 0;
+  const elapsedMs = Date.now() - lastUpdatedAt;
+  if (!lastUpdatedAt || elapsedMs >= PRICE_DOM_UPDATE_INTERVAL_MS) {
+    flushRealtimePriceDomUpdates();
+    return;
+  }
+  scheduleRealtimePriceDomFlush(PRICE_DOM_UPDATE_INTERVAL_MS - elapsedMs);
 }
 
 function handleWatchRealtimeMessage(payload) {
@@ -132,7 +232,7 @@ function handleWatchRealtimeMessage(payload) {
     const symbol = String(payload.symbol ?? "").toUpperCase();
     const price = Number(payload.price);
     if (symbol && Number.isFinite(price)) {
-      updateRealtimePrice(symbol, price, Number(payload.eventTime ?? Date.now()));
+      updateRealtimePrice(symbol, price, Number(payload.eventTime ?? Date.now()), payload.priceChange24hPct);
     }
     return;
   }
@@ -153,7 +253,7 @@ function handleWatchRealtimeMessage(payload) {
     const symbol = String(data.s ?? "").toUpperCase();
     const price = Number(data.c);
     if (symbol && Number.isFinite(price)) {
-      updateRealtimePrice(symbol, price, Number(data.E ?? Date.now()));
+      updateRealtimePrice(symbol, price, Number(data.E ?? Date.now()), data.P);
     }
     return;
   }

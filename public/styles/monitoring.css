@@ -82,7 +82,7 @@ main,
 
 .watch-row {
   width: 100%;
-  min-width: 1100px;
+  min-width: 980px;
   min-height: 72px;
   grid-template-columns: 150px 100px 90px 100px 100px minmax(190px, 1fr) 80px 250px;
 }
@@ -98,11 +98,26 @@ main,
 }
 
 .funding-card {
-  min-width: 980px;
+  min-width: 1100px;
 }
 
 .io-card {
-  min-width: 1120px;
+  min-width: 1090px;
+  gap: 8px;
+  padding: 12px;
+  grid-template-columns: minmax(130px, 1.1fr) 86px 82px 74px minmax(92px, 0.85fr) minmax(90px, 0.8fr) minmax(104px, 0.9fr) minmax(88px, 0.75fr) minmax(220px, auto);
+}
+
+.io-card .heat-links {
+  gap: 4px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.io-card .copy-symbol,
+.io-card .mini-link {
+  min-height: 32px;
+  padding-inline: 10px;
 }
 
 @media (min-width: 561px) and (max-width: 1100px) {
@@ -543,7 +558,7 @@ main,
 }
 
 .trade-position-table table {
-  min-width: 1260px;
+  min-width: 1360px;
 }
 
 .trade-side {
@@ -572,7 +587,7 @@ main,
 }
 
 .trade-symbol-table table {
-  min-width: 940px;
+  min-width: 1020px;
 }
 
 .trade-symbol-table strong {

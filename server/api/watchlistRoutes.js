@@ -7,6 +7,7 @@ import {
   listWatchlist,
   upsertWatchlistItem
 } from "../db.js";
+import { enrichRowsWithMarketMetadata } from "../marketMetadata.js";
 import { requestService, serviceUrl } from "../serviceClient.js";
 import { respondWithServiceJson, sanitizeSymbol } from "./routeUtils.js";
 
@@ -14,7 +15,7 @@ export function createWatchlistRoutes({ requireLocalMutation }) {
   const router = express.Router();
 
   router.get("/api/watchlist", async (_request, response) => {
-    response.json({ ok: true, items: await listWatchlist() });
+    response.json({ ok: true, items: await enrichRowsWithMarketMetadata(await listWatchlist()) });
   });
 
   router.get("/api/watchlist/events", async (request, response) => {
@@ -68,7 +69,7 @@ export function createWatchlistRoutes({ requireLocalMutation }) {
         timeoutMs: 60_000
       })
         .catch((error) => console.error("watchlist unlock refresh failed", error));
-      response.json({ ok: true, items });
+      response.json({ ok: true, items: await enrichRowsWithMarketMetadata(items) });
     } catch (error) {
       response.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
     }

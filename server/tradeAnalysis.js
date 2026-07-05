@@ -1,4 +1,5 @@
 import { readTradeEventHistoryAnalysis, upsertTradeEventHistory } from "./db.js";
+import { enrichRowsWithMarketMetadata } from "./marketMetadata.js";
 import { fetchBinanceEvents, fetchBinancePositionSource } from "./tradeAnalysis/binanceProvider.js";
 import { fetchHyperliquidEvents, fetchHyperliquidPositionSource } from "./tradeAnalysis/hyperliquidProvider.js";
 import {
@@ -305,7 +306,7 @@ function normalizeTradeAnalysisMode(value) {
   return ["snapshot", "history", "local"].includes(mode) ? "snapshot" : "refresh";
 }
 
-function buildTradeAnalysisPayload({
+async function buildTradeAnalysisPayload({
   window,
   safeSymbol,
   connectionStatus,
@@ -316,7 +317,15 @@ function buildTradeAnalysisPayload({
   maxEventRows,
   mode
 }) {
-  const safePositions = Array.isArray(positions) ? positions : [];
+  const rawPositions = Array.isArray(positions) ? positions : [];
+  const [safePositions, symbolRows] = await Promise.all([
+    enrichRowsWithMarketMetadata(rawPositions),
+    enrichRowsWithMarketMetadata(history?.summary?.bySymbol ?? [])
+  ]);
+  const summary = {
+    ...history.summary,
+    bySymbol: symbolRows
+  };
   const historyEvents = Array.isArray(history?.events) ? history.events : [];
   const events = uniqueById([...historyEvents, ...safePositions.map(currentPositionEvent)])
     .sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
@@ -333,10 +342,10 @@ function buildTradeAnalysisPayload({
     symbol: safeSymbol,
     connections: connectionStatus,
     sources: sourceResults.map(({ events: _events, positions: _positions, ...source }) => source),
-    summary: history.summary,
+    summary,
     symbolSummary: history.symbolSummary,
     tradeRows: {
-      items: history.summary.bySymbol,
+      items: summary.bySymbol,
       total: history.symbolSummary.total,
       page: history.symbolSummary.page,
       pageSize: history.symbolSummary.pageSize
@@ -464,7 +473,7 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
       persisted: history.persisted !== false,
       persistError: history.persistError ?? ""
     };
-    return buildTradeAnalysisPayload({
+    return await buildTradeAnalysisPayload({
       window,
       safeSymbol,
       connectionStatus,
@@ -554,7 +563,7 @@ export async function getTradeAnalysis(config, { start, end, symbol, page = 1, p
     pageSize: safePageSize,
     eventLimit: config.tradeAnalysis.maxEventRows
   });
-  return buildTradeAnalysisPayload({
+  return await buildTradeAnalysisPayload({
     window,
     safeSymbol,
     connectionStatus,

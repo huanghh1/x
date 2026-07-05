@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { enrichItemWithMarketMetadata } from "./marketMetadata.js";
 import { resolveSignalProfile } from "./signalPriority.js";
 
 export function telegramState() {
@@ -34,6 +35,36 @@ function formatOiChange(value) {
   return value === null || value === undefined || !Number.isFinite(numeric)
     ? "--"
     : `${numeric.toFixed(2)}%`;
+}
+
+function formatPriceChange24h(value) {
+  const numeric = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(numeric)) return "--";
+  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`;
+}
+
+function tokenCategoryLabel(item = {}) {
+  return String(item.categoryLabel ?? item.category_label ?? "").trim() || "--";
+}
+
+function tokenPriceChange24h(item = {}) {
+  return formatPriceChange24h(item.priceChange24hPct ?? item.priceChange24hPercent ?? item.priceChangePercent);
+}
+
+function telegramTokenMetaLines(item = {}) {
+  return [
+    `交易对：${telegramTokenLine(item.symbol)}`,
+    `分类：<b>${escapeHtml(tokenCategoryLabel(item))}</b>`,
+    `24h涨跌幅：<b>${escapeHtml(tokenPriceChange24h(item))}</b>`
+  ];
+}
+
+async function enrichTelegramItem(item = {}) {
+  try {
+    return await enrichItemWithMarketMetadata(item);
+  } catch {
+    return item;
+  }
 }
 
 const OI_SPIKE_WINDOWS = [
@@ -269,7 +300,7 @@ export function formatHotMaSignalTelegram(token, signal, context = {}) {
   const isAggregated = multiCycleIntervals.length > 1;
   return [
     `<b>[${escapeHtml(profile.label)}]</b>`,
-    `交易对：${telegramTokenLine(token.symbol)} · ${escapeHtml(token.category_label)}`,
+    ...telegramTokenMetaLines({ ...signal, ...token }),
     context.hotRank ? "热度确认：该代币当前在综合热度排行内" : null,
     context.fundingOneHour ? "资金费率：当前为 1 小时结算周期" : null,
     context.oiSpike
@@ -299,7 +330,8 @@ export async function sendHotMaSignalTelegram(token, signal, context = {}) {
   });
   if (!profile.sourceMask) return { skipped: true, reason: "No ranked combination source" };
 
-  const result = await postTelegram(formatHotMaSignalTelegram(token, signal, context), signalReplyMarkup(token));
+  const enrichedToken = await enrichTelegramItem({ ...signal, ...token });
+  const result = await postTelegram(formatHotMaSignalTelegram(enrichedToken, signal, context), signalReplyMarkup(enrichedToken));
   return { skipped: false, result };
 }
 
@@ -310,15 +342,16 @@ export async function sendHotRankTelegram(tokens) {
 export async function sendWatchlistTelegram(item, reason) {
   if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
   if (!config.telegram.botToken || !config.telegram.chatId) return { skipped: true, reason: "Telegram missing config" };
+  const enrichedItem = await enrichTelegramItem(item);
   const text = [
     "<b>🎯 [关注池价格警报]</b>",
-    `交易对：${telegramTokenLine(item.symbol)}`,
-    `现价：${escapeHtml(item.currentPrice ?? "--")}`,
+    ...telegramTokenMetaLines(enrichedItem),
+    `现价：${escapeHtml(enrichedItem.currentPrice ?? "--")}`,
     `触发：${escapeHtml(reason)}`,
-    item.note ? `备注：${escapeHtml(item.note)}` : null
+    enrichedItem.note ? `备注：${escapeHtml(enrichedItem.note)}` : null
   ].filter(Boolean).join("\n");
 
-  const result = await postTelegram(text, signalReplyMarkup(item, "watch"));
+  const result = await postTelegram(text, signalReplyMarkup(enrichedItem, "watch"));
   return { skipped: false, result };
 }
 
@@ -331,6 +364,7 @@ function formatFundingRate(value) {
 export async function sendFundingIntervalTelegram(item, context = {}) {
   if (!config.telegram.enabled) return { skipped: true, reason: "Telegram disabled" };
   if (!config.telegram.botToken || !config.telegram.chatId) return { skipped: true, reason: "Telegram missing config" };
+  const enrichedItem = await enrichTelegramItem(item);
   const previous = Number(item.previousFundingIntervalHours);
   const current = Number(item.fundingIntervalHours);
   const changeText = Number.isFinite(previous) && previous > 0 ? `${previous}h -> ${current}h` : `首次发现 ${current}h`;
@@ -345,18 +379,18 @@ export async function sendFundingIntervalTelegram(item, context = {}) {
   const intervals = Array.isArray(context.intervals) ? context.intervals : [];
   const text = [
     `<b>[${escapeHtml(label)}]</b>`,
-    `交易对：${telegramTokenLine(item.symbol)}`,
+    ...telegramTokenMetaLines(enrichedItem),
     `结算周期：<b>${escapeHtml(changeText)}</b>`,
-    `当前资金费率：<b>${escapeHtml(formatFundingRate(item.currentFundingRate))}</b>`,
-    Number(item.oneHourAlertCount ?? 0) > 0 ? `重复提醒：第 ${escapeHtml(Number(item.oneHourAlertCount) + 1)} 次，确认后停止循环推送` : "确认状态：待确认，5分钟后仍未确认会重复推送",
+    `当前资金费率：<b>${escapeHtml(formatFundingRate(enrichedItem.currentFundingRate))}</b>`,
+    Number(enrichedItem.oneHourAlertCount ?? 0) > 0 ? `重复提醒：第 ${escapeHtml(Number(enrichedItem.oneHourAlertCount) + 1)} 次，确认后停止循环推送` : "确认状态：待确认，5分钟后仍未确认会重复推送",
     intervals.length ? `均线触发周期：${escapeHtml(intervals.join(" / "))}` : null,
     context.oiSpike
       ? formatOiHitPeriodBlock(context)
       : null,
-    item.lastChangedAt ? `变化时间：${escapeHtml(new Date(item.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null
+    enrichedItem.lastChangedAt ? `变化时间：${escapeHtml(new Date(enrichedItem.lastChangedAt).toLocaleString("zh-CN", { hour12: false }))}` : null
   ].filter(Boolean).join("\n");
 
-  const result = await postTelegram(text, fundingAlertReplyMarkup(item));
+  const result = await postTelegram(text, fundingAlertReplyMarkup(enrichedItem));
   return { skipped: false, result };
 }
 
@@ -380,7 +414,7 @@ export function formatOpenInterestSpikeTelegram(item, context = {}) {
   const intervals = Array.isArray(context.intervals) ? context.intervals : [];
   return [
     `<b>[${escapeHtml(profile.label)}]</b>`,
-    `交易对：${telegramTokenLine(item.symbol)}`,
+    ...telegramTokenMetaLines(item),
     formatOiHitPeriodBlock(item, ""),
     `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b>`,
     `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b>`,
@@ -401,14 +435,15 @@ export async function sendOpenInterestSpikeTelegram(item, context = {}) {
   }
   const profile = openInterestSignalProfile(context);
   if (!profile.sourceMask) return { skipped: true, reason: "No MA alert for OI combination" };
-  const result = await postTelegram(formatOpenInterestSpikeTelegram(item, context), signalReplyMarkup(item, "oi"));
+  const enrichedItem = await enrichTelegramItem(item);
+  const result = await postTelegram(formatOpenInterestSpikeTelegram(enrichedItem, context), signalReplyMarkup(enrichedItem, "oi"));
   return { skipped: false, result };
 }
 
 export function formatStandaloneOpenInterestSpikeTelegram(item) {
   return [
     "<b>🚨 [OI持仓量暴涨警报]</b>",
-    `交易对：${telegramTokenLine(item.symbol)}`,
+    ...telegramTokenMetaLines(item),
     formatOiHitPeriodBlock(item, ""),
     `5分钟变化：<b>${escapeHtml(formatOiChange(item.change5mPct))}</b> (阈值: ${config.openInterestMonitor.spike5mPct}%)`,
     `1小时变化：<b>${escapeHtml(formatOiChange(item.change1hPct))}</b> (阈值: ${config.openInterestMonitor.spike1hPct}%)`,
@@ -429,7 +464,8 @@ export async function sendStandaloneOpenInterestSpikeTelegram(item) {
     return { skipped: true, reason: "Standalone OI alert disabled" };
   }
 
-  const result = await postTelegram(formatStandaloneOpenInterestSpikeTelegram(item), signalReplyMarkup(item, "oi"));
+  const enrichedItem = await enrichTelegramItem(item);
+  const result = await postTelegram(formatStandaloneOpenInterestSpikeTelegram(enrichedItem), signalReplyMarkup(enrichedItem, "oi"));
   return { skipped: false, result };
 }
 

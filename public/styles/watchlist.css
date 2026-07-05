@@ -6,7 +6,7 @@
 
 .watch-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(110px, 0.7fr)) auto;
+  grid-template-columns: minmax(150px, 1.1fr) 100px 90px 90px 100px 100px minmax(190px, 1fr) 80px auto;
   gap: var(--space-3);
   align-items: center;
   min-height: 74px;

@@ -86,8 +86,8 @@ export function renderHotRank() {
 
   target.innerHTML = pageData
     .map((token) => {
-      const change = Number(token.priceChange);
-      const changeClass = Number.isFinite(change) && change < 0 ? "down" : "up";
+      const change = Number(token.priceChange24hPct ?? token.priceChange);
+      const changeClass = Number.isFinite(change) && change < 0 ? "down" : Number.isFinite(change) && change > 0 ? "up" : "";
       const symbol = escapeHtml(token.symbol);
       return `
         <article class="heat-rank-row">
@@ -100,7 +100,7 @@ export function renderHotRank() {
           </div>
           <div class="heat-chain">${escapeHtml(token.chainLabel)}</div>
           <div class="heat-score" title="综合热度">${formatNumber(token.heat, 0)}</div>
-          <div class="heat-change ${changeClass}">${formatPercent(change)}</div>
+          <div class="heat-change ${changeClass}" title="24h涨跌幅">24h ${formatPercent(change)}</div>
           <div class="heat-links">${copyButton(token.symbol)}${searchButtons(token.symbol)}</div>
           <div class="heat-summary" title="${escapeHtml(token.summary || "暂无讨论摘要")}">${escapeHtml(token.summary || "暂无讨论摘要")}</div>
         </article>

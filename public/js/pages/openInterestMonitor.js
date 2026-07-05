@@ -25,6 +25,12 @@ export function configureOpenInterestMonitor(nextDeps = {}) {
   deps = { ...deps, ...nextDeps };
 }
 
+function changeClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return number > 0 ? "up" : "down";
+}
+
 export async function loadIOMonitoring() {
   const requestId = state.ioRequestId + 1;
   state.ioRequestId = requestId;
@@ -122,13 +128,14 @@ export function renderIOMonitoring() {
             : null
       ].filter(Boolean);
       const change = Number(item.changePercent);
-      const changeClass = Number.isFinite(change) ? (change >= 0 ? "up" : "down") : "";
+      const oiChangeClass = Number.isFinite(change) ? (change >= 0 ? "up" : "down") : "";
       const expanded = state.ioExpandedSymbol === item.symbol;
       return `
         <article class="io-card">
           <div class="io-symbol"><button class="market-symbol-button" type="button" data-market-chart="io" data-market-symbol="${escapeHtml(item.symbol)}" aria-expanded="${expanded}">${escapeHtml(item.symbol)}</button><span>${escapeHtml(state.ioWindow)}</span></div>
           <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(item.symbol)}">${formatNumber(item.currentPrice)}</b></div>
-          <div><span>变化</span><b class="${changeClass}">${formatPercent(item.changePercent)}</b></div>
+          <div><span>24h涨跌</span><b class="mono ${changeClass(item.priceChange24hPct)}" data-market-24h="${escapeHtml(item.symbol)}">${formatPercent(item.priceChange24hPct)}</b></div>
+          <div><span>变化</span><b class="${oiChangeClass}">${formatPercent(item.changePercent)}</b></div>
           <div><span>当前持仓量</span><b class="mono">${formatCompactNumber(item.currentOpenInterest)}</b></div>
           <div><span>持仓价值</span><b class="mono">${formatCompactUsd(item.currentOpenInterestValue)}</b></div>
           <div><span>同币种命中</span><b>${escapeHtml(matches.join(" + ") || "暂无")}</b></div>

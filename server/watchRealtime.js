@@ -331,12 +331,19 @@ async function maybeSendPriceAlert(symbol, price, eventTime) {
 async function handleTicker(data) {
   const symbol = sanitizeSymbol(data.s);
   const price = Number(data.c);
+  const priceChange24hPct = Number(data.P);
   const eventTime = Number(data.E ?? Date.now());
   if (!symbol || !Number.isFinite(price)) return;
   state.lastMessageAt = new Date().toISOString();
   const item = state.watchItems.get(symbol);
   if (item) state.watchItems.set(symbol, { ...item, currentPrice: price, currentCloseTime: eventTime });
-  watchRealtimeEvents.emit("price", { type: "price", symbol, price, eventTime });
+  watchRealtimeEvents.emit("price", {
+    type: "price",
+    symbol,
+    price,
+    eventTime,
+    priceChange24hPct: Number.isFinite(priceChange24hPct) ? priceChange24hPct : null
+  });
   if (shouldPersistPrice(symbol, eventTime)) {
     await updateWatchlistRealtimePrice(symbol, price, eventTime);
   }

@@ -355,6 +355,107 @@ export async function fetchMarkPrices(options = {}) {
     .filter(Boolean);
 }
 
+let futuresTicker24hCache = {
+  expiresAt: 0,
+  tickers: new Map()
+};
+const FUTURES_TICKER_24H_RETRY_MS = 5_000;
+
+function futuresTicker24hCacheTtlMs() {
+  return Math.max(1000, Number(config.binance.ticker24hCacheMs) || 30_000);
+}
+
+function hasFuturesTicker24hCache() {
+  return futuresTicker24hCache.tickers instanceof Map && futuresTicker24hCache.tickers.size > 0;
+}
+
+function normalizeFuturesTicker24hr(item) {
+  const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  const priceChange24hPct = Number(item?.priceChangePercent);
+  const lastPrice = Number(item?.lastPrice);
+  if (!symbol) return null;
+  return {
+    symbol,
+    priceChange24hPct: Number.isFinite(priceChange24hPct) ? priceChange24hPct : null,
+    lastPrice: Number.isFinite(lastPrice) ? lastPrice : null
+  };
+}
+
+export function clearFuturesTicker24hrCache() {
+  futuresTicker24hCache = {
+    expiresAt: 0,
+    tickers: new Map()
+  };
+}
+
+export async function fetchFuturesTicker24hr(symbol) {
+  const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  if (!safeSymbol) throw new Error("symbol is required for 24h ticker");
+  const cached = futuresTicker24hCache.tickers.get(safeSymbol) ?? null;
+  if (cached && Date.now() < futuresTicker24hCache.expiresAt) return cached;
+
+  const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/ticker/24hr`);
+  url.searchParams.set("symbol", safeSymbol);
+  try {
+    const item = await fetchJson(url.toString(), `${safeSymbol} 24h ticker`, {
+      weight: 1,
+      retries: Math.min(1, config.binance.requestRetries),
+      timeoutMs: Math.min(config.binance.requestTimeoutMs, 5000)
+    });
+    const normalized = normalizeFuturesTicker24hr(item);
+    if (!normalized) throw new Error(`${safeSymbol} 24h ticker returned invalid payload`);
+    futuresTicker24hCache.tickers.set(safeSymbol, normalized);
+    futuresTicker24hCache.expiresAt = Date.now() + futuresTicker24hCacheTtlMs();
+    return normalized;
+  } catch (error) {
+    if (cached) {
+      futuresTicker24hCache.expiresAt = Date.now() + FUTURES_TICKER_24H_RETRY_MS;
+      return cached;
+    }
+    throw error;
+  }
+}
+
+export async function fetchFuturesTicker24hrMap(symbols = []) {
+  const safeSymbols = [...new Set(
+    (Array.isArray(symbols) ? symbols : [symbols])
+      .map((symbol) => String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""))
+      .filter(Boolean)
+  )];
+  if (!safeSymbols.length) return new Map();
+
+  const now = Date.now();
+  if (now >= futuresTicker24hCache.expiresAt) {
+    try {
+      const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/ticker/24hr`, "Binance 24h tickers", {
+        weight: 40,
+        retries: Math.min(1, config.binance.requestRetries),
+        timeoutMs: Math.min(config.binance.requestTimeoutMs, 5000)
+      });
+      const tickers = new Map();
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          const normalized = normalizeFuturesTicker24hr(item);
+          if (normalized) tickers.set(normalized.symbol, normalized);
+        }
+      }
+      if (!tickers.size && hasFuturesTicker24hCache()) {
+        futuresTicker24hCache.expiresAt = now + FUTURES_TICKER_24H_RETRY_MS;
+      } else {
+        futuresTicker24hCache = {
+          expiresAt: now + futuresTicker24hCacheTtlMs(),
+          tickers
+        };
+      }
+    } catch (error) {
+      if (!hasFuturesTicker24hCache()) throw error;
+      futuresTicker24hCache.expiresAt = now + FUTURES_TICKER_24H_RETRY_MS;
+    }
+  }
+
+  return new Map(safeSymbols.map((symbol) => [symbol, futuresTicker24hCache.tickers.get(symbol) ?? null]));
+}
+
 export async function fetchOpenInterest({ symbol }) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   if (!safeSymbol) throw new Error("symbol is required for open interest");

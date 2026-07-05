@@ -26,6 +26,12 @@ export function formatOiChange(value) {
   return value === null || value === undefined || !Number.isFinite(numeric) ? "--" : `${numeric.toFixed(2)}%`;
 }
 
+export function formatPercent(value) {
+  const numeric = Number(value);
+  if (value === null || value === undefined || !Number.isFinite(numeric)) return "--";
+  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`;
+}
+
 export function oiChangeSummary(row) {
   const intervals = [
     ["5m", row.oiChange5mPct, row.oiSpike5mHit],

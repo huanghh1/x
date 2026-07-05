@@ -2,7 +2,7 @@ import { api } from "../api.js";
 import { syncAllCustomSelects, syncCustomSelect } from "../components/customSelect.js";
 import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
-import { datetimeLocalToIso, formatNumber, formatTime, formatUsd, toDatetimeLocal } from "../utils/format.js";
+import { datetimeLocalToIso, formatNumber, formatPercent, formatTime, formatUsd, toDatetimeLocal } from "../utils/format.js";
 
 const tradeJournalDeps = {
   loadTradeAnalysis: async () => {},
@@ -144,7 +144,7 @@ function tradeJournalSourceOptions() {
       status: "OPEN",
       openedAt,
       closedAt: null,
-      detail: `数量 ${formatNumber(position.quantity, 6)} · 开仓均价 ${formatNumber(position.entryPrice, 6)} · 未实现 ${formatUsd(position.unrealizedPnl)}`
+      detail: `24h ${formatPercent(position.priceChange24hPct)} · 数量 ${formatNumber(position.quantity, 6)} · 开仓均价 ${formatNumber(position.entryPrice, 6)} · 未实现 ${formatUsd(position.unrealizedPnl)}`
     };
   });
 
@@ -164,7 +164,7 @@ function tradeJournalSourceOptions() {
       status: openPosition ? "OPEN" : "ENDED",
       openedAt,
       closedAt,
-      detail: `交易组 · 已实现 ${formatUsd(row.realizedPnl)} · 手续费 ${formatUsd(row.feeCost)} · 资金费 ${formatUsd(row.funding)}`
+      detail: `交易组 · 24h ${formatPercent(row.priceChange24hPct)} · 已实现 ${formatUsd(row.realizedPnl)} · 手续费 ${formatUsd(row.feeCost)} · 资金费 ${formatUsd(row.funding)}`
     };
   });
 
@@ -563,6 +563,21 @@ function renderTradeJournalIntradayEditor(entry = {}) {
   if (addButton) addButton.disabled = state.tradeJournalIntradaySaving || !hasEntry;
 }
 
+function mergeTradeJournalIntradayNote(journalId, note) {
+  const numericId = Number(journalId);
+  if (!Number.isInteger(numericId) || !note) return null;
+  let updated = null;
+  state.tradeJournal = state.tradeJournal.map((item) => {
+    if (Number(item.id) !== numericId) return item;
+    const notes = [...tradeJournalIntradayNotes(item), note].sort((a, b) =>
+      new Date(a.notedAt || a.createdAt || 0).getTime() - new Date(b.notedAt || b.createdAt || 0).getTime()
+    );
+    updated = { ...item, intradayNotes: notes };
+    return updated;
+  });
+  return updated;
+}
+
 function setTradeJournalForm(item = null, { focusReview = false, focusIntraday = false } = {}) {
   const entry = item ?? {};
   state.selectedTradeJournalSourceKey = isTradeJournalStandaloneEntry(entry) ? TRADE_JOURNAL_STANDALONE_SOURCE_KEY : "";
@@ -620,6 +635,9 @@ export async function saveTradeJournal(event) {
   const id = $("#tradeJournalIdInput")?.value;
   const payload = tradeJournalFormPayload();
   const standalone = isTradeJournalStandaloneMode();
+  const pendingIntradayText = !standalone && id
+    ? String($("#tradeJournalIntradayInput")?.value ?? "").trim()
+    : "";
   if (standalone && !String(payload.reviewSummary ?? "").trim()) {
     state.tradeJournalError = "交易总结不能为空";
     updateTradeJournalStatus();
@@ -641,6 +659,21 @@ export async function saveTradeJournal(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
+    if (pendingIntradayText && saved.item?.id) {
+      const notePayload = await api(`/api/trade-journal/${encodeURIComponent(saved.item.id)}/intraday-notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ noteText: pendingIntradayText })
+      });
+      if (notePayload.note) {
+        saved.item = {
+          ...saved.item,
+          intradayNotes: [...tradeJournalIntradayNotes(saved.item), notePayload.note]
+        };
+      }
+      const intradayInput = $("#tradeJournalIntradayInput");
+      if (intradayInput) intradayInput.value = "";
+    }
     setTradeJournalForm(saved.item ?? null);
     await loadTradeJournal();
   } catch (error) {
@@ -668,12 +701,19 @@ export async function addTradeJournalIntradayNote() {
   updateTradeJournalStatus();
   renderTradeJournalIntradayEditor(tradeJournalById(id) ?? { id });
   try {
-    await api(`/api/trade-journal/${encodeURIComponent(id)}/intraday-notes`, {
+    const payload = await api(`/api/trade-journal/${encodeURIComponent(id)}/intraday-notes`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ noteText })
     });
     if (input) input.value = "";
+    if (payload.note) {
+      const updated = mergeTradeJournalIntradayNote(id, payload.note);
+      if (updated) {
+        renderTradeJournal();
+        setTradeJournalForm(updated, { focusIntraday: true });
+      }
+    }
     await loadTradeJournal();
     const refreshed = tradeJournalById(id);
     if (refreshed) {

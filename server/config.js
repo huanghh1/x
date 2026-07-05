@@ -125,6 +125,7 @@ export const config = {
       process.env.BINANCE_SOCIAL_HYPE_RANK_URL ??
       "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/social/hype/rank/leaderboard",
     hotRankCacheMs: numberEnv("BINANCE_HOT_RANK_CACHE_MS", 5 * 60 * 1000),
+    ticker24hCacheMs: numberEnv("BINANCE_24H_TICKER_CACHE_MS", 30 * 1000),
     requestTimeoutMs: numberEnv("REQUEST_TIMEOUT_MS", 15000),
     requestRetries: numberEnv("BINANCE_REQUEST_RETRIES", 4),
     klineRequestRetries: numberEnv("BINANCE_KLINE_REQUEST_RETRIES", numberEnv("BINANCE_REQUEST_RETRIES", 4) + 4),

@@ -12,6 +12,7 @@ import {
   markFundingIntervalAlertConfirmed,
   listWatchlist
 } from "./db.js";
+import { enrichRowsWithMarketMetadata } from "./marketMetadata.js";
 import { resolveSignalProfile } from "./signalPriority.js";
 import {
   telegramApi,
@@ -22,6 +23,7 @@ import {
   clampPage,
   escapeHtml,
   formatNumber,
+  formatPercent,
   levelLabel,
   oiChangeSummary,
   sendOrEditMessage
@@ -171,6 +173,14 @@ function hiddenItemsText(hiddenCount) {
   return hiddenCount > 0 ? `仅显示前 ${TELEGRAM_MENU_LIST_LIMIT} 项，另有 ${hiddenCount} 项未展开。` : null;
 }
 
+function tokenMetaText(item = {}) {
+  return `分类：${escapeHtml(item.categoryLabel || item.category_label || "--")}｜24h：${escapeHtml(formatPercent(item.priceChange24hPct))}`;
+}
+
+function inlineTokenMetaText(item = {}) {
+  return `分类 ${escapeHtml(item.categoryLabel || item.category_label || "--")} · 24h ${escapeHtml(formatPercent(item.priceChange24hPct))}`;
+}
+
 function pageButtons({ prefix, page, total, pageSize }) {
   const totalPages = Math.max(1, Math.ceil(Number(total || 0) / Number(pageSize || 1)));
   return [
@@ -208,7 +218,7 @@ export function signalRowText(row, index) {
     : (row.intervals?.length ? row.intervals : [row.intervalCode]).filter(Boolean).join(" / ") || "--";
   return [
     `${telegramTokenLine(row.symbol, `${index}. `)}${multiText}`,
-    `分类：${escapeHtml(row.categoryLabel)}｜周期：${escapeHtml(intervalText)}`,
+    `${tokenMetaText(row)}｜周期：${escapeHtml(intervalText)}`,
     `组合等级：${escapeHtml(profile.label)}`,
     oiText ? escapeHtml(oiText) : null,
     `现价：${escapeHtml(formatNumber(row.currentPrice))}`,
@@ -232,8 +242,9 @@ async function sendSignals(chatId, level = "LEVEL1", interval = "15m", page = 1,
   );
   const safePage = clampPage(payload.page, payload.total, payload.pageSize);
   const startIndex = (safePage - 1) * payload.pageSize;
-  const rows = payload.signals.map((row, index) => signalRowText(row, startIndex + index + 1));
-  const symbols = [...new Set(payload.signals.map((row) => row.symbol).filter(Boolean))];
+  const signals = await enrichRowsWithMarketMetadata(payload.signals);
+  const rows = signals.map((row, index) => signalRowText(row, startIndex + index + 1));
+  const symbols = [...new Set(signals.map((row) => row.symbol).filter(Boolean))];
   const totalPages = Math.max(1, Math.ceil(payload.total / payload.pageSize));
   const text = rows.length
     ? ["<b>均线组合排行</b>", `第 ${safePage}/${totalPages} 页 · 共 ${payload.total} 个代币`, ...rows].join("\n\n")
@@ -265,6 +276,7 @@ function multiGroupText(group, index) {
   );
   return [
     `${telegramTokenLine(group.symbol, `${index}. `)} · 多周期 ${group.multiMatchCount}/${group.multiMatchRequired}`,
+    tokenMetaText(group),
     ...rows
   ].join("\n");
 }
@@ -282,8 +294,9 @@ async function sendMultiCycleSignals(chatId, page = 1, messageId = null) {
   );
   const safePage = clampPage(payload.page, payload.total, payload.pageSize);
   const startIndex = (safePage - 1) * payload.pageSize;
-  const rows = payload.groups.map((group, index) => multiGroupText(group, startIndex + index + 1));
-  const symbols = payload.groups.map((group) => group.symbol).filter(Boolean);
+  const groups = await enrichRowsWithMarketMetadata(payload.groups);
+  const rows = groups.map((group, index) => multiGroupText(group, startIndex + index + 1));
+  const symbols = groups.map((group) => group.symbol).filter(Boolean);
   const totalPages = Math.max(1, Math.ceil(payload.total / payload.pageSize));
   await sendOrEditMessage({
     chatId,
@@ -305,6 +318,7 @@ function hotMaNavKeyboard({ page, total, pageSize, symbols }) {
 function hotMaRowText(row, index) {
   return [
     `${telegramTokenLine(row.symbol, `${index}. 🔥 `)} · 热度 #${escapeHtml(row.hotRank ?? "--")} · ${escapeHtml(levelLabel(row.alertLevel))}`,
+    tokenMetaText(row),
     `周期：${escapeHtml(row.intervalCode)}｜现价：${escapeHtml(formatNumber(row.currentPrice))}`,
     `MA100：${escapeHtml(formatNumber(row.ma100))}｜MA200：${escapeHtml(formatNumber(row.ma200))}`,
     `说明：${escapeHtml(row.note || "--")}`
@@ -316,8 +330,9 @@ async function sendHotMa(chatId, page = 1, messageId = null) {
   const payload = await menuCache.get(`hotma:${page}`, () => getHotMaSignalsPage({ page, pageSize }));
   const safePage = clampPage(payload.page, payload.total, payload.pageSize);
   const startIndex = (safePage - 1) * payload.pageSize;
-  const rows = payload.signals.map((row, index) => hotMaRowText(row, startIndex + index + 1));
-  const symbols = [...new Set(payload.signals.map((row) => row.symbol).filter(Boolean))];
+  const signals = await enrichRowsWithMarketMetadata(payload.signals);
+  const rows = signals.map((row, index) => hotMaRowText(row, startIndex + index + 1));
+  const symbols = [...new Set(signals.map((row) => row.symbol).filter(Boolean))];
   const totalPages = Math.max(1, Math.ceil(payload.total / payload.pageSize));
   await sendOrEditMessage({
     chatId,
@@ -341,9 +356,12 @@ async function sendHeat(chatId, page = 1, messageId = null) {
   const visibleTokens = payload.tokens ?? [];
   const safePage = clampPage(page, visibleTokens.length, TELEGRAM_HOT_RANK_PAGE_SIZE);
   const startIndex = (safePage - 1) * TELEGRAM_HOT_RANK_PAGE_SIZE;
-  const pageTokens = visibleTokens.slice(startIndex, startIndex + TELEGRAM_HOT_RANK_PAGE_SIZE);
+  const pageTokens = await enrichRowsWithMarketMetadata(visibleTokens.slice(startIndex, startIndex + TELEGRAM_HOT_RANK_PAGE_SIZE));
   const rows = pageTokens.map((token) =>
-    `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 热度 ${escapeHtml(token.heat)} · 币安 ${escapeHtml(token.binanceHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`
+    [
+      `#${escapeHtml(token.rank)} ${telegramTokenLine(token.symbol)} · 热度 ${escapeHtml(token.heat)} · 币安 ${escapeHtml(token.binanceHeat ?? "--")} · ${escapeHtml(token.chainLabel)}`,
+      tokenMetaText(token)
+    ].join("\n")
   );
   const totalPages = Math.max(1, Math.ceil(visibleTokens.length / TELEGRAM_HOT_RANK_PAGE_SIZE));
   const flags = [
@@ -371,9 +389,10 @@ async function sendHeat(chatId, page = 1, messageId = null) {
 
 async function sendWatch(chatId, messageId = null) {
   const items = await menuCache.get("watch", () => listWatchlist());
-  const { visibleItems, hiddenCount } = limitMenuItems(items);
+  const enrichedItems = await enrichRowsWithMarketMetadata(items);
+  const { visibleItems, hiddenCount } = limitMenuItems(enrichedItems);
   const rows = visibleItems.map((item, index) =>
-    `${index + 1}. ${telegramTokenLine(item.symbol)} · 现价 ${escapeHtml(item.currentPrice ?? "--")} · 高于 ${escapeHtml(item.alertAbove ?? "--")} · 低于 ${escapeHtml(item.alertBelow ?? "--")}`
+    `${index + 1}. ${telegramTokenLine(item.symbol)} · ${inlineTokenMetaText(item)} · 现价 ${escapeHtml(item.currentPrice ?? "--")} · 高于 ${escapeHtml(item.alertAbove ?? "--")} · 低于 ${escapeHtml(item.alertBelow ?? "--")}`
   );
   const keyboard = appendMainNavigation(
     { inline_keyboard: tokenOperationRows(visibleItems.map((item) => item.symbol)) },
@@ -390,14 +409,15 @@ async function sendWatch(chatId, messageId = null) {
 
 async function sendFunding(chatId, messageId = null) {
   const items = await menuCache.get("funding", () => listOneHourFundingIntervals());
-  const { visibleItems, hiddenCount } = limitMenuItems(items);
+  const enrichedItems = await enrichRowsWithMarketMetadata(items);
+  const { visibleItems, hiddenCount } = limitMenuItems(enrichedItems);
   const rows = visibleItems.map((item, index) => {
     const matches = [
       item.oiMatched ? "OI" : null,
       item.hotRank ? "热度" : null,
       Number(item.multiCycleCount ?? 0) >= 3 ? "多周期" : null
     ].filter(Boolean);
-    return `${index + 1}. ${telegramTokenLine(item.symbol)} · 当前资金费率 ${escapeHtml(
+    return `${index + 1}. ${telegramTokenLine(item.symbol)} · ${inlineTokenMetaText(item)} · 当前资金费率 ${escapeHtml(
       item.currentFundingRate === null ? "--" : `${(Number(item.currentFundingRate) * 100).toFixed(4)}%`
     )} · 均线 ${escapeHtml((item.intervals ?? []).join(" / ") || "--")} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
   });
@@ -439,21 +459,22 @@ async function sendOI(chatId, timeWindow = "5m", sort = "desc", messageId = null
   const items = await menuCache.get(`oi:${safeTimeWindow}:${safeSort}`, () =>
     listOpenInterestMonitor({ timeWindow: safeTimeWindow, sort: safeSort, limit: TELEGRAM_OI_LIMIT })
   );
-  const rows = items.map((item, index) => {
+  const enrichedItems = await enrichRowsWithMarketMetadata(items);
+  const rows = enrichedItems.map((item, index) => {
     const intervals = item.signalIntervals ?? [];
     const matches = [
       item.hotRankHit ? "热度" : null,
       item.fundingOneHour ? "1h资金费率" : null,
       intervals.length ? `均线 ${intervals.join(" / ")}` : null
     ].filter(Boolean);
-    return `${index + 1}. ${telegramTokenLine(item.symbol)} · ${escapeHtml(safeTimeWindow)} ${escapeHtml(
+    return `${index + 1}. ${telegramTokenLine(item.symbol)} · ${inlineTokenMetaText(item)} · ${escapeHtml(safeTimeWindow)} ${escapeHtml(
       item.changePercent === null ? "--" : `${Number(item.changePercent).toFixed(2)}%`
     )} · 匹配 ${escapeHtml(matches.join(" + ") || "暂无")}`;
   });
   const keyboard = oiFilterKeyboard({
     timeWindow: safeTimeWindow,
     sort: safeSort,
-    symbols: items.map((item) => item.symbol)
+    symbols: enrichedItems.map((item) => item.symbol)
   });
   await sendOrEditMessage({
     chatId,

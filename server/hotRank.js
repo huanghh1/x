@@ -1,6 +1,7 @@
 import { config } from "./config.js";
 import { listLatestHotRankSnapshot } from "./db.js";
 import { filterEligibleHotTokens } from "./hotRankFilters.js";
+import { enrichRowsWithMarketMetadata } from "./marketMetadata.js";
 
 const CHAIN_LABELS = {
   "56": "BSC",
@@ -268,13 +269,18 @@ async function getTopMarketCapSymbols() {
   return topMarketCapCache;
 }
 
-function materializeHotRank(basePayload, safeLimit) {
-  const tokens = (basePayload.binanceTokens ?? [])
+async function materializeHotRank(basePayload, safeLimit) {
+  const tokens = (await enrichRowsWithMarketMetadata((basePayload.binanceTokens ?? [])
     .slice(0, safeLimit)
     .map((token, index) => ({
       ...token,
       binanceHeat: token.heat,
       rank: index + 1
+    })))).map((token) => ({
+      ...token,
+      priceChange24hPct: Number.isFinite(Number(token.priceChange24hPct))
+        ? token.priceChange24hPct
+        : numberValue(token.priceChange, null)
     }));
 
   return {
@@ -366,7 +372,7 @@ export async function getHotRank({
   });
   const cached = hotRankCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < config.binance.hotRankCacheMs) {
-    return materializeHotRank(cached.basePayload, safeLimit);
+    return await materializeHotRank(cached.basePayload, safeLimit);
   }
 
   let request = hotRankInflight.get(cacheKey);
@@ -383,7 +389,7 @@ export async function getHotRank({
   try {
     const basePayload = await request;
     hotRankCache.set(cacheKey, { fetchedAt: Date.now(), basePayload });
-    return materializeHotRank(basePayload, safeLimit);
+    return await materializeHotRank(basePayload, safeLimit);
   } finally {
     if (hotRankInflight.get(cacheKey) === request) hotRankInflight.delete(cacheKey);
   }

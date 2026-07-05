@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260703-4" />
+    <link rel="stylesheet" href="/styles.css?v=20260705-2" />
   </head>
   <body>
     <header class="app-nav">
@@ -151,12 +151,12 @@
                     <tr>
                       <th>交易对</th>
                       <th>分类</th>
+                      <th>24h</th>
                       <th>触发周期</th>
                       <th>组合信号</th>
                       <th>最高等级</th>
                       <th>现价</th>
                       <th>代表均线</th>
-                      <th>最近触发</th>
                     </tr>
                   </thead>
                   <tbody id="signalRows">
@@ -413,6 +413,7 @@
                 <tr>
                   <th>来源</th>
                   <th>币种</th>
+                  <th>24h</th>
                   <th>方向</th>
                   <th>数量</th>
                   <th>开仓均价</th>
@@ -425,7 +426,7 @@
                 </tr>
               </thead>
               <tbody id="tradePositionRows">
-                <tr><td colspan="11" class="empty">等待持仓数据。</td></tr>
+                <tr><td colspan="12" class="empty">等待持仓数据。</td></tr>
               </tbody>
             </table>
           </div>
@@ -436,6 +437,7 @@
                 <tr>
                   <th>来源</th>
                   <th>币种</th>
+                  <th>24h</th>
                   <th>开始</th>
                   <th>结束</th>
                   <th>净收益</th>
@@ -445,7 +447,7 @@
                 </tr>
               </thead>
               <tbody id="tradeSymbolRows">
-                <tr><td colspan="8" class="empty">等待交易数据。</td></tr>
+                <tr><td colspan="9" class="empty">等待交易数据。</td></tr>
               </tbody>
             </table>
           </div>
@@ -617,6 +619,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260703-7" type="module"></script>
+    <script src="/app.js?v=20260705-2" type="module"></script>
   </body>
 </html>

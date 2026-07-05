@@ -5,6 +5,7 @@ import {
   getSignals,
   listMultiCycleHistory
 } from "../db.js";
+import { enrichRowsWithMarketMetadata } from "../marketMetadata.js";
 
 export function createSignalRoutes() {
   const router = express.Router();
@@ -18,12 +19,12 @@ export function createSignalRoutes() {
         page: request.query.page,
         pageSize: request.query.pageSize
       });
-      response.json({ ok: true, ...result });
+      response.json({ ok: true, ...result, signals: await enrichRowsWithMarketMetadata(result.signals) });
       return;
     }
 
     const category = request.query.category === "B" ? "B" : "A";
-    response.json({ ok: true, category, signals: await getSignals(category) });
+    response.json({ ok: true, category, signals: await enrichRowsWithMarketMetadata(await getSignals(category)) });
   });
 
   router.get("/api/hot-ma-signals", async (request, response) => {
@@ -34,7 +35,7 @@ export function createSignalRoutes() {
       page: request.query.page,
       pageSize: request.query.pageSize
     });
-    response.json({ ok: true, ...result });
+    response.json({ ok: true, ...result, signals: await enrichRowsWithMarketMetadata(result.signals) });
   });
 
   router.get("/api/multi-history", async (request, response) => {

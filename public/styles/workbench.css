@@ -292,11 +292,17 @@ td.mono span { display: block; white-space: nowrap; }
   border-radius: var(--radius-md);
   background: var(--surface-raised);
 }
-.funding-card { grid-template-columns: minmax(150px, 1.1fr) repeat(5, minmax(104px, 1fr)) minmax(210px, auto); min-width: 980px; }
-.io-card { grid-template-columns: minmax(170px, 1.2fr) repeat(6, minmax(120px, 1fr)) auto; min-width: 1120px; }
+.funding-card { grid-template-columns: minmax(150px, 1.1fr) repeat(6, minmax(104px, 1fr)) minmax(210px, auto); min-width: 1100px; }
+.io-card { grid-template-columns: minmax(130px, 1.1fr) 86px 82px 74px minmax(92px, 0.85fr) minmax(90px, 0.8fr) minmax(104px, 0.9fr) minmax(88px, 0.75fr) minmax(220px, auto); min-width: 1090px; }
 .funding-symbol, .io-symbol { display: flex; align-items: center; gap: 8px; }
 .funding-card > div { min-width: 0; }
 .funding-card .heat-links { min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
+.io-card .heat-links { min-width: 0; justify-content: flex-end; gap: 4px; }
+.io-card .copy-symbol,
+.io-card .mini-link {
+  min-height: 32px;
+  padding-inline: 10px;
+}
 .io-observed {
   min-width: 0;
 }

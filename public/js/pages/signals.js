@@ -3,7 +3,7 @@ import { ALL_INTERVALS, LABELS, SIGNAL_PROFILE_COLORS } from "../constants.js";
 import { chartElementId, loadAndRenderChart } from "../chart/klineChart.js";
 import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
-import { clamp, cssEscape, formatNumber, formatTime, oiChangeSummary } from "../utils/format.js";
+import { clamp, cssEscape, formatNumber, formatPercent, formatTime, oiChangeSummary } from "../utils/format.js";
 import { bindCopyButtons, searchButtons } from "../ui/symbolActions.js";
 
 let deps = {
@@ -90,6 +90,12 @@ function signalProfileColor(sourceMask) {
   return `--profile-text:${color.text};--profile-border:${color.border};--profile-bg:${color.bg}`;
 }
 
+function changeClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return number > 0 ? "up" : "down";
+}
+
 function clampPage(totalPages) {
   state.page = clamp(state.page, 1, Math.max(1, totalPages));
 }
@@ -164,6 +170,7 @@ export function renderSignals() {
             </div>
           </td>
           <td>${escapeHtml(row.categoryLabel)}</td>
+          <td class="mono ${changeClass(row.priceChange24hPct)}" data-signal-24h="${escapeHtml(row.symbol)}">${formatPercent(row.priceChange24hPct)}</td>
           <td><div class="interval-stack">${intervalBadges}</div></td>
           <td>
             <div class="signal-profile-stack">
@@ -174,7 +181,6 @@ export function renderSignals() {
           <td>${levelBadge(bestLevel)}</td>
           <td class="mono" data-signal-price="${escapeHtml(row.symbol)}">${formatNumber(selectedDetail.currentPrice)}</td>
           <td class="mono"><span>MA100 ${formatNumber(selectedDetail.ma100)}</span><span>MA200 ${formatNumber(selectedDetail.ma200)}</span></td>
-          <td>${formatTime(selectedDetail.signalTime || selectedDetail.updatedAt)}</td>
         </tr>
       `;
       if (!expanded) return signalRow;
@@ -339,6 +345,25 @@ export function updateSignalPriceDom(symbol, price, eventTime = Date.now()) {
   for (const element of document.querySelectorAll(`[data-signal-price="${selectorSymbol}"]`)) {
     element.textContent = formatNumber(numericPrice);
     element.title = `实时价格：${formatTime(eventTime)}`;
+  }
+}
+
+export function updateSignalPriceChangeDom(symbol, priceChange24hPct) {
+  const safeSymbol = String(symbol ?? "").toUpperCase();
+  const numericChange = Number(priceChange24hPct);
+  if (!safeSymbol || !Number.isFinite(numericChange)) return;
+  for (const row of state.signals) {
+    if (String(row.symbol ?? "").toUpperCase() !== safeSymbol) continue;
+    row.priceChange24hPct = numericChange;
+    if (Array.isArray(row.intervalDetails)) {
+      for (const detail of row.intervalDetails) detail.priceChange24hPct = numericChange;
+    }
+  }
+  const selectorSymbol = cssEscape(safeSymbol);
+  for (const element of document.querySelectorAll(`[data-signal-24h="${selectorSymbol}"]`)) {
+    element.textContent = formatPercent(numericChange);
+    element.classList.toggle("up", numericChange > 0);
+    element.classList.toggle("down", numericChange < 0);
   }
 }
 

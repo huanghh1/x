@@ -52,6 +52,12 @@ function watchStatusText() {
   return `共 ${count} 个关注，${liveCount} 个有价格缓存${suffix}`;
 }
 
+function changeClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return "";
+  return number > 0 ? "up" : "down";
+}
+
 function updateWatchStatus() {
   setText("#watchStatus", watchStatusText());
 }
@@ -173,7 +179,7 @@ export function renderWatchlist() {
           </button>
         </div>
         <div><span>现价</span><div class="mono" data-watch-price="${safeSymbol}">${formatNumber(item.currentPrice)}</div></div>
-        <div><span>最新周期</span><div class="mono">${escapeHtml(item.latestInterval || "--")}</div></div>
+        <div><span>24h涨跌</span><div class="mono ${changeClass(item.priceChange24hPct)}" data-watch-24h="${safeSymbol}">${formatPercent(item.priceChange24hPct)}</div></div>
         <div><span>高于提醒</span><div class="mono">${formatNumber(item.alertAbove)}</div></div>
         <div><span>低于提醒</span><div class="mono">${formatNumber(item.alertBelow)}</div></div>
         <div class="watch-unlock">

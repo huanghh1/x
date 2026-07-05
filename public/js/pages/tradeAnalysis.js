@@ -3,7 +3,7 @@ import { DAY_MS, HOUR_MS, TRADE_MAX_LOOKBACK_DAYS } from "../constants.js";
 import { syncCustomSelect } from "../components/customSelect.js";
 import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
-import { datetimeLocalToIso, formatNumber, formatTime, formatUsd, pnlClass, toDatetimeLocal } from "../utils/format.js";
+import { datetimeLocalToIso, formatNumber, formatPercent, formatTime, formatUsd, pnlClass, toDatetimeLocal } from "../utils/format.js";
 
 function ensureTradeAnalysisInputs() {
   if (state.tradeAnalysisInitialized) return;
@@ -418,17 +418,18 @@ function renderTradePositions(positions, summary = {}) {
   setTradeMetric("#tradePositionPnl", Number(summary.unrealizedPnl ?? 0));
 
   if ((state.tradeAnalysisLoading || state.tradeAnalysisRefreshing) && !positions.length) {
-    target.innerHTML = '<tr><td colspan="11" class="empty">正在读取当前持仓。</td></tr>';
+    target.innerHTML = '<tr><td colspan="12" class="empty">正在读取当前持仓。</td></tr>';
     return;
   }
   if (!positions.length) {
-    target.innerHTML = '<tr><td colspan="11" class="empty">当前接口返回没有未平仓持仓。若你确定有仓位，请确认钱包地址和 Binance API 只读权限。</td></tr>';
+    target.innerHTML = '<tr><td colspan="12" class="empty">当前接口返回没有未平仓持仓。若你确定有仓位，请确认钱包地址和 Binance API 只读权限。</td></tr>';
     return;
   }
   target.innerHTML = positions.map((position) => `
     <tr>
       <td>${escapeHtml(position.sourceLabel || position.source || "--")}</td>
       <td><span class="mono">${escapeHtml(position.symbol || "--")}</span></td>
+      <td><span class="mono ${pnlClass(position.priceChange24hPct)}">${formatPercent(position.priceChange24hPct)}</span></td>
       <td><span class="trade-side ${String(position.side).toLowerCase().includes("short") ? "is-short" : "is-long"}">${escapeHtml(position.side || "--")}</span></td>
       <td>${formatNumber(position.quantity, 6)}</td>
       <td>${formatNumber(position.entryPrice, 6)}</td>
@@ -462,11 +463,11 @@ function renderTradeSymbolRows(rows) {
   const target = $("#tradeSymbolRows");
   if (!target) return;
   if ((state.tradeAnalysisLoading || state.tradeAnalysisRefreshing) && !rows.length) {
-    target.innerHTML = '<tr><td colspan="8" class="empty">正在读取交易分析。</td></tr>';
+    target.innerHTML = '<tr><td colspan="9" class="empty">正在读取交易分析。</td></tr>';
     return;
   }
   if (!rows.length) {
-    target.innerHTML = '<tr><td colspan="8" class="empty">当前时间窗口暂无可汇总的交易数据。先填写上方 API / 钱包地址，再点击刷新。</td></tr>';
+    target.innerHTML = '<tr><td colspan="9" class="empty">当前时间窗口暂无可汇总的交易数据。先填写上方 API / 钱包地址，再点击刷新。</td></tr>';
     return;
   }
   target.innerHTML = sortTradeSymbolRowsByTime(rows).map((row) => {
@@ -477,6 +478,7 @@ function renderTradeSymbolRows(rows) {
     <tr class="${[rowSelectable ? "is-trade-selectable" : "", selected ? "is-selected-trade-symbol" : ""].filter(Boolean).join(" ")}" data-trade-symbol-key="${escapeHtml(key)}">
       <td>${escapeHtml(row.sourceLabel || row.source || "--")}</td>
       <td><span class="mono">${escapeHtml(row.symbol || "--")}</span></td>
+      <td><span class="mono ${pnlClass(row.priceChange24hPct)}">${formatPercent(row.priceChange24hPct)}</span></td>
       <td>${formatTime(row.firstTime)}</td>
       <td>${formatTime(row.lastTime)}</td>
       <td><strong class="${pnlClass(row.net)}">${formatUsd(row.net)}</strong></td>
