@@ -198,10 +198,18 @@ export const config = {
     scanIntervalMs: openInterestScanIntervalMs,
     activeMs: numberEnv("OPEN_INTEREST_ACTIVE_MS", Math.max(15 * 60 * 1000, openInterestScanIntervalMs * 3)),
     initialDelayMs: numberEnv("OPEN_INTEREST_INITIAL_DELAY_MS", 20 * 1000),
-    concurrency: Math.max(1, numberEnv("OPEN_INTEREST_CONCURRENCY", 3)),
+    concurrency: Math.max(1, Math.min(32, numberEnv("OPEN_INTEREST_CONCURRENCY", 10))),
+    scanLimitPerRun: Math.max(1, numberEnv("OPEN_INTEREST_SCAN_LIMIT_PER_RUN", 500)),
+    runBudgetMs: Math.max(
+      30 * 1000,
+      numberEnv("OPEN_INTEREST_RUN_BUDGET_MS", Math.max(30 * 1000, openInterestScanIntervalMs - 30 * 1000))
+    ),
+    requestTimeoutMs: Math.max(1000, numberEnv("OPEN_INTEREST_REQUEST_TIMEOUT_MS", 8000)),
+    requestRetries: Math.max(0, numberEnv("OPEN_INTEREST_REQUEST_RETRIES", 1)),
     requestLimitPerWindow: Math.max(1, Math.min(1000, numberEnv("OPEN_INTEREST_REQUEST_LIMIT_PER_5M", 900))),
     retryDelayMs: Math.max(5 * 1000, numberEnv("OPEN_INTEREST_RETRY_DELAY_MS", 30 * 1000)),
     historyLimit: Math.max(289, Math.min(500, numberEnv("OPEN_INTEREST_HISTORY_LIMIT", 289))),
+    historyBootstrapLimitPerRun: Math.max(0, numberEnv("OPEN_INTEREST_HISTORY_BOOTSTRAP_LIMIT_PER_RUN", 80)),
     historyBootstrapRetryMs: Math.max(
       5 * 60 * 1000,
       numberEnv("OPEN_INTEREST_HISTORY_BOOTSTRAP_RETRY_MS", 30 * 60 * 1000)
@@ -231,6 +239,8 @@ export const config = {
   },
   hotRank: {
     activeMs: numberEnv("HOT_RANK_ACTIVE_MS", Math.max(30 * 60 * 1000, numberEnv("BINANCE_HOT_RANK_CACHE_MS", 5 * 60 * 1000) * 3)),
+    requestTimeoutMs: Math.max(1000, numberEnv("HOT_RANK_REQUEST_TIMEOUT_MS", numberEnv("REQUEST_TIMEOUT_MS", 15000))),
+    requestRetries: Math.max(0, numberEnv("HOT_RANK_REQUEST_RETRIES", Math.min(2, numberEnv("BINANCE_REQUEST_RETRIES", 4)))),
     marketCapTopUrl:
       process.env.MARKET_CAP_TOP_URL?.trim() ||
       "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false",

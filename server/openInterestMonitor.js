@@ -55,6 +55,11 @@ const monitorState = {
   retryPendingCount: 0,
   lastRetryMode: false,
   requestLimitPerRun: 0,
+  scanLimitPerRun: config.openInterestMonitor.scanLimitPerRun,
+  concurrency: config.openInterestMonitor.concurrency,
+  runBudgetMs: config.openInterestMonitor.runBudgetMs,
+  runBudgetHit: false,
+  selectedCount: 0,
   historyBootstrapLimit: 0,
   historyBootstrapUsedCount: 0,
   historyBootstrapCount: 0,
@@ -161,15 +166,18 @@ export function effectiveOpenInterestScanLimit({
   tokenCount = Infinity,
   scanIntervalMs = config.openInterestMonitor.scanIntervalMs,
   requestLimitPerWindow = config.openInterestMonitor.requestLimitPerWindow,
+  scanLimitPerRun = config.openInterestMonitor.scanLimitPerRun,
   useHistoryBudget = false
 } = {}) {
   const safeTokenCount = Number.isFinite(Number(tokenCount)) ? Math.max(0, Math.floor(Number(tokenCount))) : Infinity;
-  if (!useHistoryBudget) return safeTokenCount;
+  const configuredScanLimit = Math.max(1, Math.floor(Number(scanLimitPerRun) || 1));
+  const baseScanLimit = Math.min(safeTokenCount, configuredScanLimit);
+  if (!useHistoryBudget) return baseScanLimit;
   const configuredWindowLimit = Math.max(1, Math.floor(Number(requestLimitPerWindow) || 1));
   const intervalMs = Math.max(1000, Math.floor(Number(scanIntervalMs) || REQUEST_WINDOW_MS));
   const runsPerWindow = Math.max(1, Math.ceil(REQUEST_WINDOW_MS / intervalMs));
   const perRunLimit = Math.max(1, Math.floor(configuredWindowLimit / runsPerWindow));
-  return Math.max(0, Math.min(safeTokenCount, perRunLimit));
+  return Math.max(0, Math.min(baseScanLimit, perRunLimit));
 }
 
 export function isOpenInterestHistoryUnavailable(error) {
@@ -411,6 +419,11 @@ export function getOpenInterestMonitorState() {
   return {
     enabled: config.openInterestMonitor.enabled,
     scanIntervalMs: config.openInterestMonitor.scanIntervalMs,
+    concurrency: config.openInterestMonitor.concurrency,
+    scanLimitPerRun: config.openInterestMonitor.scanLimitPerRun,
+    runBudgetMs: config.openInterestMonitor.runBudgetMs,
+    requestTimeoutMs: config.openInterestMonitor.requestTimeoutMs,
+    requestRetries: config.openInterestMonitor.requestRetries,
     spike5mPct: config.openInterestMonitor.spike5mPct,
     spike1hPct: config.openInterestMonitor.spike1hPct,
     spike4hPct: config.openInterestMonitor.spike4hPct,
@@ -418,6 +431,7 @@ export function getOpenInterestMonitorState() {
     retryDelayMs: config.openInterestMonitor.retryDelayMs,
     historyBootstrapRetryMs: config.openInterestMonitor.historyBootstrapRetryMs,
     historyUnavailableRetryMs: config.openInterestMonitor.historyUnavailableRetryMs,
+    historyBootstrapLimitPerRun: config.openInterestMonitor.historyBootstrapLimitPerRun,
     sampleRetentionDays: config.openInterestMonitor.sampleRetentionDays,
     standaloneAlertEnabled: config.openInterestMonitor.standaloneAlertEnabled,
     ...monitorState
@@ -434,7 +448,8 @@ export function selectScanBatch(tokens) {
   if (!tokens.length) {
     monitorState.scanCursor = 0;
     monitorState.requestLimitPerRun = 0;
-    return { batch: [], startOffset: 0, deferredCount: 0, requestLimitPerRun: 0 };
+    monitorState.scanLimitPerRun = config.openInterestMonitor.scanLimitPerRun;
+    return { batch: [], startOffset: 0, deferredCount: 0, requestLimitPerRun: 0, retrySymbols: [] };
   }
   const initialRetryMode = retryQueue.size > 0;
   const limit = effectiveOpenInterestScanLimit({
@@ -444,6 +459,7 @@ export function selectScanBatch(tokens) {
       : config.openInterestMonitor.scanIntervalMs
   });
   monitorState.requestLimitPerRun = limit;
+  monitorState.scanLimitPerRun = config.openInterestMonitor.scanLimitPerRun;
   const tokenBySymbol = new Map(tokens.map((token) => [token.symbol, token]));
   const retryLimit = Math.max(1, Math.min(limit, Math.ceil(limit / 2)));
   const retryBatch = [];
@@ -457,13 +473,14 @@ export function selectScanBatch(tokens) {
     retryQueue.delete(symbol);
     if (retryBatch.length >= retryLimit) break;
   }
-  if (retryBatch.length >= limit) {
+  if (initialRetryMode && retryBatch.length > 0) {
     return {
       batch: retryBatch,
       startOffset: 0,
       deferredCount: tokens.length - retryBatch.length,
       retryMode: true,
-      requestLimitPerRun: limit
+      requestLimitPerRun: limit,
+      retrySymbols: retryBatch.map((token) => token.symbol)
     };
   }
   const retrySymbols = new Set(retryBatch.map((token) => token.symbol));
@@ -475,24 +492,22 @@ export function selectScanBatch(tokens) {
       startOffset: 0,
       deferredCount: Math.max(0, tokens.length - batch.length),
       retryMode: retryBatch.length > 0,
-      requestLimitPerRun: limit
+      requestLimitPerRun: limit,
+      retrySymbols: retryBatch.map((token) => token.symbol)
     };
   }
   const normalLimit = limit - retryBatch.length;
-  const normalBatch = [];
-  const startOffset = Math.max(0, Math.min(tokens.length - 1, monitorState.scanCursor % tokens.length));
-  for (let offset = 0; offset < tokens.length && normalBatch.length < normalLimit; offset += 1) {
-    const token = tokens[(startOffset + offset) % tokens.length];
-    if (!retrySymbols.has(token.symbol)) normalBatch.push(token);
-  }
+  const normalBatch = tokens.filter((token) => !retrySymbols.has(token.symbol)).slice(0, normalLimit);
+  const startOffset = 0;
   const batch = [...retryBatch, ...normalBatch];
-  monitorState.scanCursor = (startOffset + Math.max(1, normalLimit)) % tokens.length;
+  monitorState.scanCursor = 0;
   return {
     batch,
     startOffset,
     deferredCount: tokens.length - batch.length,
     retryMode: retryBatch.length > 0,
-    requestLimitPerRun: limit
+    requestLimitPerRun: limit,
+    retrySymbols: retryBatch.map((token) => token.symbol)
   };
 }
 
@@ -512,6 +527,10 @@ export async function runOpenInterestCheck({ force = false } = {}) {
   monitorState.unavailableCount = 0;
   monitorState.retryPendingCount = retryQueue.size;
   monitorState.lastRetryMode = false;
+  monitorState.concurrency = config.openInterestMonitor.concurrency;
+  monitorState.runBudgetMs = config.openInterestMonitor.runBudgetMs;
+  monitorState.runBudgetHit = false;
+  monitorState.selectedCount = 0;
   monitorState.historyBootstrapLimit = 0;
   monitorState.historyBootstrapUsedCount = 0;
   monitorState.historyBootstrapCount = 0;
@@ -520,8 +539,16 @@ export async function runOpenInterestCheck({ force = false } = {}) {
 
   try {
     const tokens = await listOpenInterestScanTokens();
-    const { batch: scanTokens, startOffset, deferredCount, retryMode, requestLimitPerRun } = selectScanBatch(tokens);
-    const historyBootstrapLimit = effectiveOpenInterestScanLimit({
+    const {
+      batch: scanTokens,
+      startOffset,
+      deferredCount,
+      retryMode,
+      requestLimitPerRun,
+      retrySymbols: selectedRetrySymbols = []
+    } = selectScanBatch(tokens);
+    const selectedRetrySet = new Set(selectedRetrySymbols);
+    const historyBudgetLimit = effectiveOpenInterestScanLimit({
       tokenCount: scanTokens.length,
       scanIntervalMs: retryMode
         ? Math.min(config.openInterestMonitor.scanIntervalMs, config.openInterestMonitor.retryDelayMs)
@@ -529,6 +556,10 @@ export async function runOpenInterestCheck({ force = false } = {}) {
       requestLimitPerWindow: config.openInterestMonitor.requestLimitPerWindow,
       useHistoryBudget: true
     });
+    const historyBootstrapLimit = Math.max(
+      0,
+      Math.min(historyBudgetLimit, config.openInterestMonitor.historyBootstrapLimitPerRun)
+    );
     let historyBootstrapUsedCount = 0;
     const claimHistoryBootstrap = () => {
       if (historyBootstrapUsedCount >= historyBootstrapLimit) return false;
@@ -538,7 +569,12 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     const errors = [];
     let markPrices = new Map();
     try {
-      markPrices = new Map((await fetchMarkPrices()).map((item) => [item.symbol, item.markPrice]));
+      markPrices = new Map(
+        (await fetchMarkPrices({
+          retries: config.openInterestMonitor.requestRetries,
+          timeoutMs: config.openInterestMonitor.requestTimeoutMs
+        })).map((item) => [item.symbol, item.markPrice])
+      );
     } catch (error) {
       errors.push(`mark prices: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -551,9 +587,11 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     const alertedSymbols = [];
     const failedSymbols = [];
     const unavailableSymbols = [];
+    const runStartedAt = Date.now();
+    const runDeadlineAt = runStartedAt + config.openInterestMonitor.runBudgetMs;
 
     const worker = async () => {
-      while (cursor < scanTokens.length) {
+      while (Date.now() < runDeadlineAt && cursor < scanTokens.length) {
         const index = cursor;
         cursor += 1;
         const token = scanTokens[index];
@@ -585,20 +623,33 @@ export async function runOpenInterestCheck({ force = false } = {}) {
         () => worker()
       )
     );
+    const claimedCount = Math.min(cursor, scanTokens.length);
+    const runBudgetHit = claimedCount < scanTokens.length;
+    if (runBudgetHit) {
+      for (const token of scanTokens.slice(claimedCount)) {
+        if (selectedRetrySet.has(token.symbol)) retryQueue.add(token.symbol);
+      }
+    }
+    const effectiveDeferredCount = deferredCount + Math.max(0, scanTokens.length - claimedCount);
     for (const symbol of failedSymbols) retryQueue.add(symbol);
-    const allHistoryUnavailable = scanTokens.length > 0 && updatedCount === 0 && unavailableSymbols.length === scanTokens.length;
+    const allHistoryUnavailable = claimedCount > 0 && updatedCount === 0 && unavailableSymbols.length === claimedCount;
     if (allHistoryUnavailable) {
       errors.unshift(
-        `Open interest history unavailable for all ${scanTokens.length} scanned symbols; check Binance 403/rate-limit/network access`
+        `Open interest history unavailable for all ${claimedCount} scanned symbols; check Binance 403/rate-limit/network access`
       );
     }
 
     monitorState.lastSuccessAt = new Date().toISOString();
     monitorState.totalTokenCount = tokens.length;
-    monitorState.deferredCount = deferredCount;
+    monitorState.deferredCount = effectiveDeferredCount;
     monitorState.requestLimitPerWindow = config.openInterestMonitor.requestLimitPerWindow;
     monitorState.requestLimitPerRun = requestLimitPerRun;
-    monitorState.scannedCount = scanTokens.length;
+    monitorState.scanLimitPerRun = config.openInterestMonitor.scanLimitPerRun;
+    monitorState.concurrency = config.openInterestMonitor.concurrency;
+    monitorState.runBudgetMs = config.openInterestMonitor.runBudgetMs;
+    monitorState.runBudgetHit = runBudgetHit;
+    monitorState.selectedCount = scanTokens.length;
+    monitorState.scannedCount = claimedCount;
     monitorState.updatedCount = updatedCount;
     monitorState.spikeCount = spikeCount;
     monitorState.alertedSymbols = alertedSymbols;
@@ -617,11 +668,16 @@ export async function runOpenInterestCheck({ force = false } = {}) {
     return {
       ok: true,
       totalTokenCount: tokens.length,
-      scannedCount: scanTokens.length,
-      deferredCount,
+      selectedCount: scanTokens.length,
+      scannedCount: claimedCount,
+      deferredCount: effectiveDeferredCount,
+      runBudgetMs: monitorState.runBudgetMs,
+      runBudgetHit,
       scanStartOffset: startOffset,
       requestLimitPerWindow: config.openInterestMonitor.requestLimitPerWindow,
       requestLimitPerRun: monitorState.requestLimitPerRun,
+      scanLimitPerRun: monitorState.scanLimitPerRun,
+      concurrency: monitorState.concurrency,
       retryMode: Boolean(retryMode),
       updatedCount,
       spikeCount,

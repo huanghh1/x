@@ -100,3 +100,36 @@ export async function markHotRankNotified(symbols) {
   const [result] = await getPool().query("UPDATE hot_rank_seen SET notified_at=NOW(3) WHERE symbol IN (?)", [safeSymbols]);
   return result.affectedRows ?? 0;
 }
+
+export async function listLatestHotRankSnapshot({ chainLabels = [], limit = 100 } = {}) {
+  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 100));
+  const labels = [...new Set((Array.isArray(chainLabels) ? chainLabels : []).map((item) => String(item ?? "").trim()).filter(Boolean))];
+  const chainFilter = labels.length ? "WHERE chain_label IN (:chainLabels)" : "";
+  const params = { chainLabels: labels, limit: safeLimit };
+  const [rows] = await getPool().query(
+    `SELECT symbol,
+      base_asset AS baseAsset,
+      chain_label AS chainLabel,
+      rank_value AS rankValue,
+      heat_value AS heat,
+      snapshot_time AS snapshotTime
+     FROM hot_rank_snapshot
+     WHERE snapshot_time=(
+       SELECT MAX(snapshot_time)
+       FROM hot_rank_snapshot
+       ${chainFilter}
+     )
+       ${labels.length ? "AND chain_label IN (:chainLabels)" : ""}
+     ORDER BY rank_value ASC, heat_value DESC, symbol
+     LIMIT :limit`,
+    params
+  );
+  return rows.map((row) => ({
+    symbol: row.symbol,
+    baseAsset: row.baseAsset,
+    chainLabel: row.chainLabel,
+    rank: Number(row.rankValue),
+    heat: row.heat === null ? null : Number(row.heat),
+    snapshotTime: row.snapshotTime
+  }));
+}

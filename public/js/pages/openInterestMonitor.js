@@ -153,7 +153,13 @@ export function renderIOMonitoring() {
   ];
   if (state.ioMonitor?.running) statusParts.push("扫描中");
   if (Number(state.ioMonitor?.scannedCount ?? 0) > 0) {
-    statusParts.push(`本轮已扫 ${state.ioMonitor.scannedCount}/${state.ioMonitor.totalTokenCount ?? "--"}`);
+    const selectedCount = Number(state.ioMonitor?.selectedCount ?? 0);
+    const selectedSuffix = selectedCount > Number(state.ioMonitor.scannedCount ?? 0) ? `，选中 ${selectedCount}` : "";
+    const concurrency = Number(state.ioMonitor?.concurrency ?? 0);
+    statusParts.push(`本轮已扫 ${state.ioMonitor.scannedCount}/${state.ioMonitor.totalTokenCount ?? "--"}${selectedSuffix}${concurrency > 0 ? ` · 并发 ${concurrency}` : ""}`);
+  }
+  if (state.ioMonitor?.runBudgetHit) {
+    statusParts.push("时间预算命中，下轮续扫");
   }
   if (Number(state.ioMonitor?.retryPendingCount ?? 0) > 0) {
     statusParts.push(`待重试 ${state.ioMonitor.retryPendingCount}`);

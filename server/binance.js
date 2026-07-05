@@ -82,16 +82,17 @@ function describeFetchError(error) {
 async function fetchJson(url, label, options = {}) {
   const weight = options.weight ?? 1;
   const retries = options.retries ?? config.binance.requestRetries;
+  const timeoutMs = options.timeoutMs ?? config.binance.requestTimeoutMs;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     await requestWeightLimiter.take(weight);
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.binance.requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { Connection: "close", ...(options.headers ?? {}) }
+        headers: options.headers ?? {}
       });
       requestWeightLimiter.syncFromHeaders(response.headers);
       if (response.ok) return await response.json();
@@ -338,9 +339,10 @@ export async function fetchCurrentFundingRates() {
     .filter(Boolean);
 }
 
-export async function fetchMarkPrices() {
+export async function fetchMarkPrices(options = {}) {
   const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/premiumIndex`, "Binance premium index", {
-    weight: 10
+    weight: 10,
+    ...options
   });
   if (!Array.isArray(data)) return [];
   return data
@@ -358,7 +360,11 @@ export async function fetchOpenInterest({ symbol }) {
   if (!safeSymbol) throw new Error("symbol is required for open interest");
   const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/openInterest`);
   url.searchParams.set("symbol", safeSymbol);
-  const item = await fetchJson(url.toString(), `${safeSymbol} open interest`, { weight: 1 });
+  const item = await fetchJson(url.toString(), `${safeSymbol} open interest`, {
+    weight: 1,
+    retries: config.openInterestMonitor.requestRetries,
+    timeoutMs: config.openInterestMonitor.requestTimeoutMs
+  });
   const openInterest = Number(item?.openInterest);
   const time = Number(item?.time);
   if (!Number.isFinite(openInterest) || !Number.isFinite(time)) {
@@ -380,7 +386,11 @@ export async function fetchOpenInterestHistory({ symbol, period = "5m", limit = 
   url.searchParams.set("symbol", symbol);
   url.searchParams.set("period", safePeriod);
   url.searchParams.set("limit", String(safeLimit));
-  const data = await fetchJson(url.toString(), `${symbol} open interest history`, { weight: 0 });
+  const data = await fetchJson(url.toString(), `${symbol} open interest history`, {
+    weight: 0,
+    retries: config.openInterestMonitor.requestRetries,
+    timeoutMs: config.openInterestMonitor.requestTimeoutMs
+  });
   if (!Array.isArray(data)) return [];
   return data
     .map((item) => ({

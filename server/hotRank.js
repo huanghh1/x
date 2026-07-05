@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { listLatestHotRankSnapshot } from "./db.js";
 import { filterEligibleHotTokens } from "./hotRankFilters.js";
 
 const CHAIN_LABELS = {
@@ -61,6 +62,66 @@ function hotRankRetryDelayMs(attempt) {
   return Math.round(baseDelay * (attempt + 1));
 }
 
+function retryAfterMs(headers) {
+  const retryAfter = headers.get("retry-after");
+  if (!retryAfter) return null;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = new Date(retryAfter);
+  return Number.isNaN(date.getTime()) ? null : Math.max(0, date.getTime() - Date.now());
+}
+
+function isRetryableHotRankStatus(status) {
+  return [408, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function hotRankSnapshotChainLabels(normalizedChain) {
+  return (CHAIN_GROUPS[normalizedChain] ?? CHAIN_GROUPS.all).map((chainId) => CHAIN_LABELS[chainId] ?? chainId);
+}
+
+async function latestHotRankSnapshotPayload(normalizedChain, errors) {
+  try {
+    const rows = await listLatestHotRankSnapshot({
+      chainLabels: hotRankSnapshotChainLabels(normalizedChain),
+      limit: 100
+    });
+    if (!rows.length) return null;
+    const snapshotTime = rows[0]?.snapshotTime instanceof Date
+      ? rows[0].snapshotTime.toISOString()
+      : new Date(rows[0]?.snapshotTime ?? Date.now()).toISOString();
+    return {
+      chain: normalizedChain,
+      chains: CHAIN_GROUPS[normalizedChain],
+      fetchedAt: snapshotTime,
+      partial: true,
+      stale: true,
+      errors,
+      filters: {
+        excluded: {},
+        topMarketCapSource: "snapshot",
+        topMarketCapSymbols: []
+      },
+      binanceTokens: rows.map((row) => ({
+        symbol: row.symbol,
+        chainId: "",
+        chainLabel: row.chainLabel,
+        contractAddress: "",
+        logo: "",
+        heat: numberValue(row.heat),
+        sentiment: "Neutral",
+        summary: "",
+        marketCap: 0,
+        priceChange: 0,
+        tokenAge: 0,
+        tagInfoList: {}
+      }))
+    };
+  } catch (error) {
+    errors.push(`hot rank snapshot fallback failed: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 function logoUrl(value) {
   const path = String(value ?? "").trim();
   if (!path) return "";
@@ -107,10 +168,10 @@ async function requestHotRankChain(chainId, { targetLanguage, socialLanguage, ti
   url.searchParams.set("targetLanguage", targetLanguage);
   url.searchParams.set("timeRange", String(timeRange));
 
-  const retries = Math.max(0, Math.min(1, Number(config.binance.requestRetries) || 0));
+  const retries = Math.max(0, Math.floor(Number(config.hotRank.requestRetries) || 0));
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), config.binance.requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), config.hotRank.requestTimeoutMs);
     try {
       const response = await fetch(url, {
         headers: { "Accept-Encoding": "identity" },
@@ -119,7 +180,8 @@ async function requestHotRankChain(chainId, { targetLanguage, socialLanguage, ti
       if (!response.ok) {
         const body = await response.text().catch(() => "");
         const error = new Error(`Binance social hype ${chainId} HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ""}`);
-        error.retryable = false;
+        error.retryable = isRetryableHotRankStatus(response.status);
+        error.retryAfterMs = retryAfterMs(response.headers);
         throw error;
       }
       const json = await response.json();
@@ -142,7 +204,7 @@ async function requestHotRankChain(chainId, { targetLanguage, socialLanguage, ti
       if (attempt >= retries) {
         throw new Error(`Binance social hype ${chainId}: ${describeFetchError(error)}`, { cause: error });
       }
-      await sleep(hotRankRetryDelayMs(attempt));
+      await sleep(error?.retryAfterMs ?? hotRankRetryDelayMs(attempt));
     } finally {
       clearTimeout(timer);
     }
@@ -268,6 +330,8 @@ async function fetchHotRankBase({ normalizedChain, targetLanguage, socialLanguag
         errors
       };
     }
+    const snapshot = await latestHotRankSnapshotPayload(normalizedChain, errors);
+    if (snapshot) return snapshot;
   }
 
   const basePayload = {

@@ -128,40 +128,55 @@ test("OI history bootstrap waits longer after an unavailable history endpoint", 
   }
 });
 
-test("selectScanBatch scans the full token universe for current OI samples", () => {
+test("selectScanBatch scans a configured slice of the token universe", () => {
   const originalLimit = config.openInterestMonitor.requestLimitPerWindow;
   const originalScanIntervalMs = config.openInterestMonitor.scanIntervalMs;
+  const originalScanLimitPerRun = config.openInterestMonitor.scanLimitPerRun;
   config.openInterestMonitor.requestLimitPerWindow = 2;
   config.openInterestMonitor.scanIntervalMs = 5 * 60 * 1000;
+  config.openInterestMonitor.scanLimitPerRun = 2;
   selectScanBatch([]);
 
   try {
     const tokens = ["AUSDT", "BUSDT", "CUSDT", "DUSDT"].map((symbol) => ({ symbol }));
 
     const result = selectScanBatch(tokens);
-    assert.deepEqual(result.batch.map((token) => token.symbol), ["AUSDT", "BUSDT", "CUSDT", "DUSDT"]);
-    assert.equal(result.deferredCount, 0);
+    assert.deepEqual(result.batch.map((token) => token.symbol), ["AUSDT", "BUSDT"]);
+    assert.equal(result.deferredCount, 2);
   } finally {
     config.openInterestMonitor.requestLimitPerWindow = originalLimit;
     config.openInterestMonitor.scanIntervalMs = originalScanIntervalMs;
+    config.openInterestMonitor.scanLimitPerRun = originalScanLimitPerRun;
     selectScanBatch([]);
   }
 });
 
-test("effectiveOpenInterestScanLimit scans all tokens for current OI and can still spread history budget", () => {
+test("effectiveOpenInterestScanLimit slices current OI and still spreads history budget", () => {
   assert.equal(
     effectiveOpenInterestScanLimit({
       tokenCount: 1000,
       requestLimitPerWindow: 900,
-      scanIntervalMs: 3 * 60 * 1000
+      scanIntervalMs: 3 * 60 * 1000,
+      scanLimitPerRun: 180
     }),
-    1000
+    180
   );
   assert.equal(
     effectiveOpenInterestScanLimit({
       tokenCount: 1000,
       requestLimitPerWindow: 900,
       scanIntervalMs: 3 * 60 * 1000,
+      scanLimitPerRun: 180,
+      useHistoryBudget: true
+    }),
+    180
+  );
+  assert.equal(
+    effectiveOpenInterestScanLimit({
+      tokenCount: 1000,
+      requestLimitPerWindow: 900,
+      scanIntervalMs: 3 * 60 * 1000,
+      scanLimitPerRun: 1000,
       useHistoryBudget: true
     }),
     450
@@ -171,6 +186,7 @@ test("effectiveOpenInterestScanLimit scans all tokens for current OI and can sti
       tokenCount: 1000,
       requestLimitPerWindow: 900,
       scanIntervalMs: 5 * 60 * 1000,
+      scanLimitPerRun: 1000,
       useHistoryBudget: true
     }),
     900
@@ -179,7 +195,8 @@ test("effectiveOpenInterestScanLimit scans all tokens for current OI and can sti
     effectiveOpenInterestScanLimit({
       tokenCount: 488,
       requestLimitPerWindow: 1000,
-      scanIntervalMs: 3 * 60 * 1000
+      scanIntervalMs: 3 * 60 * 1000,
+      scanLimitPerRun: 1000
     }),
     488
   );
@@ -188,6 +205,7 @@ test("effectiveOpenInterestScanLimit scans all tokens for current OI and can sti
       tokenCount: 1000,
       requestLimitPerWindow: 900,
       scanIntervalMs: 30 * 1000,
+      scanLimitPerRun: 1000,
       useHistoryBudget: true
     }),
     90

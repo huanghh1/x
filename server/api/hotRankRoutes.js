@@ -5,7 +5,7 @@ import { requestService } from "../serviceClient.js";
 
 const HOT_RANK_SERVICE_TIMEOUT_MS = Math.max(
   config.service.requestTimeoutMs,
-  config.binance.requestTimeoutMs * 2 + 5000
+  config.hotRank.requestTimeoutMs * (config.hotRank.requestRetries + 1) + 8000
 );
 
 function hotRankQueryParams(query) {

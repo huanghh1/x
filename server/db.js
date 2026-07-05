@@ -21,6 +21,7 @@ export {
   upsertTradeEventHistory
 } from "./db/tradeHistoryRepository.js";
 export {
+  listLatestHotRankSnapshot,
   markHotRankNotified,
   normalizeHotRankSeenTokens,
   recordHotRankSnapshot
