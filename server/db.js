@@ -1,5 +1,6 @@
 import { config } from "./config.js";
 import { getPool } from "./db/connection.js";
+import { cleanupPriceChangeKlineRetention } from "./db/priceChangeKlineRepository.js";
 export { ensureDatabase, getPool, pingDatabase } from "./db/connection.js";
 export {
   claimTelegramAlerts,
@@ -69,6 +70,18 @@ export {
   upsertTokenUnlockCache,
   upsertWatchlistItem
 } from "./db/watchlistRepository.js";
+export {
+  cleanupPriceChangeKlineRetention,
+  latestClosedPriceChangeOpenTimeAt,
+  listActivePriceChangeKlineTokens,
+  listPriceChangeKlineGaps,
+  priceChange24hBaselineOpenTime,
+  priceChangeKlineStats,
+  priceChangeKlineTarget,
+  selectPriceChange24hBaselinePrice,
+  selectPriceChange24hBaselineSnapshot,
+  upsertPriceChangeKlinePage
+} from "./db/priceChangeKlineRepository.js";
 export {
   claimNextTokenForFetch,
   cleanupInactiveTokenKlines,
@@ -182,7 +195,15 @@ export async function cleanupExpiredData() {
   const ioDays = Math.max(1, Number(config.maintenance.ioRetentionDays) || 7);
   const oiSampleDays = Math.max(2, Number(config.openInterestMonitor.sampleRetentionDays) || 3);
   // trade_event_history is the durable archive for API-limited trade analysis data; do not expire it here.
-  const [hotSnapshots, staleHotRows, staleOpenInterest, staleOpenInterestSamples, staleTelegramAlerts, staleUnlocks] = await Promise.all([
+  const [
+    hotSnapshots,
+    staleHotRows,
+    staleOpenInterest,
+    staleOpenInterestSamples,
+    staleTelegramAlerts,
+    staleUnlocks,
+    priceChange1m
+  ] = await Promise.all([
     deleteInBatches(
       "DELETE FROM hot_rank_snapshot WHERE snapshot_time < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)",
       { retentionDays: hotRankDays }
@@ -210,7 +231,8 @@ export async function cleanupExpiredData() {
        WHERE symbol NOT IN (SELECT symbol FROM watchlist)
          AND checked_at < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)`,
       { retentionDays: hotRankDays }
-    )
+    ),
+    cleanupPriceChangeKlineRetention()
   ]);
   return {
     hotSnapshots,
@@ -218,7 +240,8 @@ export async function cleanupExpiredData() {
     staleOpenInterest,
     staleOpenInterestSamples,
     staleTelegramAlerts,
-    staleUnlocks
+    staleUnlocks,
+    priceChange1m
   };
 }
 

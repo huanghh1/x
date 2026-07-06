@@ -1,5 +1,5 @@
 import { getPool } from "./connection.js";
-import { baseAssetFromSymbol, sanitizeDbSymbol } from "./symbols.js";
+import { baseAssetAliases, baseAssetFromSymbol, sanitizeDbSymbol } from "./symbols.js";
 
 function normalizeHotRankToken(token) {
   const symbol = sanitizeDbSymbol(token?.symbol);
@@ -7,22 +7,31 @@ function normalizeHotRankToken(token) {
   if (!symbol || !baseAsset) return null;
   const rank = Math.max(1, Number(token?.rank) || 0);
   const heat = Number(token?.heat);
+  const marketCap = Number(token?.marketCap ?? token?.market_cap);
   return {
     symbol,
     baseAsset,
     chainLabel: String(token?.chainLabel ?? "").slice(0, 32),
     rank,
-    heat: Number.isFinite(heat) ? heat : null
+    heat: Number.isFinite(heat) ? heat : null,
+    marketCap: Number.isFinite(marketCap) && marketCap > 0 ? marketCap : null
   };
 }
 
 function preferHotRankToken(current, candidate) {
   if (!current) return candidate;
-  if (candidate.rank !== current.rank) return candidate.rank < current.rank ? candidate : current;
-  if ((candidate.heat ?? -Infinity) !== (current.heat ?? -Infinity)) {
-    return (candidate.heat ?? -Infinity) > (current.heat ?? -Infinity) ? candidate : current;
+  let preferred;
+  if (candidate.rank !== current.rank) preferred = candidate.rank < current.rank ? candidate : current;
+  else if ((candidate.heat ?? -Infinity) !== (current.heat ?? -Infinity)) {
+    preferred = (candidate.heat ?? -Infinity) > (current.heat ?? -Infinity) ? candidate : current;
+  } else {
+    preferred = candidate.chainLabel.localeCompare(current.chainLabel) < 0 ? candidate : current;
   }
-  return candidate.chainLabel.localeCompare(current.chainLabel) < 0 ? candidate : current;
+  const fallback = preferred === candidate ? current : candidate;
+  if (preferred.marketCap === null && fallback?.marketCap !== null) {
+    return { ...preferred, marketCap: fallback.marketCap };
+  }
+  return preferred;
 }
 
 export function normalizeHotRankSeenTokens(tokens) {
@@ -44,6 +53,26 @@ function normalizeHotRankSnapshotTokens(tokens) {
     byKey.set(key, preferHotRankToken(byKey.get(key), normalized));
   }
   return Array.from(byKey.values()).sort((a, b) => a.rank - b.rank || a.symbol.localeCompare(b.symbol));
+}
+
+async function updateTokenMarketCapsFromHotRank(tokens) {
+  const rows = normalizeHotRankSeenTokens(tokens).filter((token) => token.marketCap !== null);
+  if (!rows.length) return 0;
+  const results = await Promise.all(rows.map((token) =>
+    getPool().query(
+      `UPDATE token_list
+       SET market_cap=:marketCap,
+           market_cap_updated_at=NOW(3)
+       WHERE symbol IN (:symbols)
+          OR base_asset IN (:baseAssets)`,
+      {
+        marketCap: token.marketCap,
+        symbols: [token.symbol, `${token.baseAsset}USDT`],
+        baseAssets: baseAssetAliases(token.baseAsset)
+      }
+    )
+  ));
+  return results.reduce((sum, [result]) => sum + Number(result.affectedRows ?? 0), 0);
 }
 
 export async function recordHotRankSnapshot(tokens) {
@@ -88,7 +117,8 @@ export async function recordHotRankSnapshot(tokens) {
         rank_value=VALUES(rank_value),
         heat_value=VALUES(heat_value)`,
       [snapshotRows]
-    )
+    ),
+    updateTokenMarketCapsFromHotRank(tokens)
   ]);
 
   return freshTokens;

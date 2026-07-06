@@ -52,7 +52,8 @@ async function fetchTokenMetadataMap(symbols = []) {
   if (!safeSymbols.length) return new Map();
   try {
     const [rows] = await getPool().query(
-      `SELECT symbol, base_asset AS baseAsset, category_type AS categoryType, category_label AS categoryLabel
+      `SELECT symbol, base_asset AS baseAsset, category_type AS categoryType, category_label AS categoryLabel,
+        market_cap AS marketCap, market_cap_updated_at AS marketCapUpdatedAt
        FROM token_list
        WHERE symbol IN (?)`,
       [safeSymbols]
@@ -94,12 +95,15 @@ export function attachMarketMetadata(item = {}, ticker = null, token = null) {
       ""
   ).trim();
   const priceChange24hPct = finiteNumber(
-    item?.priceChange24hPct ??
-      item?.priceChange24hPercent ??
-      item?.priceChangePercent ??
-      ticker?.priceChange24hPct
+    ticker?.priceChange24hPct ??
+      item?.priceChange24hPct
   );
   const lastPrice24h = finiteNumber(item?.lastPrice24h ?? ticker?.lastPrice);
+  const marketCap = finiteNumber(
+    item?.marketCap ??
+      item?.market_cap ??
+      token?.marketCap
+  );
 
   return {
     ...item,
@@ -107,6 +111,8 @@ export function attachMarketMetadata(item = {}, ticker = null, token = null) {
     ...(baseAsset ? { baseAsset, base_asset: baseAsset } : {}),
     ...(categoryType ? { categoryType, category_type: categoryType } : {}),
     ...(categoryLabel ? { categoryLabel, category_label: categoryLabel } : {}),
+    ...(marketCap > 0 ? { marketCap, market_cap: marketCap } : {}),
+    ...(token?.marketCapUpdatedAt ? { marketCapUpdatedAt: token.marketCapUpdatedAt } : {}),
     priceChange24hPct,
     lastPrice24h
   };

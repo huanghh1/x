@@ -61,6 +61,8 @@ const TABLE_SQL = [
     has_spot TINYINT(1) NOT NULL DEFAULT 0,
     has_futures TINYINT(1) NOT NULL DEFAULT 1,
     is_alpha TINYINT(1) NOT NULL DEFAULT 0,
+    market_cap DECIMAL(38,12) NULL,
+    market_cap_updated_at DATETIME(3) NULL,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     inactive_since DATETIME(3) NULL,
     fetch_status ENUM('pending','fetching','partial','completed','failed') NOT NULL DEFAULT 'pending',
@@ -113,6 +115,26 @@ const TABLE_SQL = [
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol, interval_code),
     KEY idx_kline_availability_checked (last_checked_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS price_change_1m_kline (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    token_id BIGINT UNSIGNED NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    open_time BIGINT UNSIGNED NOT NULL,
+    close_time BIGINT UNSIGNED NOT NULL,
+    open_price DECIMAL(32,12) NOT NULL,
+    high_price DECIMAL(32,12) NOT NULL,
+    low_price DECIMAL(32,12) NOT NULL,
+    close_price DECIMAL(32,12) NOT NULL,
+    volume DECIMAL(38,12) NOT NULL,
+    quote_volume DECIMAL(38,12) NULL,
+    trade_count BIGINT UNSIGNED NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_price_change_1m_symbol_time (symbol, open_time),
+    KEY idx_price_change_1m_token_time (token_id, open_time),
+    KEY idx_price_change_1m_open_time (open_time),
+    CONSTRAINT fk_price_change_1m_token FOREIGN KEY (token_id) REFERENCES token_list(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS signal_result (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -450,6 +472,7 @@ async function initializeDatabase() {
       await migrationConnection.query("DROP TABLE IF EXISTS signal_trigger_history");
       await ensureTokenListPolicyColumn();
       await ensureTokenListActiveColumn();
+      await ensureTokenListMarketCapColumns();
       await ensureTokenListInactiveSinceColumn();
       await ensureWatchlistRealtimeColumns();
       await ensureFundingRateColumns();
@@ -479,6 +502,15 @@ async function ensureTokenListPolicyColumn() {
 async function ensureTokenListActiveColumn() {
   if (await columnExists("token_list", "is_active")) return;
   await pool.query("ALTER TABLE token_list ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER is_alpha");
+}
+
+async function ensureTokenListMarketCapColumns() {
+  if (!(await columnExists("token_list", "market_cap"))) {
+    await pool.query("ALTER TABLE token_list ADD COLUMN market_cap DECIMAL(38,12) NULL AFTER is_alpha");
+  }
+  if (!(await columnExists("token_list", "market_cap_updated_at"))) {
+    await pool.query("ALTER TABLE token_list ADD COLUMN market_cap_updated_at DATETIME(3) NULL AFTER market_cap");
+  }
 }
 
 async function ensureTokenListInactiveSinceColumn() {
@@ -597,6 +629,8 @@ async function ensurePerformanceIndexes() {
   await ensureIndex("token_list", "idx_token_base_active", "(base_asset, is_active, updated_at)");
   await ensureIndex("token_list", "idx_token_inactive_since", "(is_active, inactive_since)");
   await ensureIndex("kline_cache", "idx_kline_interval_symbol", "(interval_code, symbol)");
+  await ensureIndex("price_change_1m_kline", "idx_price_change_1m_token_time", "(token_id, open_time)");
+  await ensureIndex("price_change_1m_kline", "idx_price_change_1m_open_time", "(open_time)");
   await ensureIndex(
     "signal_result",
     "idx_signal_filter_page",

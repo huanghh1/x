@@ -7,6 +7,7 @@ import {
   formatCompactNumber,
   formatCompactTime,
   formatCompactUsd,
+  formatMarketTokenMeta,
   formatNumber,
   formatPercent,
   formatTime
@@ -132,7 +133,13 @@ export function renderIOMonitoring() {
       const expanded = state.ioExpandedSymbol === item.symbol;
       return `
         <article class="io-card">
-          <div class="io-symbol"><button class="market-symbol-button" type="button" data-market-chart="io" data-market-symbol="${escapeHtml(item.symbol)}" aria-expanded="${expanded}">${escapeHtml(item.symbol)}</button><span>${escapeHtml(state.ioWindow)}</span></div>
+          <div class="io-symbol">
+            <div class="market-symbol-line">
+              <button class="market-symbol-button" type="button" data-market-chart="io" data-market-symbol="${escapeHtml(item.symbol)}" aria-expanded="${expanded}">${escapeHtml(item.symbol)}</button>
+              <span>${escapeHtml(state.ioWindow)}</span>
+            </div>
+            <small class="market-token-meta">${escapeHtml(formatMarketTokenMeta(item))}</small>
+          </div>
           <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(item.symbol)}">${formatNumber(item.currentPrice)}</b></div>
           <div><span>24h涨跌</span><b class="mono ${changeClass(item.priceChange24hPct)}" data-market-24h="${escapeHtml(item.symbol)}">${formatPercent(item.priceChange24hPct)}</b></div>
           <div><span>变化</span><b class="${oiChangeClass}">${formatPercent(item.changePercent)}</b></div>

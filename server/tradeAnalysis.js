@@ -269,6 +269,35 @@ function summarizePositions(positions, sources) {
   return totals;
 }
 
+function hasFiniteFundingValue(value) {
+  const number = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(number);
+}
+
+function positionFundingFallback(positions = [], symbolRows = []) {
+  return positions.map((position) => {
+    const currentFunding = Number(position?.settledFunding);
+    const hasCurrentFunding = hasFiniteFundingValue(position?.settledFunding);
+    const historicalRow = symbolRows.find((row) =>
+      row.source === position.source && symbolMatchesValue(row.symbol, position.symbol)
+    );
+    const historicalFunding = Number(historicalRow?.funding);
+    if (
+      !historicalRow ||
+      !Number.isFinite(historicalFunding) ||
+      historicalFunding === 0 ||
+      (hasCurrentFunding && currentFunding !== 0)
+    ) {
+      return position;
+    }
+    return {
+      ...position,
+      settledFunding: historicalFunding,
+      settledFundingSource: hasCurrentFunding ? "history-override" : "history"
+    };
+  });
+}
+
 function currentPositionEvent(position) {
   return {
     id: `${position.id}:current-position`,
@@ -288,14 +317,14 @@ function currentPositionEvent(position) {
     fundingRate: null,
     realizedPnl: 0,
     unrealizedPnl: toNumber(position.unrealizedPnl),
-    funding: 0,
+    funding: toNumber(position.settledFunding),
     commission: 0,
     feeAsset: position.asset || "USDT",
     net: toNumber(position.unrealizedPnl),
     orderId: "",
     tradeId: "",
     liquidity: "",
-    note: "当前未平仓，未实现盈亏不计入已实现收益",
+    note: "当前未平仓，持仓资金费仅作展示，不计入已实现收益",
     pnlIncluded: false,
     rawType: "CURRENT_POSITION"
   };
@@ -318,9 +347,11 @@ async function buildTradeAnalysisPayload({
   mode
 }) {
   const rawPositions = Array.isArray(positions) ? positions : [];
+  const rawSymbolRows = history?.summary?.bySymbol ?? [];
+  const positionsWithFundingFallback = positionFundingFallback(rawPositions, rawSymbolRows);
   const [safePositions, symbolRows] = await Promise.all([
-    enrichRowsWithMarketMetadata(rawPositions),
-    enrichRowsWithMarketMetadata(history?.summary?.bySymbol ?? [])
+    enrichRowsWithMarketMetadata(positionsWithFundingFallback),
+    enrichRowsWithMarketMetadata(rawSymbolRows)
   ]);
   const summary = {
     ...history.summary,

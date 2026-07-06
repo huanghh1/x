@@ -558,7 +558,17 @@ main,
 }
 
 .trade-position-table table {
-  min-width: 1360px;
+  min-width: 1280px;
+}
+
+.trade-position-funding {
+  display: grid;
+  gap: 3px;
+  min-width: 136px;
+}
+
+.trade-position-funding strong {
+  font-family: var(--font-mono);
 }
 
 .trade-side {

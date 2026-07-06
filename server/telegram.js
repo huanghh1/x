@@ -48,7 +48,7 @@ function tokenCategoryLabel(item = {}) {
 }
 
 function tokenPriceChange24h(item = {}) {
-  return formatPriceChange24h(item.priceChange24hPct ?? item.priceChange24hPercent ?? item.priceChangePercent);
+  return formatPriceChange24h(item.priceChange24hPct);
 }
 
 function telegramTokenMetaLines(item = {}) {

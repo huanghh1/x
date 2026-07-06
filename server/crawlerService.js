@@ -12,6 +12,11 @@ import {
 } from "./crawler.js";
 import { nextDailyRunAt } from "./dailySchedule.js";
 import { ensureDatabase } from "./db.js";
+import {
+  getPriceChangeKlineRefreshState,
+  runPriceChangeKlineRefresh,
+  startPriceChangeKlineScheduler
+} from "./priceChangeKlineService.js";
 import { requireInternalService } from "./serviceClient.js";
 import { getWatchlistMarketState, refreshWatchlistMarketData } from "./watchlistMarket.js";
 
@@ -20,7 +25,13 @@ app.use(express.json({ limit: "256kb" }));
 app.use("/internal", requireInternalService);
 
 app.get("/internal/health", (_request, response) => {
-  response.json({ ok: true, role: "crawler", crawler: getCrawlerState(), watchlistMarket: getWatchlistMarketState() });
+  response.json({
+    ok: true,
+    role: "crawler",
+    crawler: getCrawlerState(),
+    watchlistMarket: getWatchlistMarketState(),
+    priceChangeKline: getPriceChangeKlineRefreshState()
+  });
 });
 
 app.post("/internal/bootstrap", async (_request, response) => {
@@ -53,6 +64,10 @@ app.post("/internal/kline/audit", async (_request, response) => {
 
 app.post("/internal/kline/tails", async (_request, response) => {
   response.json(await refreshLatestKlineTails({ force: true }));
+});
+
+app.post("/internal/price-change-1m/refresh", async (_request, response) => {
+  response.json(await runPriceChangeKlineRefresh({ force: true }));
 });
 
 app.post("/internal/kline/refresh", async (request, response) => {
@@ -93,6 +108,7 @@ async function runRecoveryKlineAudit() {
 }
 
 await ensureDatabase();
+startPriceChangeKlineScheduler();
 setInterval(() => {
   initializeTokenUniverse().catch((error) => console.error("token universe sync failed", error));
 }, config.crawler.tokenUniverseSyncMs).unref?.();

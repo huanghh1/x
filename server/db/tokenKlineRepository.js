@@ -50,19 +50,25 @@ async function withRetryableDatabaseQuery(operation, attempts = 3) {
 
 export async function upsertTokens(tokens) {
   if (tokens.length === 0) return 0;
-  const rows = tokens.map((token) => [
-    token.symbol,
-    token.baseAsset,
-    "USDT",
-    token.categoryType,
-    token.categoryLabel,
-    token.hasSpot ? 1 : 0,
-    token.hasFutures ? 1 : 0,
-    token.isAlpha ? 1 : 0
-  ]);
+  const rows = tokens.map((token) => {
+    const marketCap = Number(token.marketCap);
+    const safeMarketCap = Number.isFinite(marketCap) && marketCap > 0 ? marketCap : null;
+    return [
+      token.symbol,
+      token.baseAsset,
+      "USDT",
+      token.categoryType,
+      token.categoryLabel,
+      token.hasSpot ? 1 : 0,
+      token.hasFutures ? 1 : 0,
+      token.isAlpha ? 1 : 0,
+      safeMarketCap,
+      safeMarketCap === null ? null : new Date()
+    ];
+  });
   await getPool().query(
     `INSERT INTO token_list
-      (symbol, base_asset, quote_asset, category_type, category_label, has_spot, has_futures, is_alpha)
+      (symbol, base_asset, quote_asset, category_type, category_label, has_spot, has_futures, is_alpha, market_cap, market_cap_updated_at)
      VALUES ?
      ON DUPLICATE KEY UPDATE
       base_asset = VALUES(base_asset),
@@ -70,7 +76,9 @@ export async function upsertTokens(tokens) {
       category_label = VALUES(category_label),
       has_spot = VALUES(has_spot),
       has_futures = VALUES(has_futures),
-      is_alpha = VALUES(is_alpha)`,
+      is_alpha = VALUES(is_alpha),
+      market_cap = COALESCE(VALUES(market_cap), market_cap),
+      market_cap_updated_at = IF(VALUES(market_cap) IS NULL, market_cap_updated_at, VALUES(market_cap_updated_at))`,
     [rows]
   );
   const symbols = tokens.map((token) => token.symbol);

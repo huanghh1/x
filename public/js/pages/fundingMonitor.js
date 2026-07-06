@@ -3,6 +3,7 @@ import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
 import {
   formatFundingPercent,
+  formatMarketTokenMeta,
   formatNumber,
   formatPercent,
   formatTime,
@@ -122,7 +123,10 @@ export function renderFundingRateTokens() {
       return `
         <article class="funding-card">
           <div class="funding-symbol">
-            <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
+            <div class="market-symbol-line">
+              <button class="market-symbol-button" type="button" data-market-chart="funding" data-market-symbol="${escapeHtml(token.symbol)}" aria-expanded="${expanded}">${escapeHtml(token.symbol)}</button>
+            </div>
+            <small class="market-token-meta">${escapeHtml(formatMarketTokenMeta(token))}</small>
           </div>
           <div><span>现价</span><b class="mono" data-market-price="${escapeHtml(token.symbol)}">${formatNumber(token.currentPrice)}</b></div>
           <div><span>24h涨跌</span><b class="mono ${changeClass(token.priceChange24hPct)}" data-market-24h="${escapeHtml(token.symbol)}">${formatPercent(token.priceChange24hPct)}</b></div>

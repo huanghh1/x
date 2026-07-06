@@ -209,9 +209,62 @@ async function fetchBinanceFundingRates(config, symbols, window) {
   return result;
 }
 
+function positionFundingWindow(config) {
+  const lookbackDays = Math.max(1, Number(config.tradeAnalysis.defaultLookbackDays) || 90);
+  const lookbackMs = Math.min(BINANCE_MAX_LOOKBACK_MS, lookbackDays * DAY_MS);
+  const endMs = Date.now();
+  return { startMs: endMs - lookbackMs + 1, endMs };
+}
+
+async function fetchBinanceSettledFundingBySymbol(config, symbols = []) {
+  const safeSymbols = new Set(
+    symbols
+      .map((symbol) => String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""))
+      .filter(Boolean)
+  );
+  if (!safeSymbols.size) return new Map();
+  const source = config.tradeAnalysis.binance;
+  const window = positionFundingWindow(config);
+  const settled = await mapLimit(
+    Array.from(safeSymbols),
+    source.fundingRateConcurrency,
+    async (symbol) => {
+      let total = 0;
+      for (const chunk of splitTimeRange(window.startMs, window.endMs, THIRTY_DAY_CHUNK_MS)) {
+        for (let page = 1; page <= BINANCE_MAX_INCOME_PAGES_PER_CHUNK; page += 1) {
+          const payload = await fetchBinanceSigned(config, "/fapi/v1/income", {
+            symbol,
+            incomeType: "FUNDING_FEE",
+            startTime: String(chunk.startMs),
+            endTime: String(chunk.endMs),
+            limit: String(BINANCE_PAGE_LIMIT),
+            page: String(page)
+          });
+          const pageRows = Array.isArray(payload) ? payload : [];
+          for (const row of pageRows) {
+            if (row.incomeType === "FUNDING_FEE" && symbolMatchesValue(row.symbol, symbol)) {
+              total += toNumber(row.income);
+            }
+          }
+          if (pageRows.length < BINANCE_PAGE_LIMIT) break;
+          if (page === BINANCE_MAX_INCOME_PAGES_PER_CHUNK) {
+            throw new Error(`${symbol} Binance 资金费历史超过分页上限，请缩短交易分析默认窗口。`);
+          }
+        }
+      }
+      return { symbol, total };
+    }
+  );
+  const result = new Map();
+  for (const item of settled) {
+    if (item.status === "fulfilled") result.set(item.value.symbol, item.value.total);
+  }
+  return result;
+}
+
 async function fetchBinancePositions(config, symbol) {
   const rows = await fetchBinanceSigned(config, "/fapi/v3/positionRisk", {});
-  return (Array.isArray(rows) ? rows : [])
+  const positions = (Array.isArray(rows) ? rows : [])
     .filter((item) => Math.abs(toNumber(item.positionAmt)) > 0)
     .filter((item) => symbolMatchesValue(item.symbol, symbol))
     .map((item) => ({
@@ -231,6 +284,17 @@ async function fetchBinancePositions(config, symbol) {
       marginMode: item.marginType || "",
       updatedAt: Number(item.updateTime) || null
     }));
+  if (!positions.length) return positions;
+  let fundingBySymbol = null;
+  try {
+    fundingBySymbol = await fetchBinanceSettledFundingBySymbol(config, positions.map((position) => position.symbol));
+  } catch {
+    fundingBySymbol = null;
+  }
+  return positions.map((position) => ({
+    ...position,
+    settledFunding: fundingBySymbol ? fundingBySymbol.get(position.symbol) ?? 0 : null
+  }));
 }
 
 export async function fetchBinanceEvents(config, window, symbol) {

@@ -51,8 +51,8 @@ test("hot rank seen rows are deduped by symbol before database upsert", () => {
   ]);
 
   assert.deepEqual(rows, [
-    { symbol: "BROKEN", baseAsset: "BROKEN", chainLabel: "", rank: 1, heat: null },
-    { symbol: "AERO", baseAsset: "AERO", chainLabel: "BSC", rank: 3, heat: 10 }
+    { symbol: "BROKEN", baseAsset: "BROKEN", chainLabel: "", rank: 1, heat: null, marketCap: null },
+    { symbol: "AERO", baseAsset: "AERO", chainLabel: "BSC", rank: 3, heat: 10, marketCap: null }
   ]);
 });
 

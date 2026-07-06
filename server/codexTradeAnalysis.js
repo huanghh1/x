@@ -81,8 +81,7 @@ function pickPosition(position) {
     markPrice: position.markPrice ?? null,
     notional: position.notional ?? null,
     unrealizedPnl: position.unrealizedPnl ?? 0,
-    leverage: position.leverage ?? null,
-    liquidationPrice: position.liquidationPrice ?? null,
+    settledFunding: position.settledFunding ?? null,
     marginMode: position.marginMode ?? "",
     updatedAt: position.updatedAt ?? null
   };

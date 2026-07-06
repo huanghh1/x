@@ -16,6 +16,11 @@ export function formatCompactUsd(value) {
   return `$${number.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 2 })}`;
 }
 
+export function formatMarketTokenMeta(item = {}) {
+  const category = String(item.categoryLabel ?? item.category_label ?? item.categoryType ?? item.category_type ?? "").trim() || "分类 --";
+  return `${category} · 市值 ${formatCompactUsd(item.marketCap ?? item.market_cap)}`;
+}
+
 export function formatCompactNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";

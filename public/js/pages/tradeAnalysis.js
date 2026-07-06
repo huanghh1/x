@@ -369,6 +369,16 @@ function setTradeMetric(selector, value, { cost = false } = {}) {
   target.classList.add(cost ? "is-cost" : pnlClass(value));
 }
 
+function renderPositionFunding(position = {}) {
+  const fee = Number(position.settledFunding);
+  const hasFee = position.settledFunding !== null && position.settledFunding !== undefined && Number.isFinite(fee);
+  return `
+    <div class="trade-position-funding">
+      <strong class="${hasFee ? pnlClass(fee) : "is-neutral"}">${hasFee ? formatUsd(fee) : "--"}</strong>
+    </div>
+  `;
+}
+
 function sourceStatusText(source) {
   if (!source) return "";
   if (!source.configured) return `缺少 ${source.missing?.join("、") || "配置"}`;
@@ -418,11 +428,11 @@ function renderTradePositions(positions, summary = {}) {
   setTradeMetric("#tradePositionPnl", Number(summary.unrealizedPnl ?? 0));
 
   if ((state.tradeAnalysisLoading || state.tradeAnalysisRefreshing) && !positions.length) {
-    target.innerHTML = '<tr><td colspan="12" class="empty">正在读取当前持仓。</td></tr>';
+    target.innerHTML = '<tr><td colspan="11" class="empty">正在读取当前持仓。</td></tr>';
     return;
   }
   if (!positions.length) {
-    target.innerHTML = '<tr><td colspan="12" class="empty">当前接口返回没有未平仓持仓。若你确定有仓位，请确认钱包地址和 Binance API 只读权限。</td></tr>';
+    target.innerHTML = '<tr><td colspan="11" class="empty">当前接口返回没有未平仓持仓。若你确定有仓位，请确认钱包地址和 Binance API 只读权限。</td></tr>';
     return;
   }
   target.innerHTML = positions.map((position) => `
@@ -436,8 +446,7 @@ function renderTradePositions(positions, summary = {}) {
       <td>${formatNumber(position.markPrice, 6)}</td>
       <td>${formatUsd(position.notional)}</td>
       <td><strong class="${pnlClass(position.unrealizedPnl)}">${formatUsd(position.unrealizedPnl)}</strong></td>
-      <td>${position.leverage ? `${formatNumber(position.leverage, 2)}x` : "--"}</td>
-      <td>${formatNumber(position.liquidationPrice, 6)}</td>
+      <td>${renderPositionFunding(position)}</td>
       <td>${formatTime(position.updatedAt)}</td>
     </tr>
   `).join("");

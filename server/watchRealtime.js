@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { calculateFuturesTicker24hChangeFromLocalKline } from "./binance.js";
 import {
   clearWatchlistAlertSide,
   listFundingRealtimeTokens,
@@ -331,9 +332,15 @@ async function maybeSendPriceAlert(symbol, price, eventTime) {
 async function handleTicker(data) {
   const symbol = sanitizeSymbol(data.s);
   const price = Number(data.c);
-  const priceChange24hPct = Number(data.P);
+  let priceChange24hPct = null;
   const eventTime = Number(data.E ?? Date.now());
   if (!symbol || !Number.isFinite(price)) return;
+  if (price > 0) {
+    const local = await calculateFuturesTicker24hChangeFromLocalKline(symbol, price, eventTime);
+    if (Number.isFinite(Number(local?.priceChange24hPct))) {
+      priceChange24hPct = local.priceChange24hPct;
+    }
+  }
   state.lastMessageAt = new Date().toISOString();
   const item = state.watchItems.get(symbol);
   if (item) state.watchItems.set(symbol, { ...item, currentPrice: price, currentCloseTime: eventTime });
@@ -342,7 +349,7 @@ async function handleTicker(data) {
     symbol,
     price,
     eventTime,
-    priceChange24hPct: Number.isFinite(priceChange24hPct) ? priceChange24hPct : null
+    priceChange24hPct: Number.isFinite(Number(priceChange24hPct)) ? priceChange24hPct : null
   });
   if (shouldPersistPrice(symbol, eventTime)) {
     await updateWatchlistRealtimePrice(symbol, price, eventTime);

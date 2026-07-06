@@ -121,6 +121,12 @@ export const config = {
     alphaTokenListUrl:
       process.env.BINANCE_ALPHA_TOKEN_LIST_URL ??
       "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list",
+    spotProductListUrl:
+      process.env.BINANCE_SPOT_PRODUCT_LIST_URL ??
+      "https://www.binance.com/bapi/asset/v2/public/asset-service/product/get-products?includeEtf=true",
+    tokenMarketListUrl:
+      process.env.BINANCE_TOKEN_MARKET_LIST_URL ??
+      "https://www.binance.com/bapi/apex/v1/public/apex/marketing/symbol/list",
     socialHypeRankUrl:
       process.env.BINANCE_SOCIAL_HYPE_RANK_URL ??
       "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/social/hype/rank/leaderboard",
@@ -186,6 +192,18 @@ export const config = {
     tokenUniverseSyncMs: numberEnv("TOKEN_UNIVERSE_SYNC_MS", 6 * 60 * 60 * 1000),
     dailyAuditHour: Math.max(0, Math.min(23, numberEnv("KLINE_DAILY_AUDIT_HOUR", 0))),
     inactiveRetentionDays: Math.max(1, numberEnv("INACTIVE_TOKEN_KLINE_RETENTION_DAYS", 7))
+  },
+  priceChangeKline: {
+    enabled: boolEnv("PRICE_CHANGE_1M_KLINE_ENABLED", true),
+    retentionHours: Math.max(25, numberEnv("PRICE_CHANGE_1M_RETENTION_HOURS", 25)),
+    refreshIntervalMs: Math.max(30_000, numberEnv("PRICE_CHANGE_1M_REFRESH_MS", 60_000)),
+    initialDelayMs: Math.max(0, numberEnv("PRICE_CHANGE_1M_INITIAL_DELAY_MS", 5_000)),
+    concurrency: integerEnv("PRICE_CHANGE_1M_CONCURRENCY", crawlerConcurrentTokens, {
+      max: Math.min(8, Math.max(1, connectionLimit - 2))
+    }),
+    requestLimit: Math.max(100, Math.min(1000, numberEnv("PRICE_CHANGE_1M_REQUEST_LIMIT", 499))),
+    tailRequestLimit: Math.max(2, Math.min(100, numberEnv("PRICE_CHANGE_1M_TAIL_REQUEST_LIMIT", 20))),
+    maxGapRepairPasses: Math.max(25, Math.min(1000, numberEnv("PRICE_CHANGE_1M_MAX_GAP_REPAIR_PASSES", 300)))
   },
   maintenance: {
     cleanupIntervalDays: numberEnv("KLINE_CLEANUP_INTERVAL_DAYS", 7),

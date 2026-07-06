@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { selectPriceChange24hBaselineSnapshot } from "./db/priceChangeKlineRepository.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -151,6 +152,65 @@ function collectAlphaAssets(value, output = new Set()) {
   return output;
 }
 
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function collectAlphaMarketData(value, output = new Map()) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectAlphaMarketData(item, output);
+    return output;
+  }
+  if (!value || typeof value !== "object") return output;
+
+  const marketCap = positiveNumber(value.marketCap ?? value.market_cap);
+  const symbols = ["symbol", "tokenSymbol", "asset", "baseAsset", "cexCoinName"]
+    .map((key) => normalizeBaseAsset(value[key]))
+    .map((symbol) => symbol.endsWith("USDT") ? symbol.slice(0, -4) : symbol)
+    .filter((symbol) => symbol && symbol.length <= 32);
+
+  if (marketCap !== null) {
+    for (const symbol of symbols) {
+      const current = output.get(symbol);
+      if (!current || marketCap > current.marketCap) {
+        output.set(symbol, { marketCap });
+      }
+    }
+  }
+
+  for (const nested of Object.values(value)) {
+    if (Array.isArray(nested) || (nested && typeof nested === "object")) collectAlphaMarketData(nested, output);
+  }
+  return output;
+}
+
+function preferMarketData(current, candidate) {
+  if (!candidate?.marketCap) return current ?? null;
+  if (!current?.marketCap) return candidate;
+  return candidate.marketCap > current.marketCap ? candidate : current;
+}
+
+export function collectSpotProductMarketData(value, output = new Map()) {
+  const rows = Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : [];
+  for (const item of rows) {
+    const quoteAsset = normalizeBaseAsset(item?.q ?? item?.quoteAsset);
+    if (quoteAsset !== "USDT") continue;
+    const symbol = String(item?.s ?? item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+    const baseAsset = normalizeBaseAsset(item?.b ?? item?.baseAsset ?? item?.mapperName ?? symbol.replace(/USDT$/, ""));
+    if (!symbol || !baseAsset || !isAllowedCryptoAsset(baseAsset)) continue;
+    const explicitMarketCap = positiveNumber(item?.marketCap ?? item?.market_cap);
+    const circulatingSupply = positiveNumber(item?.cs ?? item?.circulatingSupply);
+    const price = positiveNumber(item?.c ?? item?.price);
+    const marketCap = explicitMarketCap ?? (circulatingSupply !== null && price !== null ? circulatingSupply * price : null);
+    if (marketCap === null) continue;
+    const data = { marketCap, source: explicitMarketCap === null ? "spot_product_estimated" : "spot_product" };
+    output.set(symbol, preferMarketData(output.get(symbol), data));
+    output.set(baseAsset, preferMarketData(output.get(baseAsset), data));
+  }
+  return output;
+}
+
 const EXCLUDED_BASE_ASSETS = new Set([
   "USDT",
   "USDC",
@@ -181,10 +241,24 @@ function isAllowedCryptoAsset(asset) {
 }
 
 export async function discoverTargetTokens() {
-  const [futuresInfo, spotInfo, alphaInfo] = await Promise.all([
+  const [futuresInfo, spotInfo, alphaInfo, tokenMarketInfo, spotProductInfo] = await Promise.all([
     fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/exchangeInfo`, "Binance futures exchangeInfo"),
     fetchJson(`${config.binance.spotBaseUrl}/api/v3/exchangeInfo`, "Binance spot exchangeInfo"),
-    fetchJson(config.binance.alphaTokenListUrl, "Binance Alpha token list")
+    fetchJson(config.binance.alphaTokenListUrl, "Binance Alpha token list"),
+    fetchJson(config.binance.tokenMarketListUrl, "Binance token market list", {
+      retries: Math.min(1, config.binance.requestRetries),
+      timeoutMs: Math.min(config.binance.requestTimeoutMs, 8000)
+    }).catch((error) => {
+      console.warn("Binance token market list unavailable", error);
+      return null;
+    }),
+    fetchJson(config.binance.spotProductListUrl, "Binance spot product list", {
+      retries: Math.min(1, config.binance.requestRetries),
+      timeoutMs: Math.min(config.binance.requestTimeoutMs, 8000)
+    }).catch((error) => {
+      console.warn("Binance spot product list unavailable", error);
+      return null;
+    })
   ]);
 
   const futuresSymbols = new Map();
@@ -209,18 +283,28 @@ export async function discoverTargetTokens() {
     spotBaseAssets.add(normalizeBaseAsset(item.baseAsset));
   }
 
-  const alphaAssets = collectAlphaAssets(alphaInfo?.data ?? alphaInfo);
+  const alphaPayload = alphaInfo?.data ?? alphaInfo;
+  const alphaAssets = collectAlphaAssets(alphaPayload);
+  const alphaMarketData = collectAlphaMarketData(alphaPayload);
+  const tokenMarketData = collectSpotProductMarketData(tokenMarketInfo?.data ?? tokenMarketInfo);
+  const spotProductMarketData = collectSpotProductMarketData(spotProductInfo?.data ?? spotProductInfo);
+  for (const asset of alphaMarketData.keys()) alphaAssets.add(asset);
   const tokens = [];
   for (const token of futuresSymbols.values()) {
     const hasSpot = spotSymbols.has(token.symbol) || spotBaseAssets.has(token.baseAsset);
     const isAlpha = alphaAssets.has(token.baseAsset);
+    const alphaMarket = alphaMarketData.get(token.baseAsset);
+    const tokenMarket = tokenMarketData.get(token.symbol) ?? tokenMarketData.get(token.baseAsset);
+    const spotProductMarket = spotProductMarketData.get(token.symbol) ?? spotProductMarketData.get(token.baseAsset);
+    const marketCap = tokenMarket?.marketCap ?? spotProductMarket?.marketCap ?? alphaMarket?.marketCap ?? null;
     if (isAlpha && !hasSpot) {
       tokens.push({
         ...token,
         categoryType: "A",
         categoryLabel: "Alpha合约无现货",
         hasSpot: false,
-        isAlpha: true
+        isAlpha: true,
+        marketCap
       });
     } else if (hasSpot) {
       tokens.push({
@@ -228,7 +312,8 @@ export async function discoverTargetTokens() {
         categoryType: "B",
         categoryLabel: "现货+合约",
         hasSpot: true,
-        isAlpha
+        isAlpha,
+        marketCap
       });
     }
   }
@@ -238,6 +323,7 @@ export async function discoverTargetTokens() {
 
 function intervalMs(intervalCode) {
   return {
+    "1m": 60 * 1000,
     "15m": 15 * 60 * 1000,
     "1h": 60 * 60 * 1000,
     "4h": 4 * 60 * 60 * 1000,
@@ -359,7 +445,10 @@ let futuresTicker24hCache = {
   expiresAt: 0,
   tickers: new Map()
 };
+let futuresTicker24hBaselineCache = new Map();
 const FUTURES_TICKER_24H_RETRY_MS = 5_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 
 function futuresTicker24hCacheTtlMs() {
   return Math.max(1000, Number(config.binance.ticker24hCacheMs) || 30_000);
@@ -371,12 +460,11 @@ function hasFuturesTicker24hCache() {
 
 function normalizeFuturesTicker24hr(item) {
   const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
-  const priceChange24hPct = Number(item?.priceChangePercent);
-  const lastPrice = Number(item?.lastPrice);
+  const lastPrice = Number(item?.markPrice ?? item?.lastPrice);
   if (!symbol) return null;
   return {
     symbol,
-    priceChange24hPct: Number.isFinite(priceChange24hPct) ? priceChange24hPct : null,
+    priceChange24hPct: null,
     lastPrice: Number.isFinite(lastPrice) ? lastPrice : null
   };
 }
@@ -386,23 +474,102 @@ export function clearFuturesTicker24hrCache() {
     expiresAt: 0,
     tickers: new Map()
   };
+  futuresTicker24hBaselineCache = new Map();
+}
+
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function roundPercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Number(number.toFixed(8)) : null;
+}
+
+async function fetchFuturesTicker24hBaseline(symbol, now = Date.now()) {
+  const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
+  if (!safeSymbol) return null;
+
+  const baselineOpenTime = Math.floor((now - DAY_MS) / MINUTE_MS) * MINUTE_MS;
+  const cached = futuresTicker24hBaselineCache.get(safeSymbol);
+  if (cached?.openTime === baselineOpenTime && now < cached.expiresAt) {
+    return cached.baselinePrice === null
+      ? null
+      : { baselinePrice: cached.baselinePrice, baselineOpenTime: cached.openTime };
+  }
+
+  const cacheRecord = (baselinePrice) => {
+    futuresTicker24hBaselineCache.set(safeSymbol, {
+      openTime: baselineOpenTime,
+      baselinePrice,
+      expiresAt: now + futuresTicker24hCacheTtlMs()
+    });
+    return baselinePrice === null ? null : { baselinePrice, baselineOpenTime };
+  };
+
+  try {
+    const localBaseline = await selectPriceChange24hBaselineSnapshot(safeSymbol, now);
+    if (Number.isFinite(Number(localBaseline?.baselinePrice)) && Number(localBaseline.baselinePrice) > 0) {
+      return cacheRecord(Number(localBaseline.baselinePrice));
+    }
+  } catch {
+    // The 24h ticker helper is used in tests and early startup before the DB is always ready.
+  }
+
+  return cacheRecord(null);
+}
+
+async function calculateFuturesTicker24hChangeWithBaseline(symbol, lastPrice, now = Date.now()) {
+  const currentPrice = Number(lastPrice);
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return null;
+  const baseline = await fetchFuturesTicker24hBaseline(symbol, now);
+  const baselinePrice = Number(baseline?.baselinePrice);
+  if (!Number.isFinite(baselinePrice) || baselinePrice <= 0) return null;
+  return {
+    priceChange24hPct: roundPercent(((currentPrice - baselinePrice) / baselinePrice) * 100),
+    baselinePrice,
+    baselineOpenTime: baseline.baselineOpenTime
+  };
+}
+
+export async function calculateFuturesTicker24hChangeFromLocalKline(symbol, lastPrice, now = Date.now()) {
+  return calculateFuturesTicker24hChangeWithBaseline(symbol, lastPrice, now);
+}
+
+function attachLocalPriceChange(ticker, localChange) {
+  const calculatedPercent = finiteNumber(localChange?.priceChange24hPct);
+  return {
+    ...ticker,
+    priceChange24hPct: calculatedPercent
+  };
+}
+
+async function withLocal24hPriceChange(ticker, now = Date.now()) {
+  if (!ticker) return ticker;
+  const localChange = await calculateFuturesTicker24hChangeFromLocalKline(ticker.symbol, ticker.lastPrice, now);
+  return attachLocalPriceChange(ticker, localChange);
 }
 
 export async function fetchFuturesTicker24hr(symbol) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   if (!safeSymbol) throw new Error("symbol is required for 24h ticker");
   const cached = futuresTicker24hCache.tickers.get(safeSymbol) ?? null;
-  if (cached && Date.now() < futuresTicker24hCache.expiresAt) return cached;
+  if (cached && Date.now() < futuresTicker24hCache.expiresAt) {
+    const withLocalChange = await withLocal24hPriceChange(cached);
+    futuresTicker24hCache.tickers.set(safeSymbol, withLocalChange);
+    return withLocalChange;
+  }
 
-  const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/ticker/24hr`);
+  const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/premiumIndex`);
   url.searchParams.set("symbol", safeSymbol);
   try {
-    const item = await fetchJson(url.toString(), `${safeSymbol} 24h ticker`, {
+    const item = await fetchJson(url.toString(), `${safeSymbol} current price`, {
       weight: 1,
       retries: Math.min(1, config.binance.requestRetries),
       timeoutMs: Math.min(config.binance.requestTimeoutMs, 5000)
     });
-    const normalized = normalizeFuturesTicker24hr(item);
+    const normalized = await withLocal24hPriceChange(normalizeFuturesTicker24hr(item));
     if (!normalized) throw new Error(`${safeSymbol} 24h ticker returned invalid payload`);
     futuresTicker24hCache.tickers.set(safeSymbol, normalized);
     futuresTicker24hCache.expiresAt = Date.now() + futuresTicker24hCacheTtlMs();
@@ -427,8 +594,8 @@ export async function fetchFuturesTicker24hrMap(symbols = []) {
   const now = Date.now();
   if (now >= futuresTicker24hCache.expiresAt) {
     try {
-      const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/ticker/24hr`, "Binance 24h tickers", {
-        weight: 40,
+      const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/premiumIndex`, "Binance current prices", {
+        weight: 10,
         retries: Math.min(1, config.binance.requestRetries),
         timeoutMs: Math.min(config.binance.requestTimeoutMs, 5000)
       });
@@ -452,6 +619,14 @@ export async function fetchFuturesTicker24hrMap(symbols = []) {
       futuresTicker24hCache.expiresAt = now + FUTURES_TICKER_24H_RETRY_MS;
     }
   }
+
+  await Promise.all(
+    safeSymbols.map(async (symbol) => {
+      const ticker = futuresTicker24hCache.tickers.get(symbol);
+      if (!ticker) return;
+      futuresTicker24hCache.tickers.set(symbol, await withLocal24hPriceChange(ticker));
+    })
+  );
 
   return new Map(safeSymbols.map((symbol) => [symbol, futuresTicker24hCache.tickers.get(symbol) ?? null]));
 }

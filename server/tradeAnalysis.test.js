@@ -34,11 +34,27 @@ test("Binance transfers stay visible but do not count toward PnL summaries", asy
   const originalFetch = globalThis.fetch;
   const start = Date.UTC(2026, 0, 1, 0, 0, 0);
   const end = start + 60_000;
+  let positionFundingServed = false;
 
   try {
     globalThis.fetch = async (url) => {
       const parsed = new URL(url);
       if (parsed.pathname === "/fapi/v1/income") {
+        if (parsed.searchParams.get("incomeType") === "FUNDING_FEE") {
+          if (positionFundingServed) return response([]);
+          positionFundingServed = true;
+          return response([
+            {
+              incomeType: "FUNDING_FEE",
+              income: "2.00000000",
+              asset: "USDT",
+              symbol: "BTCUSDT",
+              time: start + 3000,
+              info: "funding",
+              tranId: "position-funding-1"
+            }
+          ]);
+        }
         return response([
           {
             incomeType: "TRANSFER",
@@ -120,7 +136,79 @@ test("Binance transfers stay visible but do not count toward PnL summaries", asy
     assert.equal(currentPosition.type, "OPEN_POSITION");
     assert.equal(currentPosition.pnlIncluded, false);
     assert.equal(currentPosition.unrealizedPnl, 2.5);
+    assert.equal(currentPosition.fundingRate, null);
+    assert.equal(currentPosition.funding, 2);
+    assert.equal(analysis.positions[0].settledFunding, 2);
     assert.equal(analysis.positionSummary.unrealizedPnl, 2.5);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("current Binance positions fall back to visible history funding", async () => {
+  const originalFetch = globalThis.fetch;
+  const start = Date.UTC(2026, 0, 1, 2, 0, 0);
+  const end = start + 60_000;
+
+  try {
+    globalThis.fetch = async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname === "/fapi/v1/income") {
+        if (parsed.searchParams.get("incomeType") === "FUNDING_FEE") return response([]);
+        return response([
+          {
+            incomeType: "FUNDING_FEE",
+            income: "3.14000000",
+            asset: "USDT",
+            symbol: "GWEIUSDT",
+            time: start + 3000,
+            info: "funding",
+            tranId: "gwei-funding-1"
+          },
+          {
+            incomeType: "COMMISSION",
+            income: "-0.58000000",
+            asset: "USDT",
+            symbol: "GWEIUSDT",
+            time: start + 4000,
+            info: "fee",
+            tranId: "gwei-fee-1"
+          }
+        ]);
+      }
+      if (parsed.pathname === "/fapi/v3/positionRisk") {
+        return response([
+          {
+            symbol: "GWEIUSDT",
+            positionAmt: "8369",
+            positionSide: "BOTH",
+            entryPrice: "0.139171",
+            markPrice: "0.1347",
+            notional: "1127.30",
+            unRealizedProfit: "-37.42",
+            leverage: "3",
+            liquidationPrice: "0.09",
+            marginType: "cross",
+            updateTime: start + 5000
+          }
+        ]);
+      }
+      if (parsed.pathname === "/fapi/v1/userTrades") return response([]);
+      if (parsed.pathname === "/fapi/v1/fundingRate") return response([]);
+      throw new Error(`unexpected fetch ${url}`);
+    };
+
+    const analysis = await getTradeAnalysis(testConfig(), {
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString()
+    });
+
+    assert.equal(analysis.summary.bySymbol[0].symbol, "GWEIUSDT");
+    assert.equal(analysis.summary.bySymbol[0].funding, 3.14);
+    assert.equal(analysis.positions[0].settledFunding, 3.14);
+    assert.equal(analysis.positions[0].settledFundingSource, "history-override");
+    const currentPosition = analysis.events.find((event) => event.rawType === "CURRENT_POSITION");
+    assert.equal(currentPosition.funding, 3.14);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -457,10 +545,11 @@ test("Hyperliquid positions include configured HIP-3 perp dexs", async () => {
   }
 });
 
-test("position prefetch reads current positions without scanning trade history", async () => {
+test("position prefetch reads current positions with settled funding", async () => {
   const originalFetch = globalThis.fetch;
   const start = Date.UTC(2026, 0, 6, 0, 0, 0);
   const paths = [];
+  let solFundingServed = false;
 
   try {
     globalThis.fetch = async (url) => {
@@ -483,16 +572,31 @@ test("position prefetch reads current positions without scanning trade history",
           }
         ]);
       }
+      if (parsed.pathname === "/fapi/v1/income" && parsed.searchParams.get("incomeType") === "FUNDING_FEE") {
+        if (solFundingServed) return response([]);
+        solFundingServed = true;
+        return response([
+          {
+            incomeType: "FUNDING_FEE",
+            income: "3.5",
+            asset: "USDT",
+            symbol: "SOLUSDT",
+            time: start + 1000,
+            tranId: "sol-funding"
+          }
+        ]);
+      }
       throw new Error(`unexpected fetch ${url}`);
     };
 
     const payload = await refreshTradePositionCache(testConfig());
 
-    assert.deepEqual(paths, ["/fapi/v3/positionRisk"]);
+    assert.deepEqual(paths, ["/fapi/v3/positionRisk", "/fapi/v1/income", "/fapi/v1/income", "/fapi/v1/income"]);
     assert.equal(payload.positionSummary.count, 1);
     assert.equal(payload.positions[0].symbol, "SOLUSDT");
     assert.equal(payload.positions[0].side, "short");
     assert.equal(payload.positions[0].unrealizedPnl, 10);
+    assert.equal(payload.positions[0].settledFunding, 3.5);
   } finally {
     globalThis.fetch = originalFetch;
   }
