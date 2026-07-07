@@ -27,6 +27,57 @@ export function priceChange24hBaselineOpenTime(now = Date.now()) {
   return Math.floor((Number(now) - DAY_MS) / PRICE_CHANGE_1M_INTERVAL_MS) * PRICE_CHANGE_1M_INTERVAL_MS;
 }
 
+function normalizeBaselineFallbackMinutes(value = config.priceChangeKline.baselineFallbackMinutes) {
+  const minutes = Math.floor(Number(value));
+  return Math.max(0, Math.min(10, Number.isFinite(minutes) ? minutes : 0));
+}
+
+export function priceChange24hBaselineLookupRange(
+  now = Date.now(),
+  fallbackMinutes = config.priceChangeKline.baselineFallbackMinutes
+) {
+  const baselineOpenTime = priceChange24hBaselineOpenTime(now);
+  const fallbackMs = normalizeBaselineFallbackMinutes(fallbackMinutes) * PRICE_CHANGE_1M_INTERVAL_MS;
+  return {
+    baselineOpenTime,
+    startTime: baselineOpenTime - fallbackMs,
+    endTime: baselineOpenTime + fallbackMs
+  };
+}
+
+function normalizePriceChangeBaselineSnapshot(row, targetBaselineOpenTime) {
+  const baselineOpenTime = Number(row?.openTime ?? row?.open_time ?? row?.baselineOpenTime);
+  const baselinePrice = Number(row?.openPrice ?? row?.open_price ?? row?.baselinePrice);
+  if (!Number.isFinite(baselineOpenTime) || !Number.isFinite(baselinePrice) || baselinePrice <= 0) return null;
+  return {
+    baselinePrice,
+    baselineOpenTime,
+    targetBaselineOpenTime,
+    baselineOffsetMs: baselineOpenTime - targetBaselineOpenTime
+  };
+}
+
+function isBetterBaselineSnapshot(candidate, current, targetBaselineOpenTime) {
+  if (!candidate) return false;
+  if (!current) return true;
+  const candidateDistance = Math.abs(candidate.baselineOpenTime - targetBaselineOpenTime);
+  const currentDistance = Math.abs(current.baselineOpenTime - targetBaselineOpenTime);
+  if (candidateDistance !== currentDistance) return candidateDistance < currentDistance;
+  const candidateIsNotAfterTarget = candidate.baselineOpenTime <= targetBaselineOpenTime;
+  const currentIsNotAfterTarget = current.baselineOpenTime <= targetBaselineOpenTime;
+  if (candidateIsNotAfterTarget !== currentIsNotAfterTarget) return candidateIsNotAfterTarget;
+  return candidate.baselineOpenTime < current.baselineOpenTime;
+}
+
+export function pickNearestPriceChange24hBaselineSnapshot(rows = [], targetBaselineOpenTime) {
+  let best = null;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const candidate = normalizePriceChangeBaselineSnapshot(row, targetBaselineOpenTime);
+    if (isBetterBaselineSnapshot(candidate, best, targetBaselineOpenTime)) best = candidate;
+  }
+  return best;
+}
+
 export async function listActivePriceChangeKlineTokens() {
   const [rows] = await getPool().query(
     `SELECT id, symbol, base_asset AS baseAsset, category_type AS categoryType, category_label AS categoryLabel
@@ -136,18 +187,41 @@ export async function listPriceChangeKlineGaps(symbol, startTime, endTime, limit
 export async function selectPriceChange24hBaselineSnapshot(symbol, now = Date.now()) {
   const safeSymbol = sanitizeDbSymbol(symbol);
   if (!safeSymbol) return null;
-  const baselineOpenTime = priceChange24hBaselineOpenTime(now);
+  const range = priceChange24hBaselineLookupRange(now);
   const [rows] = await getPool().query(
-    `SELECT open_price AS openPrice
+    `SELECT open_time AS openTime, open_price AS openPrice
      FROM price_change_1m_kline
-     WHERE symbol=:symbol AND open_time=:baselineOpenTime
-     LIMIT 1`,
-    { symbol: safeSymbol, baselineOpenTime }
+     WHERE symbol=:symbol
+       AND open_time>=:startTime
+       AND open_time<=:endTime`,
+    { symbol: safeSymbol, startTime: range.startTime, endTime: range.endTime }
   );
-  const price = Number(rows[0]?.openPrice);
-  return Number.isFinite(price) && price > 0
-    ? { baselinePrice: price, baselineOpenTime }
-    : null;
+  return pickNearestPriceChange24hBaselineSnapshot(rows, range.baselineOpenTime);
+}
+
+export async function selectPriceChange24hBaselineSnapshots(symbols = [], now = Date.now()) {
+  const safeSymbols = [...new Set(
+    (Array.isArray(symbols) ? symbols : [symbols])
+      .map((symbol) => sanitizeDbSymbol(symbol))
+      .filter(Boolean)
+  )];
+  if (!safeSymbols.length) return new Map();
+  const range = priceChange24hBaselineLookupRange(now);
+  const [rows] = await getPool().query(
+    `SELECT symbol, open_time AS openTime, open_price AS openPrice
+     FROM price_change_1m_kline
+     WHERE open_time>=:startTime
+       AND open_time<=:endTime
+       AND symbol IN (:symbols)`,
+    { startTime: range.startTime, endTime: range.endTime, symbols: safeSymbols }
+  );
+  const snapshots = new Map();
+  for (const row of rows) {
+    const symbol = sanitizeDbSymbol(row.symbol);
+    const candidate = normalizePriceChangeBaselineSnapshot(row, range.baselineOpenTime);
+    if (symbol && isBetterBaselineSnapshot(candidate, snapshots.get(symbol), range.baselineOpenTime)) snapshots.set(symbol, candidate);
+  }
+  return snapshots;
 }
 
 export async function selectPriceChange24hBaselinePrice(symbol, now = Date.now()) {

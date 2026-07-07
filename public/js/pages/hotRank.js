@@ -86,8 +86,9 @@ export function renderHotRank() {
 
   target.innerHTML = pageData
     .map((token) => {
-      const change = Number(token.priceChange24hPct ?? token.priceChange);
-      const changeClass = Number.isFinite(change) && change < 0 ? "down" : Number.isFinite(change) && change > 0 ? "up" : "";
+      const change = token.priceChange24hPct ?? token.priceChange;
+      const numericChange = change === null || change === undefined || change === "" ? null : Number(change);
+      const changeClass = Number.isFinite(numericChange) && numericChange < 0 ? "down" : Number.isFinite(numericChange) && numericChange > 0 ? "up" : "";
       const symbol = escapeHtml(token.symbol);
       return `
         <article class="heat-rank-row">

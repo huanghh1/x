@@ -203,7 +203,11 @@ export const config = {
     }),
     requestLimit: Math.max(100, Math.min(1000, numberEnv("PRICE_CHANGE_1M_REQUEST_LIMIT", 499))),
     tailRequestLimit: Math.max(2, Math.min(100, numberEnv("PRICE_CHANGE_1M_TAIL_REQUEST_LIMIT", 20))),
-    maxGapRepairPasses: Math.max(25, Math.min(1000, numberEnv("PRICE_CHANGE_1M_MAX_GAP_REPAIR_PASSES", 300)))
+    maxGapRepairPasses: Math.max(25, Math.min(1000, numberEnv("PRICE_CHANGE_1M_MAX_GAP_REPAIR_PASSES", 300))),
+    baselineFallbackMinutes: Math.max(
+      0,
+      Math.min(10, Math.floor(numberEnv("PRICE_CHANGE_1M_BASELINE_FALLBACK_MINUTES", 2)))
+    )
   },
   maintenance: {
     cleanupIntervalDays: numberEnv("KLINE_CLEANUP_INTERVAL_DAYS", 7),

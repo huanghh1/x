@@ -91,6 +91,7 @@ function signalProfileColor(sourceMask) {
 }
 
 function changeClass(value) {
+  if (value === null || value === undefined || value === "") return "";
   const number = Number(value);
   if (!Number.isFinite(number) || number === 0) return "";
   return number > 0 ? "up" : "down";
@@ -350,7 +351,9 @@ export function updateSignalPriceDom(symbol, price, eventTime = Date.now()) {
 
 export function updateSignalPriceChangeDom(symbol, priceChange24hPct) {
   const safeSymbol = String(symbol ?? "").toUpperCase();
-  const numericChange = Number(priceChange24hPct);
+  const numericChange = priceChange24hPct === null || priceChange24hPct === undefined || priceChange24hPct === ""
+    ? null
+    : Number(priceChange24hPct);
   if (!safeSymbol || !Number.isFinite(numericChange)) return;
   for (const row of state.signals) {
     if (String(row.symbol ?? "").toUpperCase() !== safeSymbol) continue;

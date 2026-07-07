@@ -80,6 +80,7 @@ export {
   priceChangeKlineTarget,
   selectPriceChange24hBaselinePrice,
   selectPriceChange24hBaselineSnapshot,
+  selectPriceChange24hBaselineSnapshots,
   upsertPriceChangeKlinePage
 } from "./db/priceChangeKlineRepository.js";
 export {

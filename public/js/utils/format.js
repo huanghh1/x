@@ -36,6 +36,7 @@ export function formatBytes(value) {
 }
 
 export function formatPercent(value) {
+  if (value === null || value === undefined || value === "") return "--";
   const number = Number(value);
   if (!Number.isFinite(number)) return "--";
   return `${number >= 0 ? "+" : ""}${number.toLocaleString("en-US", { maximumFractionDigits: 2 })}%`;

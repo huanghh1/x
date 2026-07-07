@@ -11,6 +11,12 @@ const lastRealtimePriceDomUpdatedAt = new Map();
 let realtimePriceDomFlushTimer = null;
 let realtimePriceDomFlushDueAt = 0;
 
+function finiteOptionalNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function clearRealtimePriceDomFlushTimer() {
   if (!realtimePriceDomFlushTimer) return;
   clearTimeout(realtimePriceDomFlushTimer);
@@ -137,8 +143,8 @@ function updateMarketPriceDom(symbol, price, eventTime = Date.now()) {
 }
 
 function updatePriceChangeDom(selector, value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return;
+  const number = finiteOptionalNumber(value);
+  if (number === null) return;
   for (const element of document.querySelectorAll(selector)) {
     element.textContent = formatPercent(number);
     element.classList.toggle("up", number > 0);
@@ -148,8 +154,8 @@ function updatePriceChangeDom(selector, value) {
 
 function updateMarketPriceChangeDom(symbol, priceChange24hPct) {
   const safeSymbol = String(symbol ?? "").toUpperCase();
-  const number = Number(priceChange24hPct);
-  if (!safeSymbol || !Number.isFinite(number)) return;
+  const number = finiteOptionalNumber(priceChange24hPct);
+  if (!safeSymbol || number === null) return;
   for (const item of [...state.fundingTokens, ...state.ioData, ...state.ioRealtimeRows]) {
     if (String(item.symbol ?? "").toUpperCase() === safeSymbol) item.priceChange24hPct = number;
   }
@@ -159,8 +165,8 @@ function updateMarketPriceChangeDom(symbol, priceChange24hPct) {
 
 function updateWatchPriceChangeDom(symbol, priceChange24hPct) {
   const safeSymbol = String(symbol ?? "").toUpperCase();
-  const number = Number(priceChange24hPct);
-  if (!safeSymbol || !Number.isFinite(number)) return;
+  const number = finiteOptionalNumber(priceChange24hPct);
+  if (!safeSymbol || number === null) return;
   for (const item of state.watchlist) {
     if (String(item.symbol ?? "").toUpperCase() === safeSymbol) item.priceChange24hPct = number;
   }
@@ -211,12 +217,12 @@ function updateRealtimePrice(symbol, price, eventTime, priceChange24hPct = null)
   const numericPrice = Number(price);
   if (!safeSymbol || !Number.isFinite(numericPrice)) return;
   const existing = queuedRealtimePriceUpdates.get(safeSymbol);
-  const numericChange = Number(priceChange24hPct);
+  const numericChange = finiteOptionalNumber(priceChange24hPct);
   queuedRealtimePriceUpdates.set(safeSymbol, {
     symbol: safeSymbol,
     price: numericPrice,
     eventTime,
-    priceChange24hPct: Number.isFinite(numericChange) ? numericChange : existing?.priceChange24hPct ?? null
+    priceChange24hPct: numericChange ?? existing?.priceChange24hPct ?? null
   });
   const lastUpdatedAt = lastRealtimePriceDomUpdatedAt.get(safeSymbol) ?? 0;
   const elapsedMs = Date.now() - lastUpdatedAt;

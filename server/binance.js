@@ -1,5 +1,8 @@
 import { config } from "./config.js";
-import { selectPriceChange24hBaselineSnapshot } from "./db/priceChangeKlineRepository.js";
+import {
+  selectPriceChange24hBaselineSnapshot,
+  selectPriceChange24hBaselineSnapshots
+} from "./db/priceChangeKlineRepository.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -458,6 +461,14 @@ function hasFuturesTicker24hCache() {
   return futuresTicker24hCache.tickers instanceof Map && futuresTicker24hCache.tickers.size > 0;
 }
 
+function normalizeFuturesSymbols(symbols = []) {
+  return [...new Set(
+    (Array.isArray(symbols) ? symbols : [symbols])
+      .map((symbol) => String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""))
+      .filter(Boolean)
+  )];
+}
+
 function normalizeFuturesTicker24hr(item) {
   const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const lastPrice = Number(item?.markPrice ?? item?.lastPrice);
@@ -478,6 +489,7 @@ export function clearFuturesTicker24hrCache() {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -487,43 +499,107 @@ function roundPercent(value) {
   return Number.isFinite(number) ? Number(number.toFixed(8)) : null;
 }
 
+function futuresTicker24hBaselineOpenTime(now = Date.now()) {
+  return Math.floor((Number(now) - DAY_MS) / MINUTE_MS) * MINUTE_MS;
+}
+
+function futuresTicker24hBaselineCacheExpiresAt(now = Date.now(), baselinePrice = null) {
+  const safeNow = Number(now);
+  const nextBaselineOpenTime = Math.floor(safeNow / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
+  if (Number.isFinite(Number(baselinePrice)) && Number(baselinePrice) > 0) return nextBaselineOpenTime;
+  return Math.min(nextBaselineOpenTime, safeNow + FUTURES_TICKER_24H_RETRY_MS);
+}
+
+function getCachedFuturesTicker24hBaseline(symbol, baselineOpenTime, now = Date.now()) {
+  const cached = futuresTicker24hBaselineCache.get(symbol);
+  if (cached?.openTime !== baselineOpenTime || now >= cached.expiresAt) return undefined;
+  return cached.baselinePrice === null
+    ? null
+    : {
+        baselinePrice: cached.baselinePrice,
+        baselineOpenTime: cached.baselineOpenTime ?? cached.openTime,
+        targetBaselineOpenTime: cached.openTime,
+        baselineOffsetMs: (cached.baselineOpenTime ?? cached.openTime) - cached.openTime
+      };
+}
+
+function cacheFuturesTicker24hBaseline(symbol, targetBaselineOpenTime, baseline, now = Date.now()) {
+  const price = finiteNumber(baseline?.baselinePrice ?? baseline);
+  const safePrice = price !== null && price > 0 ? price : null;
+  const actualBaselineOpenTime = Number(baseline?.baselineOpenTime);
+  const safeBaselineOpenTime = Number.isFinite(actualBaselineOpenTime) ? actualBaselineOpenTime : targetBaselineOpenTime;
+  futuresTicker24hBaselineCache.set(symbol, {
+    openTime: targetBaselineOpenTime,
+    baselineOpenTime: safeBaselineOpenTime,
+    baselinePrice: safePrice,
+    expiresAt: futuresTicker24hBaselineCacheExpiresAt(now, safePrice)
+  });
+  return safePrice === null
+    ? null
+    : {
+        baselinePrice: safePrice,
+        baselineOpenTime: safeBaselineOpenTime,
+        targetBaselineOpenTime,
+        baselineOffsetMs: safeBaselineOpenTime - targetBaselineOpenTime
+      };
+}
+
 async function fetchFuturesTicker24hBaseline(symbol, now = Date.now()) {
   const safeSymbol = String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   if (!safeSymbol) return null;
 
-  const baselineOpenTime = Math.floor((now - DAY_MS) / MINUTE_MS) * MINUTE_MS;
-  const cached = futuresTicker24hBaselineCache.get(safeSymbol);
-  if (cached?.openTime === baselineOpenTime && now < cached.expiresAt) {
-    return cached.baselinePrice === null
-      ? null
-      : { baselinePrice: cached.baselinePrice, baselineOpenTime: cached.openTime };
-  }
-
-  const cacheRecord = (baselinePrice) => {
-    futuresTicker24hBaselineCache.set(safeSymbol, {
-      openTime: baselineOpenTime,
-      baselinePrice,
-      expiresAt: now + futuresTicker24hCacheTtlMs()
-    });
-    return baselinePrice === null ? null : { baselinePrice, baselineOpenTime };
-  };
+  const baselineOpenTime = futuresTicker24hBaselineOpenTime(now);
+  const cached = getCachedFuturesTicker24hBaseline(safeSymbol, baselineOpenTime, now);
+  if (cached !== undefined) return cached;
 
   try {
     const localBaseline = await selectPriceChange24hBaselineSnapshot(safeSymbol, now);
     if (Number.isFinite(Number(localBaseline?.baselinePrice)) && Number(localBaseline.baselinePrice) > 0) {
-      return cacheRecord(Number(localBaseline.baselinePrice));
+      return cacheFuturesTicker24hBaseline(safeSymbol, baselineOpenTime, localBaseline, now);
     }
   } catch {
     // The 24h ticker helper is used in tests and early startup before the DB is always ready.
   }
 
-  return cacheRecord(null);
+  return cacheFuturesTicker24hBaseline(safeSymbol, baselineOpenTime, null, now);
 }
 
-async function calculateFuturesTicker24hChangeWithBaseline(symbol, lastPrice, now = Date.now()) {
+async function fetchFuturesTicker24hBaselineMap(symbols = [], now = Date.now()) {
+  const safeSymbols = normalizeFuturesSymbols(symbols);
+  const baselines = new Map();
+  if (!safeSymbols.length) return baselines;
+
+  const baselineOpenTime = futuresTicker24hBaselineOpenTime(now);
+  const missingSymbols = [];
+  for (const symbol of safeSymbols) {
+    const cached = getCachedFuturesTicker24hBaseline(symbol, baselineOpenTime, now);
+    if (cached !== undefined) {
+      baselines.set(symbol, cached);
+    } else {
+      missingSymbols.push(symbol);
+    }
+  }
+  if (!missingSymbols.length) return baselines;
+
+  let localBaselines = new Map();
+  try {
+    localBaselines = await selectPriceChange24hBaselineSnapshots(missingSymbols, now);
+  } catch {
+    // Tests and startup can run before the DB is reachable; cache a short miss and retry soon.
+  }
+  for (const symbol of missingSymbols) {
+    const localBaseline = localBaselines.get(symbol) ?? null;
+    baselines.set(
+      symbol,
+      cacheFuturesTicker24hBaseline(symbol, baselineOpenTime, localBaseline, now)
+    );
+  }
+  return baselines;
+}
+
+function calculateFuturesTicker24hChangeFromBaseline(lastPrice, baseline) {
   const currentPrice = Number(lastPrice);
   if (!Number.isFinite(currentPrice) || currentPrice <= 0) return null;
-  const baseline = await fetchFuturesTicker24hBaseline(symbol, now);
   const baselinePrice = Number(baseline?.baselinePrice);
   if (!Number.isFinite(baselinePrice) || baselinePrice <= 0) return null;
   return {
@@ -533,15 +609,22 @@ async function calculateFuturesTicker24hChangeWithBaseline(symbol, lastPrice, no
   };
 }
 
+async function calculateFuturesTicker24hChangeWithBaseline(symbol, lastPrice, now = Date.now()) {
+  const baseline = await fetchFuturesTicker24hBaseline(symbol, now);
+  return calculateFuturesTicker24hChangeFromBaseline(lastPrice, baseline);
+}
+
 export async function calculateFuturesTicker24hChangeFromLocalKline(symbol, lastPrice, now = Date.now()) {
   return calculateFuturesTicker24hChangeWithBaseline(symbol, lastPrice, now);
 }
 
 function attachLocalPriceChange(ticker, localChange) {
+  if (!ticker) return ticker;
   const calculatedPercent = finiteNumber(localChange?.priceChange24hPct);
+  const existingPercent = finiteNumber(ticker?.priceChange24hPct);
   return {
     ...ticker,
-    priceChange24hPct: calculatedPercent
+    priceChange24hPct: calculatedPercent ?? existingPercent
   };
 }
 
@@ -549,6 +632,22 @@ async function withLocal24hPriceChange(ticker, now = Date.now()) {
   if (!ticker) return ticker;
   const localChange = await calculateFuturesTicker24hChangeFromLocalKline(ticker.symbol, ticker.lastPrice, now);
   return attachLocalPriceChange(ticker, localChange);
+}
+
+async function attachLocal24hPriceChangeMap(tickers, symbols = [], now = Date.now()) {
+  if (!(tickers instanceof Map) || !tickers.size) return tickers;
+  const safeSymbols = normalizeFuturesSymbols(symbols);
+  if (!safeSymbols.length) return tickers;
+  const baselines = await fetchFuturesTicker24hBaselineMap(safeSymbols, now);
+  for (const symbol of safeSymbols) {
+    const ticker = tickers.get(symbol);
+    if (!ticker) continue;
+    tickers.set(
+      symbol,
+      attachLocalPriceChange(ticker, calculateFuturesTicker24hChangeFromBaseline(ticker.lastPrice, baselines.get(symbol)))
+    );
+  }
+  return tickers;
 }
 
 export async function fetchFuturesTicker24hr(symbol) {
@@ -569,11 +668,12 @@ export async function fetchFuturesTicker24hr(symbol) {
       retries: Math.min(1, config.binance.requestRetries),
       timeoutMs: Math.min(config.binance.requestTimeoutMs, 5000)
     });
-    const normalized = await withLocal24hPriceChange(normalizeFuturesTicker24hr(item));
-    if (!normalized) throw new Error(`${safeSymbol} 24h ticker returned invalid payload`);
-    futuresTicker24hCache.tickers.set(safeSymbol, normalized);
+    const normalized = attachLocalPriceChange(normalizeFuturesTicker24hr(item), cached);
+    const withLocalChange = await withLocal24hPriceChange(normalized);
+    if (!withLocalChange) throw new Error(`${safeSymbol} 24h ticker returned invalid payload`);
+    futuresTicker24hCache.tickers.set(safeSymbol, withLocalChange);
     futuresTicker24hCache.expiresAt = Date.now() + futuresTicker24hCacheTtlMs();
-    return normalized;
+    return withLocalChange;
   } catch (error) {
     if (cached) {
       futuresTicker24hCache.expiresAt = Date.now() + FUTURES_TICKER_24H_RETRY_MS;
@@ -584,16 +684,13 @@ export async function fetchFuturesTicker24hr(symbol) {
 }
 
 export async function fetchFuturesTicker24hrMap(symbols = []) {
-  const safeSymbols = [...new Set(
-    (Array.isArray(symbols) ? symbols : [symbols])
-      .map((symbol) => String(symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, ""))
-      .filter(Boolean)
-  )];
+  const safeSymbols = normalizeFuturesSymbols(symbols);
   if (!safeSymbols.length) return new Map();
 
   const now = Date.now();
   if (now >= futuresTicker24hCache.expiresAt) {
     try {
+      const previousTickers = futuresTicker24hCache.tickers;
       const data = await fetchJson(`${config.binance.futuresBaseUrl}/fapi/v1/premiumIndex`, "Binance current prices", {
         weight: 10,
         retries: Math.min(1, config.binance.requestRetries),
@@ -603,7 +700,9 @@ export async function fetchFuturesTicker24hrMap(symbols = []) {
       if (Array.isArray(data)) {
         for (const item of data) {
           const normalized = normalizeFuturesTicker24hr(item);
-          if (normalized) tickers.set(normalized.symbol, normalized);
+          if (normalized) {
+            tickers.set(normalized.symbol, attachLocalPriceChange(normalized, previousTickers.get(normalized.symbol)));
+          }
         }
       }
       if (!tickers.size && hasFuturesTicker24hCache()) {
@@ -620,13 +719,7 @@ export async function fetchFuturesTicker24hrMap(symbols = []) {
     }
   }
 
-  await Promise.all(
-    safeSymbols.map(async (symbol) => {
-      const ticker = futuresTicker24hCache.tickers.get(symbol);
-      if (!ticker) return;
-      futuresTicker24hCache.tickers.set(symbol, await withLocal24hPriceChange(ticker));
-    })
-  );
+  await attachLocal24hPriceChangeMap(futuresTicker24hCache.tickers, safeSymbols, now);
 
   return new Map(safeSymbols.map((symbol) => [symbol, futuresTicker24hCache.tickers.get(symbol) ?? null]));
 }
