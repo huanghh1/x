@@ -4,6 +4,7 @@ import { chartElementId, loadAndRenderChart } from "../chart/klineChart.js";
 import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
 import { clamp, cssEscape, formatNumber, formatPercent, formatTime, oiChangeSummary } from "../utils/format.js";
+import { sortSignalRowsByPriceChange } from "../utils/signalSort.js";
 import { bindCopyButtons, searchButtons } from "../ui/symbolActions.js";
 
 let deps = {
@@ -101,6 +102,31 @@ function clampPage(totalPages) {
   state.page = clamp(state.page, 1, Math.max(1, totalPages));
 }
 
+function applySignalPriceChangeSort() {
+  if (!state.signalPriceChangeSort || !state.signalRealtimeRows.length) return;
+  const sortedRows = sortSignalRowsByPriceChange(state.signalRealtimeRows, state.signalPriceChangeSort);
+  const start = (state.page - 1) * state.pageSize;
+  state.signals = sortedRows.slice(start, start + state.pageSize);
+}
+
+function updateSignalPriceChangeSortControl() {
+  const direction = state.signalPriceChangeSort;
+  const header = $("#signalPriceChangeSortHeader");
+  const button = $("#signalPriceChangeSortBtn");
+  const icon = button?.querySelector(".table-sort-icon");
+  if (header) header.setAttribute("aria-sort", direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none");
+  if (!button) return;
+  button.classList.toggle("is-active", Boolean(direction));
+  button.setAttribute(
+    "aria-label",
+    direction === "desc" ? "按 24 小时涨跌从低到高排序" : "按 24 小时涨跌从高到低排序"
+  );
+  button.title = direction === "desc" ? "当前从高到低，点击切换为从低到高" : direction === "asc"
+    ? "当前从低到高，点击切换为从高到低"
+    : "点击按 24 小时涨跌从高到低排序";
+  if (icon) icon.textContent = direction === "desc" ? "↓" : direction === "asc" ? "↑" : "↕";
+}
+
 function renderPagination(totalRows, totalPages) {
   const start = totalRows === 0 ? 0 : (state.page - 1) * state.pageSize + 1;
   const end = Math.min(totalRows, state.page * state.pageSize);
@@ -115,6 +141,7 @@ function renderPagination(totalRows, totalPages) {
 export function renderSignals() {
   const target = $("#signalRows");
   if (!target) return;
+  updateSignalPriceChangeSortControl();
   const rows = state.signals;
   const totalPages = Math.ceil(state.totalSignals / state.pageSize);
   clampPage(totalPages);
@@ -291,6 +318,7 @@ export async function loadSignalRealtimeRows() {
   }
   if (requestId !== state.signalRealtimeRequestId) return;
   state.signalRealtimeRows = rows;
+  applySignalPriceChangeSort();
   deps.updateWatchRealtime();
 }
 
@@ -331,7 +359,7 @@ export function updateSignalPriceDom(symbol, price, eventTime = Date.now()) {
   const safeSymbol = String(symbol ?? "").toUpperCase();
   const numericPrice = Number(price);
   if (!safeSymbol || !Number.isFinite(numericPrice)) return;
-  for (const row of state.signals) {
+  for (const row of [...state.signals, ...state.signalRealtimeRows]) {
     if (String(row.symbol ?? "").toUpperCase() !== safeSymbol) continue;
     row.currentPrice = numericPrice;
     row.currentCloseTime = eventTime;
@@ -355,7 +383,7 @@ export function updateSignalPriceChangeDom(symbol, priceChange24hPct) {
     ? null
     : Number(priceChange24hPct);
   if (!safeSymbol || !Number.isFinite(numericChange)) return;
-  for (const row of state.signals) {
+  for (const row of [...state.signals, ...state.signalRealtimeRows]) {
     if (String(row.symbol ?? "").toUpperCase() !== safeSymbol) continue;
     row.priceChange24hPct = numericChange;
     if (Array.isArray(row.intervalDetails)) {
@@ -371,6 +399,14 @@ export function updateSignalPriceChangeDom(symbol, priceChange24hPct) {
 }
 
 export function bindSignalControls({ refreshAll } = {}) {
+  $("#signalPriceChangeSortBtn")?.addEventListener("click", () => {
+    state.signalPriceChangeSort = state.signalPriceChangeSort === "desc" ? "asc" : "desc";
+    state.page = 1;
+    state.expandedKey = null;
+    applySignalPriceChangeSort();
+    renderSignals();
+  });
+
   for (const input of document.querySelectorAll(".filter-menu input[data-filter]")) {
     input.addEventListener("change", () => setFilter(input.dataset.filter, input.dataset.value, input.checked));
   }

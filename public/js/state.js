@@ -14,6 +14,7 @@ export const state = {
   totalSignals: 0,
   page: 1,
   pageSize: 20,
+  signalPriceChangeSort: null,
   expandedKey: null,
   signalChartIntervals: new Map(),
   chartCache: new Map(),

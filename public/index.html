@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260705-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260709-1" />
   </head>
   <body>
     <header class="app-nav">
@@ -151,7 +151,18 @@
                     <tr>
                       <th>交易对</th>
                       <th>分类</th>
-                      <th>24h</th>
+                      <th id="signalPriceChangeSortHeader" aria-sort="none">
+                        <button
+                          id="signalPriceChangeSortBtn"
+                          class="table-sort-button"
+                          type="button"
+                          aria-label="按 24 小时涨跌从高到低排序"
+                          title="点击按 24 小时涨跌排序"
+                        >
+                          <span>24h</span>
+                          <span class="table-sort-icon" aria-hidden="true">↕</span>
+                        </button>
+                      </th>
                       <th>触发周期</th>
                       <th>组合信号</th>
                       <th>最高等级</th>
@@ -616,6 +627,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260705-2" type="module"></script>
+    <script src="/app.js?v=20260709-1" type="module"></script>
   </body>
 </html>
