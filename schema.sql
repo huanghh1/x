@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS token_list (
   market_cap_updated_at DATETIME(3) NULL,
   is_active TINYINT(1) NOT NULL DEFAULT 1,
   inactive_since DATETIME(3) NULL,
+  universe_missing_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
   fetch_status ENUM('pending','fetching','partial','completed','failed') NOT NULL DEFAULT 'pending',
   current_interval VARCHAR(8) NULL,
   fetched_interval_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -292,7 +293,6 @@ CREATE TABLE IF NOT EXISTS open_interest_sample (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uk_oi_sample_symbol_time (symbol, observed_at),
-  KEY idx_oi_sample_symbol_observed (symbol, observed_at),
   KEY idx_oi_sample_observed (observed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

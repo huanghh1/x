@@ -84,17 +84,40 @@ export async function upsertTokens(tokens) {
   const symbols = tokens.map((token) => token.symbol);
   if (symbols.length > 0) {
     await getPool().query(
-      "UPDATE token_list SET is_active=1, inactive_since=NULL WHERE symbol IN (?)",
+      "UPDATE token_list SET is_active=1, inactive_since=NULL, universe_missing_count=0 WHERE symbol IN (?)",
+      [symbols]
+    );
+    await getPool().query(
+      `UPDATE token_list
+       SET universe_missing_count=LEAST(255, universe_missing_count+1)
+       WHERE symbol NOT IN (?) AND is_active=1`,
       [symbols]
     );
     await getPool().query(
       `UPDATE token_list
        SET is_active=0, inactive_since=COALESCE(inactive_since, NOW(3))
-       WHERE symbol NOT IN (?) AND is_active=1`,
+       WHERE symbol NOT IN (?)
+         AND is_active=1
+         AND universe_missing_count>=2`,
       [symbols]
     );
   }
   return rows.length;
+}
+
+export async function getTokenUniverseStats() {
+  const [rows] = await getPool().query(
+    `SELECT COUNT(*) AS total,
+      SUM(category_type='A') AS categoryA,
+      SUM(category_type='B') AS categoryB
+     FROM token_list
+     WHERE is_active=1`
+  );
+  return {
+    total: Number(rows[0]?.total ?? 0),
+    categoryA: Number(rows[0]?.categoryA ?? 0),
+    categoryB: Number(rows[0]?.categoryB ?? 0)
+  };
 }
 
 export async function queueActiveTokensForKlineAudit(symbols = []) {
@@ -262,34 +285,67 @@ export async function getKlineAuditReport(retentionLimits = config.crawler.reten
   };
 }
 
-export async function cleanupInactiveTokenKlines(retentionDays = 7) {
+export async function cleanupInactiveTokens(retentionDays = 7) {
   const safeDays = Math.max(1, Math.floor(Number(retentionDays) || 7));
-  const [countRows] = await getPool().query(
-    `SELECT COUNT(*) AS rowCount, COUNT(DISTINCT token_id) AS tokenCount
-     FROM kline_cache
-     WHERE token_id IN (
-       SELECT id FROM token_list
+  const connection = await getPool().getConnection();
+  try {
+    await connection.beginTransaction();
+    const [tokens] = await connection.query(
+      `SELECT id, symbol
+       FROM token_list
        WHERE is_active=0
          AND inactive_since IS NOT NULL
          AND inactive_since < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)
-     )`,
-    { retentionDays: safeDays }
-  );
-  const [result] = await getPool().query(
-    `DELETE FROM kline_cache
-     WHERE token_id IN (
-       SELECT id FROM token_list
-       WHERE is_active=0
-         AND inactive_since IS NOT NULL
-         AND inactive_since < DATE_SUB(NOW(3), INTERVAL :retentionDays DAY)
-     )`,
-    { retentionDays: safeDays }
-  );
-  return {
-    retentionDays: safeDays,
-    tokenCount: Number(countRows[0]?.tokenCount ?? 0),
-    deletedRows: Number(result.affectedRows ?? 0)
-  };
+       FOR UPDATE`,
+      { retentionDays: safeDays }
+    );
+    if (!tokens.length) {
+      await connection.commit();
+      return { retentionDays: safeDays, tokenCount: 0, deletedRows: 0, deletedByTable: {} };
+    }
+
+    const tokenIds = tokens.map((token) => token.id);
+    const symbols = tokens.map((token) => token.symbol);
+    const deletedByTable = {};
+    for (const tableName of [
+      "kline_availability",
+      "hot_ma_signal_alert",
+      "multi_cycle_history",
+      "open_interest_monitor",
+      "open_interest_sample",
+      "funding_interval_state"
+    ]) {
+      const [result] = await connection.query(`DELETE FROM ${tableName} WHERE symbol IN (?)`, [symbols]);
+      deletedByTable[tableName] = Number(result.affectedRows ?? 0);
+    }
+    const [unlockResult] = await connection.query(
+      `DELETE FROM token_unlock_cache
+       WHERE symbol IN (?)
+         AND symbol NOT IN (SELECT symbol FROM watchlist)`,
+      [symbols]
+    );
+    deletedByTable.token_unlock_cache = Number(unlockResult.affectedRows ?? 0);
+
+    const [klineCountRows] = await connection.query(
+      "SELECT COUNT(*) AS rowCount FROM kline_cache WHERE token_id IN (?)",
+      [tokenIds]
+    );
+    const [tokenResult] = await connection.query("DELETE FROM token_list WHERE id IN (?)", [tokenIds]);
+    deletedByTable.token_list = Number(tokenResult.affectedRows ?? 0);
+    const deletedRows = Number(klineCountRows[0]?.rowCount ?? 0);
+    await connection.commit();
+    return {
+      retentionDays: safeDays,
+      tokenCount: tokens.length,
+      deletedRows,
+      deletedByTable
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 export async function countActiveTokens() {

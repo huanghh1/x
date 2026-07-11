@@ -325,21 +325,6 @@ export async function listOneHourFundingIntervals() {
   });
 }
 
-export async function listTopFundingRealtimeTokens(limit = 5) {
-  const safeLimit = Math.max(1, Math.min(20, Number(limit) || 5));
-  const [rows] = await getPool().query(
-    `SELECT t.*
-     FROM funding_interval_state f
-     JOIN token_list t ON t.symbol=f.symbol AND t.is_active=1
-     WHERE f.funding_interval_hours=1
-       AND f.source_present=1
-     ORDER BY COALESCE(f.last_changed_at, f.last_seen_at) DESC, f.symbol
-     LIMIT :limit`,
-    { limit: safeLimit }
-  );
-  return rows;
-}
-
 export async function listFundingRealtimeTokens() {
   const [rows] = await getPool().query(
     `SELECT t.*

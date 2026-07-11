@@ -65,6 +65,7 @@ const TABLE_SQL = [
     market_cap_updated_at DATETIME(3) NULL,
     is_active TINYINT(1) NOT NULL DEFAULT 1,
     inactive_since DATETIME(3) NULL,
+    universe_missing_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
     fetch_status ENUM('pending','fetching','partial','completed','failed') NOT NULL DEFAULT 'pending',
     current_interval VARCHAR(8) NULL,
     fetched_interval_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -324,7 +325,6 @@ const TABLE_SQL = [
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uk_oi_sample_symbol_time (symbol, observed_at),
-    KEY idx_oi_sample_symbol_observed (symbol, observed_at),
     KEY idx_oi_sample_observed (observed_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   `CREATE TABLE IF NOT EXISTS telegram_alert_queue (
@@ -474,6 +474,7 @@ async function initializeDatabase() {
       await ensureTokenListActiveColumn();
       await ensureTokenListMarketCapColumns();
       await ensureTokenListInactiveSinceColumn();
+      await ensureTokenListUniverseMissingCountColumn();
       await ensureWatchlistRealtimeColumns();
       await ensureFundingRateColumns();
       await ensureFundingAlertConfirmationColumns();
@@ -522,6 +523,13 @@ async function ensureTokenListInactiveSinceColumn() {
   );
 }
 
+async function ensureTokenListUniverseMissingCountColumn() {
+  if (await columnExists("token_list", "universe_missing_count")) return;
+  await pool.query(
+    "ALTER TABLE token_list ADD COLUMN universe_missing_count TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER inactive_since"
+  );
+}
+
 async function ensureWatchlistRealtimeColumns() {
   if (!(await columnExists("watchlist", "current_price"))) {
     await pool.query("ALTER TABLE watchlist ADD COLUMN current_price DECIMAL(32,12) NULL AFTER alert_enabled");
@@ -559,6 +567,7 @@ async function ensureFundingAlertConfirmationColumns() {
 }
 
 async function ensureTokenUnlockStatusSchema() {
+  const expectedType = "enum('available','none','undated','unconfigured','error')";
   const statusColumn = await getColumn("token_unlock_cache", "status");
   if (!statusColumn) {
     const afterSourceUrl = await columnExists("token_unlock_cache", "source_url") ? " AFTER source_url" : "";
@@ -567,7 +576,10 @@ async function ensureTokenUnlockStatusSchema() {
     );
   }
   const type = String((statusColumn ?? await getColumn("token_unlock_cache", "status"))?.columnType ?? "");
-  if (type && !type.includes("'undated'")) {
+  if (type && type.toLowerCase() !== expectedType) {
+    await pool.query(
+      "UPDATE token_unlock_cache SET status='unconfigured' WHERE status NOT IN ('available','none','undated','unconfigured','error')"
+    );
     await pool.query(
       "ALTER TABLE token_unlock_cache MODIFY status ENUM('available','none','undated','unconfigured','error') NOT NULL DEFAULT 'unconfigured'"
     );
@@ -624,7 +636,13 @@ async function ensureIndex(tableName, indexName, definition) {
   await pool.query(`ALTER TABLE ${escapeIdentifier(tableName)} ADD INDEX ${escapeIdentifier(indexName)} ${definition}`);
 }
 
+async function dropIndexIfExists(tableName, indexName) {
+  if (!(await indexExists(tableName, indexName))) return;
+  await pool.query(`ALTER TABLE ${escapeIdentifier(tableName)} DROP INDEX ${escapeIdentifier(indexName)}`);
+}
+
 async function ensurePerformanceIndexes() {
+  await dropIndexIfExists("open_interest_sample", "idx_oi_sample_symbol_observed");
   await ensureIndex("token_list", "idx_token_active_status", "(is_active, fetch_status, category_type, updated_at)");
   await ensureIndex("token_list", "idx_token_base_active", "(base_asset, is_active, updated_at)");
   await ensureIndex("token_list", "idx_token_inactive_since", "(is_active, inactive_since)");

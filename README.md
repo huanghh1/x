@@ -86,7 +86,7 @@ pm2 delete ecosystem.config.cjs
 - `public/js/pages/`：均线信号、热度排行、资金费率、OI 监控、关注池、交易分析、交易总结、运行日志页面模块。
 - `public/js/realtime/`：前端实时行情订阅和价格/K 线推送分发。
 
-样式由 `public/styles.css` 汇总拆分后的 `public/styles/` 文件：`base.css`、`workbench.css`、`theme.css`、`monitoring.css`、`trade-journal.css`。
+样式由 `public/styles.css` 汇总拆分后的 `public/styles/` 文件：`base.css`、`hot-rank.css`、`chart.css`、`runtime-logs.css`、`watchlist.css`、`workbench.css`、`theme.css`、`monitoring.css`、`trade-journal.css`。
 
 后端数据库入口仍是 `server/db.js`，具体仓库逻辑拆在 `server/db/`：连接和迁移在 `connection.js`，其余按业务分为 signal、K 线、热度、资金费率、OI、关注池、交易历史、交易总结和 Telegram 队列。运行时会自动创建数据库和迁移字段；`schema.sql` 与 `server/db/connection.js` 中的建表结构应保持一致。
 
@@ -94,7 +94,7 @@ pm2 delete ecosystem.config.cjs
 
 交易分析入口是 `server/tradeAnalysis.js`，交易所读取和归一化逻辑拆到 `server/tradeAnalysis/`：`binanceProvider.js`、`hyperliquidProvider.js` 和共享工具 `shared.js`。
 
-当前数据库共 18 张业务表：`token_list`、`kline_cache`、`kline_availability`、`signal_result`、`maintenance_state`、`hot_rank_seen`、`watchlist`、`hot_ma_signal_alert`、`multi_cycle_history`、`funding_interval_state`、`trade_event_history`、`open_interest_monitor`、`open_interest_sample`、`telegram_alert_queue`、`hot_rank_snapshot`、`token_unlock_cache`、`trade_journal`、`trade_journal_intraday_notes`。
+当前数据库共 19 张业务表：`token_list`、`kline_cache`、`kline_availability`、`price_change_1m_kline`、`signal_result`、`maintenance_state`、`hot_rank_seen`、`watchlist`、`hot_ma_signal_alert`、`multi_cycle_history`、`funding_interval_state`、`trade_event_history`、`open_interest_monitor`、`open_interest_sample`、`telegram_alert_queue`、`hot_rank_snapshot`、`token_unlock_cache`、`trade_journal`、`trade_journal_intraday_notes`。
 
 ## 核心规则
 
@@ -118,7 +118,8 @@ pm2 delete ecosystem.config.cjs
 - 同一代币的多个均线周期在页面合并为一行，达到 3 个周期时统一标记为“多周期信号”。
 - K 线接口返回数据库实际根数、目标根数和 MA200 可用状态；新上市代币不会伪造缺失历史。
 - 每天本机时间 0 点自动审计全部活跃代币的四周期 K 线，缺少历史、存在中间断层或最新数据落后时重新入队补齐。
-- 新上线代币会从 Binance 实际可提供的最早 K 线开始抓取；下架代币保留 7 天，期间恢复上线会继续使用原缓存，超过 7 天才删除 K 线。
+- 每 6 小时执行一次恢复性完整性审计，用于弥补服务中断期间错过的每日审计；可通过 `KLINE_RECOVERY_AUDIT_MS` 调整，最小 1 小时。
+- 新上线代币会从 Binance 实际可提供的最早 K 线开始抓取；代币连续两次未出现在可靠的目标快照中才标记为下架。下架代币保留 7 天，期间恢复上线会继续使用原缓存，超过 7 天会删除代币主记录、K 线、信号和关联监控状态；手工关注池记录不自动删除。
 
 ## 交易分析接入
 
@@ -172,7 +173,7 @@ TOKEN_ANALYSIS_CODEX_KLINE_LIMIT=360
 
 K 线清理频率默认每 7 天一次，可通过 `KLINE_CLEANUP_INTERVAL_DAYS` 调整；服务会每小时检查一次是否到期。
 
-热榜快照/出现记录、已完成 Telegram 队列、OI 当前快照、非关注池解锁缓存默认保留 7 天，可通过 `HOT_RANK_RETENTION_DAYS` 和 `IO_RETENTION_DAYS` 调整。
+热榜快照/出现记录、已完成 Telegram 队列、OI 当前快照、非关注池解锁缓存默认保留 7 天，可通过 `HOT_RANK_RETENTION_DAYS` 和 `IO_RETENTION_DAYS` 调整。过期业务数据默认每 6 小时分批清理，可通过 `EXPIRED_DATA_CLEANUP_INTERVAL_HOURS` 调整；该任务与体量更大的 K 线保留清理独立运行。
 
 PM2 的 `monitor-*-error.log` 和 `monitor-*-out.log` 默认每 4 小时截断一次。可通过 `RUNTIME_LOG_CLEANUP_INTERVAL_HOURS` 调整清理间隔，`RECORD_CLEANUP_INTERVAL_HOURS` 仍作为兼容回退。
 

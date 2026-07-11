@@ -375,19 +375,6 @@ export async function fetchKlinesPaged({ symbol, intervalCode, startTime, endTim
   return pageCount;
 }
 
-export async function fetchRecentKlines({ symbol, intervalCode, limit = 3 }) {
-  const safeLimit = Math.max(1, Math.min(100, Number(limit) || 3));
-  const url = new URL(`${config.binance.futuresBaseUrl}/fapi/v1/klines`);
-  url.searchParams.set("symbol", symbol);
-  url.searchParams.set("interval", intervalCode);
-  url.searchParams.set("limit", String(safeLimit));
-  const page = await fetchJson(url.toString(), `${symbol} ${intervalCode} recent klines`, {
-    weight: klineRequestWeight(safeLimit),
-    retries: config.binance.klineRequestRetries
-  });
-  return Array.isArray(page) ? page : [];
-}
-
 function normalizeFundingInfoItem(item) {
   const symbol = String(item?.symbol ?? "").toUpperCase().replace(/[^A-Z0-9_]/g, "");
   const fundingIntervalHours = Number(item?.fundingIntervalHours);

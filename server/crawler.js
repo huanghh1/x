@@ -2,10 +2,11 @@ import { discoverTargetTokens } from "./binance.js";
 import { config } from "./config.js";
 import {
   claimNextTokenForFetch,
-  cleanupInactiveTokenKlines,
+  cleanupInactiveTokens,
   countActiveTokens,
   getActiveTokenBySymbol,
   getKlineAuditReport,
+  getTokenUniverseStats,
   listKlineTailRefreshTargets,
   markTokenPartial,
   queueActiveTokensForKlineAudit,
@@ -16,7 +17,7 @@ import {
 import { INTERVALS } from "./ma.js";
 import { fetchKlineRange, intervalMs, refreshTokenInterval } from "./crawler/klineRepair.js";
 import { recomputeAndNotifyToken } from "./crawler/signalRecompute.js";
-import { normalizeCrawlerToken } from "./crawler/tokenUtils.js";
+import { normalizeCrawlerToken, validateTokenUniverseSnapshot } from "./crawler/tokenUtils.js";
 
 export {
   buildHotMaSignalAlertState,
@@ -165,6 +166,8 @@ export function setDailyAuditNextRunAt(value) {
 
 export async function initializeTokenUniverse() {
   const tokens = await discoverTargetTokens();
+  const currentStats = await getTokenUniverseStats();
+  validateTokenUniverseSnapshot(tokens, currentStats);
   const count = await upsertTokens(tokens);
   crawlerState.initializedTokens = true;
   crawlerState.tokenUniverseCount = count;
@@ -199,7 +202,7 @@ export async function runDailyKlineAudit({ syncUniverse = true } = {}) {
     }
     const [report, inactiveCleanup] = await Promise.all([
       getKlineAuditReport(config.crawler.retentionLimits),
-      cleanupInactiveTokenKlines(config.crawler.inactiveRetentionDays)
+      cleanupInactiveTokens(config.crawler.inactiveRetentionDays)
     ]);
     const deficientSymbols = [...new Set(report.deficient.map((item) => item.symbol))];
     const queuedTokenCount = await queueActiveTokensForKlineAudit(deficientSymbols);

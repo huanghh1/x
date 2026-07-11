@@ -32,7 +32,6 @@ export {
   listFundingRealtimeTokens,
   listOneHourFundingIntervals,
   listPendingFundingIntervalAlerts,
-  listTopFundingRealtimeTokens,
   markFundingIntervalAlertConfirmed,
   markFundingIntervalAlertSent,
   markFundingIntervalsMissingFromSnapshot,
@@ -79,17 +78,17 @@ export {
   priceChange24hBaselineOpenTime,
   priceChangeKlineStats,
   priceChangeKlineTarget,
-  selectPriceChange24hBaselinePrice,
   selectPriceChange24hBaselineSnapshot,
   selectPriceChange24hBaselineSnapshots,
   upsertPriceChangeKlinePage
 } from "./db/priceChangeKlineRepository.js";
 export {
   claimNextTokenForFetch,
-  cleanupInactiveTokenKlines,
+  cleanupInactiveTokens,
   countActiveTokens,
   detectKlineTailGap,
   findKlineGap,
+  getTokenUniverseStats,
   getKlines,
   getKlineAuditReport,
   isNaturalKlineHistoryShortfall,

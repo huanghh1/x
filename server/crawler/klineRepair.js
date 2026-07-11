@@ -34,6 +34,17 @@ function latestClosedKlineOpenTime(intervalCode) {
   return Math.floor(Date.now() / ms) * ms - ms;
 }
 
+export function recentKlineRefreshRange({ latestOpenTime, targetStartTime, targetEndTime, intervalMsValue }) {
+  if (latestOpenTime !== null && latestOpenTime !== undefined) {
+    const latest = Number(latestOpenTime);
+    if (Number.isFinite(latest) && latest >= targetEndTime) return null;
+    if (Number.isFinite(latest)) {
+      return { startTime: latest + intervalMsValue, endTime: targetEndTime };
+    }
+  }
+  return { startTime: targetStartTime, endTime: targetEndTime };
+}
+
 export async function fetchKlineRange({
   token,
   intervalCode,
@@ -134,17 +145,18 @@ export async function refreshTokenInterval(token, intervalCode, {
   ) {
     await markKlineAvailabilityStart(token.symbol, intervalCode, latestStats.minOpenTime);
   }
-  const recentStartTime =
-    latestStats.maxOpenTime === null
-      ? targetStartTime
-      : Math.min(Number(latestStats.maxOpenTime) + intervalMs(intervalCode), targetEndTime);
-  const recentEndTime = targetEndTime;
-  if (shouldContinue()) {
+  const recentRange = recentKlineRefreshRange({
+    latestOpenTime: latestStats.maxOpenTime,
+    targetStartTime,
+    targetEndTime,
+    intervalMsValue: intervalMs(intervalCode)
+  });
+  if (shouldContinue() && recentRange) {
     recentRows = await fetchKlineRange({
       token,
       intervalCode,
-      startTime: recentStartTime,
-      endTime: recentEndTime,
+      startTime: recentRange.startTime,
+      endTime: recentRange.endTime,
       limit: config.crawler.incrementalKlineLimit,
       action: `${token.symbol} ${intervalCode} 补最新K线`,
       shouldContinue,

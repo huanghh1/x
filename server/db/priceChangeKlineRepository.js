@@ -224,11 +224,6 @@ export async function selectPriceChange24hBaselineSnapshots(symbols = [], now = 
   return snapshots;
 }
 
-export async function selectPriceChange24hBaselinePrice(symbol, now = Date.now()) {
-  const snapshot = await selectPriceChange24hBaselineSnapshot(symbol, now);
-  return snapshot?.baselinePrice ?? null;
-}
-
 export async function cleanupPriceChangeKlineRetention({
   retentionHours = config.priceChangeKline.retentionHours,
   now = Date.now()

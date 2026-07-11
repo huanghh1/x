@@ -11,11 +11,7 @@ export function telegramState() {
       ? config.telegram.enabled
         ? "Telegram警报已启用"
         : "Telegram已配置但未启用"
-      : "缺少TELEGRAM_BOT_TOKEN或TELEGRAM_CHAT_ID",
-    routes: {
-      level1: false,
-      level2: false
-    }
+      : "缺少TELEGRAM_BOT_TOKEN或TELEGRAM_CHAT_ID"
   };
 }
 

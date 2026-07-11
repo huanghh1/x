@@ -8,6 +8,7 @@ import {
 import { cleanupRuntimeLogFiles } from "./runtimeLogs.js";
 
 const KLINE_CLEANUP_TASK = "kline_retention_cleanup";
+const EXPIRED_DATA_CLEANUP_TASK = "expired_data_cleanup";
 const RUNTIME_LOG_CLEANUP_TASK = "runtime_log_cleanup";
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -21,6 +22,15 @@ const maintenanceState = {
 };
 
 const runtimeLogCleanupState = {
+  running: false,
+  lastRunAt: null,
+  lastResult: null,
+  nextRunAt: null,
+  lastError: null,
+  timer: null
+};
+
+const expiredDataCleanupState = {
   running: false,
   lastRunAt: null,
   lastResult: null,
@@ -54,6 +64,13 @@ export function getMaintenanceRuntimeState() {
     lastResult: maintenanceState.lastResult,
     nextCheckAt: maintenanceState.nextCheckAt,
     lastError: maintenanceState.lastError,
+    expiredDataCleanup: {
+      running: expiredDataCleanupState.running,
+      lastRunAt: expiredDataCleanupState.lastRunAt,
+      lastResult: expiredDataCleanupState.lastResult,
+      nextRunAt: expiredDataCleanupState.nextRunAt,
+      lastError: expiredDataCleanupState.lastError
+    },
     runtimeLogCleanup: {
       running: runtimeLogCleanupState.running,
       lastRunAt: runtimeLogCleanupState.lastRunAt,
@@ -82,11 +99,7 @@ export async function runWeeklyKlineCleanupIfDue({ initializeOnly = false } = {}
 
   maintenanceState.running = true;
   try {
-    const [klineRetention, expiredData] = await Promise.all([
-      cleanupAllKlineRetention(config.crawler.retentionLimits),
-      cleanupExpiredData()
-    ]);
-    const result = { klineRetention, expiredData };
+    const result = { klineRetention: await cleanupAllKlineRetention(config.crawler.retentionLimits) };
     const summary = JSON.stringify(result);
     await markMaintenanceState(KLINE_CLEANUP_TASK, summary);
     const updated = await getMaintenanceState(KLINE_CLEANUP_TASK);
@@ -99,6 +112,26 @@ export async function runWeeklyKlineCleanupIfDue({ initializeOnly = false } = {}
     throw error;
   } finally {
     maintenanceState.running = false;
+  }
+}
+
+export async function runExpiredDataCleanup() {
+  if (expiredDataCleanupState.running) return expiredDataCleanupState;
+  expiredDataCleanupState.running = true;
+  try {
+    const result = await cleanupExpiredData();
+    const summary = JSON.stringify(result);
+    await markMaintenanceState(EXPIRED_DATA_CLEANUP_TASK, summary);
+    const updated = await getMaintenanceState(EXPIRED_DATA_CLEANUP_TASK);
+    expiredDataCleanupState.lastRunAt = updated?.lastRunAt ?? null;
+    expiredDataCleanupState.lastResult = updated?.lastResult ?? summary;
+    expiredDataCleanupState.lastError = null;
+    return expiredDataCleanupState;
+  } catch (error) {
+    expiredDataCleanupState.lastError = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally {
+    expiredDataCleanupState.running = false;
   }
 }
 
@@ -161,9 +194,19 @@ function scheduleNextRuntimeLogCleanup() {
   );
 }
 
+function scheduleNextExpiredDataCleanup() {
+  scheduleIntervalCleanup(
+    expiredDataCleanupState,
+    runExpiredDataCleanup,
+    hoursToMs(config.maintenance.expiredDataCleanupIntervalHours, 6)
+  );
+}
+
 export async function startMaintenanceScheduler() {
   await runWeeklyKlineCleanupIfDue({ initializeOnly: true });
+  await loadCleanupState(EXPIRED_DATA_CLEANUP_TASK, expiredDataCleanupState);
   await loadCleanupState(RUNTIME_LOG_CLEANUP_TASK, runtimeLogCleanupState);
+  scheduleNextExpiredDataCleanup();
   scheduleNextRuntimeLogCleanup();
   const tick = async () => {
     maintenanceState.nextCheckAt = new Date(Date.now() + config.maintenance.checkIntervalMs).toISOString();

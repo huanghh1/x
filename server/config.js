@@ -186,7 +186,7 @@ export const config = {
     tailRefreshEnabled: boolEnv("KLINE_TAIL_REFRESH_ENABLED", true),
     tailRefreshLimit: Math.max(1, numberEnv("KLINE_TAIL_REFRESH_LIMIT", 2500)),
     tailRefreshKlineLimit: Math.max(2, Math.min(100, numberEnv("KLINE_TAIL_REFRESH_REQUEST_LIMIT", 20))),
-    recoveryAuditMs: Math.max(5 * 60 * 1000, numberEnv("KLINE_RECOVERY_AUDIT_MS", 10 * 60 * 1000)),
+    recoveryAuditMs: Math.max(60 * 60 * 1000, numberEnv("KLINE_RECOVERY_AUDIT_MS", 6 * 60 * 60 * 1000)),
     maxGapRepairPasses: Math.max(25, Math.min(500, numberEnv("KLINE_MAX_GAP_REPAIR_PASSES", 120))),
     onDemandMaxGapRepairPasses: Math.max(25, Math.min(1000, numberEnv("KLINE_ON_DEMAND_MAX_GAP_REPAIR_PASSES", 300))),
     tokenUniverseSyncMs: numberEnv("TOKEN_UNIVERSE_SYNC_MS", 6 * 60 * 60 * 1000),
@@ -215,6 +215,7 @@ export const config = {
     deleteBatchSize: numberEnv("MAINTENANCE_DELETE_BATCH_SIZE", 5000),
     hotRankRetentionDays: numberEnv("HOT_RANK_RETENTION_DAYS", 7),
     ioRetentionDays: numberEnv("IO_RETENTION_DAYS", 7),
+    expiredDataCleanupIntervalHours: Math.max(1, numberEnv("EXPIRED_DATA_CLEANUP_INTERVAL_HOURS", 6)),
     runtimeLogCleanupIntervalHours: Math.max(
       1,
       numberEnv("RUNTIME_LOG_CLEANUP_INTERVAL_HOURS", numberEnv("RECORD_CLEANUP_INTERVAL_HOURS", 4))
