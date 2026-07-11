@@ -4,8 +4,11 @@ import { chartElementId, loadAndRenderChart } from "../chart/klineChart.js";
 import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
 import { clamp, cssEscape, formatNumber, formatPercent, formatTime, oiChangeSummary } from "../utils/format.js";
-import { sortSignalRowsByPriceChange } from "../utils/signalSort.js";
+import { signalPriceChangePage } from "../utils/signalSort.js";
 import { bindCopyButtons, searchButtons } from "../ui/symbolActions.js";
+
+const SIGNAL_PRICE_CHANGE_SORT_REFRESH_MS = 80;
+let signalPriceChangeSortRefreshTimer = null;
 
 let deps = {
   bindWatchButtons: () => {},
@@ -103,10 +106,26 @@ function clampPage(totalPages) {
 }
 
 function applySignalPriceChangeSort() {
-  if (!state.signalPriceChangeSort || !state.signalRealtimeRows.length) return;
-  const sortedRows = sortSignalRowsByPriceChange(state.signalRealtimeRows, state.signalPriceChangeSort);
-  const start = (state.page - 1) * state.pageSize;
-  state.signals = sortedRows.slice(start, start + state.pageSize);
+  if (!state.signalPriceChangeSort || !state.signalRealtimeRows.length) return false;
+  const nextRows = signalPriceChangePage(
+    state.signalRealtimeRows,
+    state.signalPriceChangeSort,
+    state.page,
+    state.pageSize
+  );
+  const orderChanged = nextRows.length !== state.signals.length || nextRows.some(
+    (row, index) => rowKey(row) !== rowKey(state.signals[index])
+  );
+  state.signals = nextRows;
+  return orderChanged;
+}
+
+function scheduleSignalPriceChangeSortRefresh() {
+  if (!state.signalPriceChangeSort || signalPriceChangeSortRefreshTimer) return;
+  signalPriceChangeSortRefreshTimer = setTimeout(() => {
+    signalPriceChangeSortRefreshTimer = null;
+    if (applySignalPriceChangeSort()) renderSignals();
+  }, SIGNAL_PRICE_CHANGE_SORT_REFRESH_MS);
 }
 
 function updateSignalPriceChangeSortControl() {
@@ -396,6 +415,7 @@ export function updateSignalPriceChangeDom(symbol, priceChange24hPct) {
     element.classList.toggle("up", numericChange > 0);
     element.classList.toggle("down", numericChange < 0);
   }
+  scheduleSignalPriceChangeSortRefresh();
 }
 
 export function bindSignalControls({ refreshAll } = {}) {

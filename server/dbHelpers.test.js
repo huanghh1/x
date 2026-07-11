@@ -6,6 +6,7 @@ import {
   isNaturalKlineHistoryShortfall,
   normalizeFundingIntervalSnapshotItems,
   normalizeHotRankSeenTokens,
+  normalizeOpenInterestCategories,
   normalizeOptionalLimit,
   selectOpenInterestSampleBaselines,
   summarizeTokenKlineCompletion
@@ -40,6 +41,12 @@ test("optional query limits keep null unbounded instead of coercing it to LIMIT 
   assert.equal(normalizeOptionalLimit("20"), 20);
   assert.equal(normalizeOptionalLimit(0), 1);
   assert.equal(normalizeOptionalLimit(999, 500), 500);
+});
+
+test("OI category filters keep only supported token categories", () => {
+  assert.deepEqual(normalizeOpenInterestCategories(undefined), ["A", "B"]);
+  assert.deepEqual(normalizeOpenInterestCategories("B,A,B,bad"), ["B", "A"]);
+  assert.deepEqual(normalizeOpenInterestCategories(""), []);
 });
 
 test("hot rank seen rows are deduped by symbol before database upsert", () => {

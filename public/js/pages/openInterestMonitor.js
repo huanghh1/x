@@ -1,5 +1,5 @@
 import { api } from "../api.js";
-import { OI_REALTIME_WINDOWS } from "../constants.js";
+import { LABELS, OI_REALTIME_WINDOWS } from "../constants.js";
 import { state } from "../state.js";
 import { $, escapeHtml, setText } from "../utils/dom.js";
 import {
@@ -42,6 +42,7 @@ export async function loadIOMonitoring() {
     const params = new URLSearchParams({
       timeWindow: state.ioWindow,
       sort: state.ioSort,
+      categories: Array.from(state.ioCategories).join(","),
       page: String(state.ioPage),
       pageSize: String(state.ioPageSize)
     });
@@ -73,6 +74,7 @@ async function loadIORealtimeRows() {
     const params = new URLSearchParams({
       timeWindow,
       sort: "desc",
+      categories: Array.from(state.ioCategories).join(","),
       page: "1",
       pageSize: "5"
     });
@@ -163,6 +165,7 @@ export function renderIOMonitoring() {
   const statusParts = [
     `${state.ioWindow} 变化率`,
     state.ioSort === "desc" ? "从高到低" : "从低到高",
+    summarizeIoCategories(),
     `${state.ioTotal} 个代币`
   ];
   if (state.ioMonitor?.running) statusParts.push("扫描中");
@@ -214,6 +217,10 @@ function updateIoControls() {
   document.querySelectorAll("[data-io-sort]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.ioSort === state.ioSort);
   });
+  document.querySelectorAll("[data-io-category]").forEach((input) => {
+    input.checked = state.ioCategories.has(input.dataset.ioCategory);
+  });
+  setText("#ioCategoryFilterSummary", summarizeIoCategories());
   const refresh = $("#refreshIoBtn");
   if (refresh) {
     refresh.disabled = state.ioLoading;
@@ -224,6 +231,13 @@ function updateIoControls() {
     scan.disabled = state.ioLoading || state.ioScanning;
     scan.textContent = state.ioScanning ? "扫描中" : "立即扫描";
   }
+}
+
+function summarizeIoCategories() {
+  if (!state.ioCategories.size) return "未选择分类";
+  return Array.from(state.ioCategories)
+    .map((category) => LABELS.category[category] ?? category)
+    .join("、");
 }
 
 function updateIoPagination() {
@@ -240,6 +254,16 @@ function updateIoPagination() {
 }
 
 export function bindOpenInterestControls() {
+  document.querySelectorAll("[data-io-category]").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) state.ioCategories.add(input.dataset.ioCategory);
+      else state.ioCategories.delete(input.dataset.ioCategory);
+      state.ioPage = 1;
+      state.ioExpandedSymbol = null;
+      loadIOMonitoring();
+    });
+  });
+
   document.querySelectorAll("[data-io-window]").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.ioWindow = btn.dataset.ioWindow;

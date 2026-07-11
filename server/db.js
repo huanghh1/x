@@ -49,6 +49,7 @@ export {
   listOpenInterestScanTokens,
   listTopOpenInterestRealtimeTokens,
   markOpenInterestSpikeAlertSent,
+  normalizeOpenInterestCategories,
   normalizeOptionalLimit,
   selectOpenInterestSampleBaselines,
   upsertOpenInterestSamples,

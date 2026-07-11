@@ -69,6 +69,7 @@ export const state = {
   ioScanning: false,
   ioWindow: "5m",
   ioSort: "desc",
+  ioCategories: new Set(ALL_CATEGORIES),
   ioExpandedSymbol: null,
   ioChartInterval: "15m",
   runtimeLogs: [],

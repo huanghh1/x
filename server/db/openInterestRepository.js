@@ -11,6 +11,21 @@ function openInterestActiveSeconds() {
   return Math.max(60, Math.floor(config.openInterestMonitor.activeMs / 1000));
 }
 
+const OPEN_INTEREST_CATEGORIES = new Set(["A", "B"]);
+
+export function normalizeOpenInterestCategories(categories) {
+  if (categories === undefined || categories === null) return [...OPEN_INTEREST_CATEGORIES];
+  const values = Array.isArray(categories) ? categories : String(categories).split(",");
+  return [...new Set(values.map((value) => String(value).trim().toUpperCase()))]
+    .filter((value) => OPEN_INTEREST_CATEGORIES.has(value));
+}
+
+function openInterestCategorySql(categories, tokenAlias = "t") {
+  const safeCategories = normalizeOpenInterestCategories(categories);
+  if (!safeCategories.length) return "0";
+  return `${tokenAlias}.category_type IN (${safeCategories.map((category) => `'${category}'`).join(",")})`;
+}
+
 function hotRankTokenMatchSql(hotAlias, tokenAlias) {
   return `(
     ${hotAlias}.symbol=${tokenAlias}.symbol
@@ -435,6 +450,7 @@ export async function listOpenInterestMonitor({ timeWindow = "5m", sort = "desc"
 export async function listOpenInterestMonitorPage({
   timeWindow = "5m",
   sort = "desc",
+  categories,
   page = 1,
   pageSize = 20
 } = {}) {
@@ -442,11 +458,13 @@ export async function listOpenInterestMonitorPage({
   const safePageSize = Math.max(1, Math.min(100, Number(pageSize) || 20));
   const column = oiChangeColumn(timeWindow);
   const direction = sort === "asc" ? "ASC" : "DESC";
+  const categorySql = openInterestCategorySql(categories);
   const [countRows] = await getPool().query(
     `SELECT COUNT(*) AS total
      FROM open_interest_monitor oi
      JOIN token_list t ON t.symbol=oi.symbol AND t.is_active=1
-     WHERE oi.${column} IS NOT NULL`
+     WHERE oi.${column} IS NOT NULL
+       AND ${categorySql}`
   );
   const total = Number(countRows[0]?.total ?? 0);
   const totalPages = Math.max(1, Math.ceil(total / safePageSize));
@@ -510,6 +528,7 @@ export async function listOpenInterestMonitorPage({
      FROM open_interest_monitor oi
      JOIN token_list t ON t.symbol=oi.symbol AND t.is_active=1
      WHERE oi.${column} IS NOT NULL
+       AND ${categorySql}
      ORDER BY oi.${column} ${direction}, oi.observed_at DESC, oi.symbol
      LIMIT :pageSize OFFSET :offset`,
     params

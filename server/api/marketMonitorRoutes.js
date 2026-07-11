@@ -84,6 +84,7 @@ export function createMarketMonitorRoutes({ requireLocalMutation }) {
       const page = await listOpenInterestMonitorPage({
         timeWindow,
         sort,
+        categories: request.query.categories,
         page: request.query.page,
         pageSize: request.query.pageSize
       });
@@ -94,6 +95,7 @@ export function createMarketMonitorRoutes({ requireLocalMutation }) {
         data: await enrichRowsWithMarketMetadata(page.data),
         timeWindow,
         sort,
+        categories: request.query.categories ?? "A,B",
         monitor: mergeOpenInterestMonitorQueueState(scheduler?.openInterestMonitor, scheduler?.telegramAlertQueue)
       });
     } catch (error) {

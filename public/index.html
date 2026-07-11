@@ -253,6 +253,13 @@
               <button id="refreshIoBtn" class="ghost-button" type="button">刷新数据</button>
             </div>
           </div>
+          <div class="filter-panel io-filter-panel" aria-label="OI代币筛选">
+            <details class="filter-menu">
+              <summary>分类 <b id="ioCategoryFilterSummary">A类、B类</b></summary>
+              <label><input type="checkbox" data-io-category="A" checked /> A类 Alpha合约无现货</label>
+              <label><input type="checkbox" data-io-category="B" checked /> B类 现货+合约</label>
+            </details>
+          </div>
           <div class="heat-rank-status" id="ioStatus">等待首次扫描</div>
 
           <div id="ioRows">

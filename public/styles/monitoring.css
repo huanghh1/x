@@ -61,6 +61,10 @@ main,
   justify-content: flex-start;
 }
 
+.io-filter-panel {
+  padding: 0;
+}
+
 .symbol-cell.compact {
   min-width: 0;
   flex-wrap: nowrap;
