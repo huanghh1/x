@@ -1,5 +1,5 @@
 import { api } from "./js/api.js";
-import { initMarketAlertSounds } from "./js/alerts/marketAlertSound.js?v=20260712-7";
+import { initMarketAlertSounds } from "./js/alerts/marketAlertSound.js?v=20260712-8";
 import { ALL_INTERVALS } from "./js/constants.js";
 import { enhanceCustomSelects, syncCustomSelect } from "./js/components/customSelect.js";
 import { state } from "./js/state.js";

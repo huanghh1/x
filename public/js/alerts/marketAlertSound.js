@@ -4,22 +4,19 @@ const LEGACY_STORAGE_KEYS = [
   "signal-monitor:oi-alert-sound-enabled:v1",
   "signal-monitor:funding-alert-sound-enabled:v1"
 ];
-const ALERT_POLL_MS = 15 * 1000;
+const ALERT_POLL_MS = 1000;
 
 export function marketAlertSnapshot(payload = {}) {
   const snapshot = new Map();
   for (const row of payload.oiAlerts ?? []) {
     const symbol = String(row?.symbol ?? "").trim().toUpperCase();
     if (!symbol) continue;
-    for (const window of row.windows ?? []) {
-      const safeWindow = String(window ?? "").trim();
-      if (!safeWindow) continue;
-      snapshot.set(`OI|${symbol}|${safeWindow}`, {
-        type: "OI",
-        symbol,
-        window: safeWindow
-      });
-    }
+    snapshot.set(`OI|${symbol}`, {
+      type: "OI",
+      symbol,
+      window: (row.windows ?? []).join(" / "),
+      eventVersion: String(row.eventVersion ?? row.alertedAt ?? "")
+    });
   }
   for (const row of payload.fundingAlerts ?? []) {
     const symbol = String(row?.symbol ?? "").trim().toUpperCase();
@@ -27,7 +24,8 @@ export function marketAlertSnapshot(payload = {}) {
     snapshot.set(`FUNDING|${symbol}`, {
       type: "FUNDING",
       symbol,
-      currentFundingRate: row.currentFundingRate ?? null
+      currentFundingRate: row.currentFundingRate ?? null,
+      eventVersion: String(row.eventVersion ?? row.alertedAt ?? row.alertCount ?? "")
     });
   }
   return snapshot;
@@ -36,7 +34,10 @@ export function marketAlertSnapshot(payload = {}) {
 export function findNewMarketAlerts(previous, current) {
   if (!(previous instanceof Map)) return [];
   return Array.from(current.entries())
-    .filter(([key]) => !previous.has(key))
+    .filter(([key, alert]) => {
+      const previousAlert = previous.get(key);
+      return !previousAlert || previousAlert.eventVersion !== alert.eventVersion;
+    })
     .map(([, alert]) => alert);
 }
 

@@ -139,6 +139,7 @@ async function sendPendingFundingIntervalAlerts({ recordState = true } = {}) {
     const results = await mapLimit(pendingAlerts, config.fundingMonitor.alertConcurrency, async (alert) => {
       const context = await getSignalCorrelationContext(alert.symbol);
       const result = await sendFundingIntervalTelegram(alert, context);
+      if (!result.skipped) await markFundingIntervalAlertSent(alert.symbol);
       return { alert, result };
     });
     for (const [index, settled] of results.entries()) {
@@ -155,8 +156,6 @@ async function sendPendingFundingIntervalAlerts({ recordState = true } = {}) {
         sentSymbols.push(alert.symbol);
       }
     }
-
-    if (sentSymbols.length) await markFundingIntervalAlertSent(sentSymbols);
 
     fundingMonitorState.lastAlertSuccessAt = isoNow();
     fundingMonitorState.lastPendingCount = pendingAlerts.length;
