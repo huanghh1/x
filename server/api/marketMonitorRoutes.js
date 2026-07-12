@@ -2,6 +2,7 @@ import express from "express";
 import {
   addWatchlistItemsIfMissing,
   deleteAutoWatchlistItemsMissingFrom,
+  listBrowserAlertStates,
   listOneHourFundingIntervals,
   listOpenInterestMonitorPage
 } from "../db.js";
@@ -30,6 +31,15 @@ function refreshFundingWatchlistDependents({ refreshUnlocks = false } = {}) {
 
 export function createMarketMonitorRoutes({ requireLocalMutation }) {
   const router = express.Router();
+
+  router.get("/api/browser-alerts", async (_request, response) => {
+    try {
+      response.json({ ok: true, ...(await listBrowserAlertStates()), generatedAt: new Date().toISOString() });
+    } catch (error) {
+      console.error("get browser alerts failed", error);
+      response.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
 
   router.post("/api/funding-interval/check", requireLocalMutation, async (_request, response) => {
     try {

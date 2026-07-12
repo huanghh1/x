@@ -1,4 +1,5 @@
 import { api } from "./js/api.js";
+import { initMarketAlertSounds } from "./js/alerts/marketAlertSound.js?v=20260712-7";
 import { ALL_INTERVALS } from "./js/constants.js";
 import { enhanceCustomSelects, syncCustomSelect } from "./js/components/customSelect.js";
 import { state } from "./js/state.js";
@@ -469,6 +470,7 @@ function scheduleVisiblePoll(label, intervalMs, callback) {
 }
 
 enhanceCustomSelects();
+initMarketAlertSounds({ api, button: $("#marketSoundAlertBtn") });
 bindHotRankControls();
 bindFundingControls();
 bindOpenInterestControls();

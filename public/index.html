@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/tokens.css?v=20260614-1" />
-    <link rel="stylesheet" href="/styles.css?v=20260709-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260712-2" />
   </head>
   <body>
     <header class="app-nav">
@@ -46,7 +46,10 @@
         <div class="pool-switch" aria-label="signal pool navigation">
           <div class="pool-head">
             <strong>监控概览</strong>
-            <span>每 5 秒自动刷新</span>
+            <div class="pool-head-actions">
+              <span>网页打开期间持续监控</span>
+              <button id="marketSoundAlertBtn" class="ghost-button sound-alert-button" type="button" aria-pressed="false">警报声音：关</button>
+            </div>
           </div>
           <nav>
             <div class="pool-item"><span>总监控币种</span><b id="totalTokens">--</b></div>
@@ -634,6 +637,6 @@
         <span>点击交易对可展开数据库全部 K 线；新币不足 200 根时不会生成虚假的 MA200。</span>
       </footer>
     </div>
-    <script src="/app.js?v=20260709-1" type="module"></script>
+    <script src="/app.js?v=20260712-7" type="module"></script>
   </body>
 </html>

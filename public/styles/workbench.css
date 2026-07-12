@@ -124,6 +124,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .pool-switch { overflow: hidden; }
 .pool-head { display: flex; justify-content: space-between; padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--line); }
+.pool-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.pool-head-actions .sound-alert-button { min-height: 32px; }
 .pool-head span, .section-head p, .heat-rank-status { color: var(--ink-muted); }
 .pool-switch nav { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow: visible; }
 .pool-item { min-width: 0; padding: var(--space-5); border-right: 1px solid var(--line); color: var(--ink); background: var(--surface-raised); }
@@ -409,6 +411,8 @@ td.mono span { display: block; white-space: nowrap; }
   .hero { padding-top: 32px; }
   .hero h1 { font-size: 40px; }
   .section { padding: 16px; }
+  .pool-head { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .pool-head-actions { justify-content: flex-start; }
   .pool-switch nav, .stat-strip { grid-template-columns: 1fr; }
   .watch-settings { grid-template-columns: 1fr; }
   .heat-rank-row { grid-template-columns: 34px minmax(0, 1fr); }

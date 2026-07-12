@@ -22,6 +22,28 @@ main,
   padding-block: 12px;
 }
 
+.sound-alert-button.active {
+  border-color: var(--positive);
+  color: var(--positive);
+  background: color-mix(in oklch, var(--positive) 10%, var(--surface-raised));
+}
+
+.sound-alert-button.is-pending {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.sound-alert-button.is-ringing {
+  animation: sound-alert-ring 400ms ease-in-out 3;
+}
+
+@keyframes sound-alert-ring {
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklch, var(--negative) 18%, transparent);
+    transform: translateY(-1px);
+  }
+}
+
 .symbol-cell {
   min-width: 350px;
   max-width: none;
